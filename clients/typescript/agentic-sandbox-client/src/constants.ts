@@ -32,6 +32,14 @@ export const CLEANUP_TIMEOUT_MS = 5_000;
 export const DEFAULT_SANDBOXD_REST_PORT = 8080;
 export const DEFAULT_SANDBOXD_GRPC_PORT = 9090;
 
+// sandbox-router's HTTP listener; "router-port-forward" port-forwards it.
+export const ROUTER_PROXY_PORT = 8080;
+
+// Service name and label selector used to find a ready router pod through
+// its EndpointSlices. Mirrors the Go client's resolveRouterPod.
+export const ROUTER_SERVICE_NAME = "sandbox-router-svc";
+export const ROUTER_SERVICE_LABEL_SELECTOR = `kubernetes.io/service-name=${ROUTER_SERVICE_NAME}`;
+
 // Budget for the shared connect (both port-forward listeners + REST health
 // check) and for each individual WS handshake within it. Re-applied in full
 // to every reconnect attempt.
@@ -47,6 +55,12 @@ export const DEFAULT_MAX_COMMAND_OUTPUT_SIZE = 4 * 1024 * 1024;
 // Per-call default for files/run operations, covering the whole call —
 // dependency import, connect wait, and response processing.
 export const DEFAULT_OPERATION_TIMEOUT_MS = 60_000;
+
+// Default budget for suspend() and resume(), matching the Go and Python SDKs.
+export const DEFAULT_LIFECYCLE_TIMEOUT_MS = 180_000;
+
+// How often suspend() and resume() re-read the Sandbox while they wait.
+export const LIFECYCLE_POLL_INTERVAL_MS = 500;
 
 // A single WriteStdin RPC carries at most this many bytes; larger writes are
 // split into sequential chunks. sandboxd's gRPC server rejects messages over
@@ -94,8 +108,10 @@ export const TUNNEL_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
 // extensions/controllers/sandboxclaim_controller.go). Watch-based ready-waits
 // fail fast on these instead of burning the full timeout. Transient reasons
 // (AdoptionPending, SandboxMissing, SandboxNotReady, ReconcilerError) are
-// intentionally absent: the controller retries those. Kept in sync with the
-// Python SDK's TERMINAL_CLAIM_READY_REASONS.
+// intentionally absent: the controller retries those. PodTerminating is also
+// absent: it is transient while the Pod is being deleted, and the outcome is
+// on the Finished condition. Kept in sync with the Python SDK's
+// TERMINAL_CLAIM_READY_REASONS.
 export const TERMINAL_CLAIM_READY_REASONS: ReadonlySet<string> = new Set([
   "InvalidMetadata",
   "EnvVarsInjectionRejected",

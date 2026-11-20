@@ -137,13 +137,15 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 
 	c.mu.Lock()
 	existing := c.registry[key]
-	if existing != nil && existing.IsReady() {
+	if existing != nil && (existing.IsReady() || existing.suspendedLocally()) {
 		c.mu.Unlock()
 		return existing, nil
 	}
 	// Evict stale handle atomically: we already know existing is nil or
-	// not-ready, and no concurrent caller can have changed it since we
-	// still hold the lock.
+	// neither ready nor suspended, and no concurrent caller can have
+	// changed it since we still hold the lock. A suspended handle is not
+	// stale: re-attaching through Open would fail because the sandbox has
+	// no pod, and the caller can Resume the returned handle instead.
 	if existing != nil {
 		delete(c.registry, key)
 	}
@@ -216,7 +218,9 @@ func (c *Client) ListActiveSandboxes() []Key {
 
 	active := make([]Key, 0, len(c.registry))
 	for key, sb := range c.registry {
-		if !sb.IsReady() {
+		// Keep suspended handles: pruning them would make DeleteAll miss
+		// their claims.
+		if !sb.IsReady() && !sb.suspendedLocally() {
 			delete(c.registry, key)
 			continue
 		}

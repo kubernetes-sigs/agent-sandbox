@@ -16,10 +16,11 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import contextlib
 import inspect
+import json
 
 import pytest
 import pytest_asyncio
@@ -31,7 +32,12 @@ from k8s_agent_sandbox import constants as C
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.sandbox_client import SandboxClient
 from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
-from k8s_agent_sandbox.exceptions import SandboxNotFoundError
+from k8s_agent_sandbox.exceptions import (
+    SandboxClaimFailedError,
+    SandboxNotFoundError,
+    SandboxTemplateNotFoundError,
+    SandboxWarmPoolNotFoundError,
+)
 from k8s_agent_sandbox.gke_extensions.snapshots.podsnapshot_client import PodSnapshotSandboxClient
 
 
@@ -45,6 +51,12 @@ def merge_patch(target, patch_body):
             target[key] = deepcopy(value)
 
 
+def conflict(reason):
+    error = ApiException(status=409)
+    error.body = json.dumps({'kind': 'Status', 'code': 409, 'reason': reason})
+    return error
+
+
 class MemoryApi:
     def __init__(self):
         self.objects = {}
@@ -56,7 +68,7 @@ class MemoryApi:
         name = body['metadata']['name']
         key = (plural, namespace, name)
         if key in self.objects:
-            raise ApiException(status=409)
+            raise conflict('AlreadyExists')
         obj = deepcopy(body)
         obj['metadata'].update(namespace=namespace, uid=f'uid-{name}', resourceVersion='10', generation=1)
         if plural == C.CLAIM_PLURAL_NAME:
@@ -237,7 +249,9 @@ async def sdk_client(request, environment):
             try:
                 return getattr(api, name)(**kwargs)
             except ApiException as error:
-                raise AsyncApiException(status=error.status) from error
+                converted = AsyncApiException(status=error.status)
+                converted.body = error.body
+                raise converted from error
         return call
 
     class AsyncWatch:
@@ -420,6 +434,54 @@ async def test_claim_ready_wait_current_generation_still_requires_ready_and_bind
             )
 
 
+TERMINAL_CLAIM_FAILURES = [
+    ('InvalidMetadata', SandboxClaimFailedError),
+    ('TemplateNotFound', SandboxTemplateNotFoundError),
+    ('WarmPoolNotFound', SandboxWarmPoolNotFoundError),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', [reason for reason, _ in TERMINAL_CLAIM_FAILURES])
+@pytest.mark.parametrize('options', [{}, {'require_current_generation': True}])
+async def test_claim_ready_wait_ignores_failure_from_older_generation(sdk_client, reason, options):
+    api, client, _ = sdk_client
+    initial = seed_claim(api)
+    initial['metadata']['generation'] = 2
+    initial['status']['conditions'][0].update(status='False', reason=reason, observedGeneration=1)
+    current = deepcopy(initial)
+    current['metadata']['resourceVersion'] = '11'
+    current['status']['conditions'][0].update(status='True', reason='Ready', observedGeneration=2)
+    with patch.object(api, 'list_namespaced_custom_object', side_effect=[{'items': [current]}]):
+        name = await invoke(
+            client.k8s_helper.wait_for_claim_ready, 'workflow-a', 'default', 5,
+            resource_version='10', expected_uid=initial['metadata']['uid'],
+            initial_claim=initial, **options,
+        )
+    assert name == 'sandbox-a'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason,error', TERMINAL_CLAIM_FAILURES)
+@pytest.mark.parametrize('observed_generation', [2, None])
+async def test_claim_ready_wait_fails_fast_on_current_generation_failure(
+        sdk_client, reason, error, observed_generation):
+    api, client, _ = sdk_client
+    initial = seed_claim(api)
+    initial['metadata']['generation'] = 2
+    ready = initial['status']['conditions'][0]
+    ready.update(status='False', reason=reason, observedGeneration=observed_generation)
+    if observed_generation is None:
+        ready.pop('observedGeneration')
+    with patch.object(api, 'list_namespaced_custom_object', side_effect=AssertionError('no future events')):
+        with pytest.raises(error):
+            await invoke(
+                client.k8s_helper.wait_for_claim_ready, 'workflow-a', 'default', 5,
+                expected_uid=initial['metadata']['uid'], initial_claim=initial,
+                require_current_generation=True,
+            )
+
+
 @pytest.mark.asyncio
 async def test_name_resolution_does_not_require_current_generation(sdk_client):
     api, client, _ = sdk_client
@@ -494,9 +556,21 @@ async def test_incompatible_claim_is_not_adopted_or_deleted(sdk_client, mismatch
 
 
 @pytest.mark.asyncio
+async def test_non_already_exists_conflict_is_not_adopted(sdk_client):
+    api, client, _ = sdk_client
+    with patch.object(api, 'create_namespaced_custom_object', side_effect=conflict('Conflict')):
+        with patch.object(api, 'get_namespaced_custom_object') as get:
+            with pytest.raises((ApiException, AsyncApiException)) as raised:
+                await invoke(client.create_sandbox, 'pool-a', claim_name='workflow-a', adopt_existing=True)
+    assert raised.value.status == 409
+    get.assert_not_called()
+    assert api.deletes == []
+
+
+@pytest.mark.asyncio
 async def test_disappearing_claim_after_conflict_is_retryable(sdk_client):
     api, client, _ = sdk_client
-    with patch.object(api, 'create_namespaced_custom_object', side_effect=ApiException(status=409)):
+    with patch.object(api, 'create_namespaced_custom_object', side_effect=conflict('AlreadyExists')):
         with pytest.raises(SandboxNotFoundError, match='retry'):
             await invoke(client.create_sandbox, 'pool-a', claim_name='workflow-a', adopt_existing=True)
     assert api.deletes == []
@@ -541,7 +615,7 @@ async def test_failed_readiness_preserves_explicit_claim(sdk_client):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('claim_name', [None, 'workflow-a'])
-@pytest.mark.parametrize('failure', ['WarmPoolNotFound', 'watch-429'])
+@pytest.mark.parametrize('failure', ['WarmPoolNotFound', 'apiserver-429'])
 async def test_failed_lookup_never_deletes_claim(sdk_client, claim_name, failure):
     api, client, register = sdk_client
     sandbox = await invoke(client.create_sandbox, 'pool-a', claim_name=claim_name)
@@ -552,13 +626,41 @@ async def test_failed_lookup_never_deletes_claim(sdk_client, claim_name, failure
         ]
         lookup_failure = contextlib.nullcontext()
     else:
-        lookup_failure = patch.object(api, 'list_namespaced_custom_object', side_effect=ApiException(status=429))
+        throttled = MagicMock(side_effect=ApiException(status=429))
+        lookup_failure = patch.multiple(api, list_namespaced_custom_object=throttled, get_namespaced_custom_object=throttled)
     with lookup_failure, pytest.raises(SandboxNotFoundError):
         await invoke(client.get_sandbox, sandbox.claim_name)
     assert api.deletes == []
-    assert not sandbox.is_active
+    assert sandbox.is_active
     register.call_args.args[0]()
     assert api.remaining(C.CLAIM_PLURAL_NAME) == ([] if claim_name is None else [key])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('gone', ['claim', 'sandbox'])
+async def test_failed_lookup_closes_handle_once_claim_or_sandbox_is_gone(sdk_client, gone):
+    api, client, _ = sdk_client
+    sandbox = await invoke(client.create_sandbox, 'pool-a')
+    claim_key = (C.CLAIM_PLURAL_NAME, 'default', sandbox.claim_name)
+    if gone == 'claim':
+        api.objects.pop(claim_key)
+    else:
+        # A Retain-policy expiry deletes the Sandbox but keeps the claim.
+        api.objects.pop((C.SANDBOX_PLURAL_NAME, 'default', sandbox.sandbox_id))
+        api.objects[claim_key]['status'] = {'sandbox': {}, 'conditions': [
+            {'type': 'Ready', 'status': 'False', 'reason': 'ClaimExpired'}]}
+    with pytest.raises(SandboxNotFoundError):
+        await invoke(client.get_sandbox, sandbox.claim_name)
+    assert not sandbox.is_active
+    assert api.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_lookup_of_a_missing_claim_fails_without_watching(sdk_client):
+    api, client, _ = sdk_client
+    with patch.object(api, 'list_namespaced_custom_object') as watch, pytest.raises(SandboxNotFoundError):
+        await invoke(client.get_sandbox, 'does-not-exist', resolve_timeout=1)
+    watch.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -688,3 +790,18 @@ async def test_generated_rollback_with_known_uid_does_not_delete_a_replacement(s
             await invoke(client.create_sandbox, 'pool-a')
     assert len(await invoke(client.list_all_sandboxes)) == 1
     assert api.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_ttl_seconds_after_finished_without_shutdown_time(sdk_client):
+    api, client, _ = sdk_client
+    span = MagicMock()
+    span.is_recording.return_value = True
+    with patch('k8s_agent_sandbox.trace_manager.trace.get_current_span', return_value=span), \
+            patch.object(api, 'create_namespaced_custom_object', wraps=api.create_namespaced_custom_object) as create:
+        await invoke(client.create_sandbox, 'pool-a', shutdown_policy='Retain', ttl_seconds_after_finished=60)
+    assert create.call_args.kwargs['body']['spec']['lifecycle'] == {
+        'shutdownPolicy': 'Retain', 'ttlSecondsAfterFinished': 60,
+    }
+    assert not any(call.args[0] == 'sandbox.lifecycle.shutdown_time'
+                   for call in span.set_attribute.call_args_list)

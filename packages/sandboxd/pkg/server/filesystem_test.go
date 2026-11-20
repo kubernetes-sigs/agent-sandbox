@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
@@ -85,6 +86,85 @@ func TestPutThenGetFileRoundTrip(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "application/octet-stream", rec.Header().Get("Content-Type"))
 	require.Equal(t, "payload", rec.Body.String())
+}
+
+// TestFileTransfersRejectNamedPipes verifies that transfers finish without a FIFO
+// peer and leave the pipe empty when a reader is already present.
+func TestFileTransfersRejectNamedPipes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		query  string
+		reader bool
+	}{
+		{name: "get", method: http.MethodGet},
+		{name: "head", method: http.MethodHead},
+		{name: "stat", method: http.MethodGet, query: "?stat=true"},
+		{name: "append without reader", method: http.MethodPut, query: "?append=true"},
+		{name: "append with reader", method: http.MethodPut, query: "?append=true", reader: true},
+	} {
+		for _, symlink := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/symlink=%t", tc.name, symlink), func(t *testing.T) {
+				_, handler, root := newRESTFixture(t)
+				pipePath := filepath.Join(root, "pipe")
+				require.NoError(t, syscall.Mkfifo(pipePath, 0o600))
+				path := "pipe"
+				if symlink {
+					require.NoError(t, os.Symlink("pipe", filepath.Join(root, "link")))
+					path = "link"
+				}
+				var reader *os.File
+				if tc.reader {
+					var err error
+					reader, err = os.OpenFile(pipePath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+					require.NoError(t, err)
+					t.Cleanup(func() { _ = reader.Close() })
+				}
+
+				finished := make(chan struct{})
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					defer close(finished)
+					handler.ServeHTTP(w, r)
+				}))
+				t.Cleanup(func() {
+					// Release a blocking open on a regression so server cleanup
+					// can finish even when the request's deadline did not help.
+					peer, err := os.OpenFile(pipePath, os.O_RDWR|syscall.O_NONBLOCK, 0)
+					if err == nil {
+						defer func() { _ = peer.Close() }()
+					}
+					srv.Close()
+				})
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				req, err := http.NewRequestWithContext(ctx, tc.method, srv.URL+"/v1/files/"+path+tc.query, strings.NewReader("payload"))
+				require.NoError(t, err)
+				response, err := srv.Client().Do(req)
+				require.NoError(t, err, "file requests must complete without waiting for a FIFO peer")
+				defer func() { _ = response.Body.Close() }()
+				require.Equal(t, http.StatusBadRequest, response.StatusCode)
+				if tc.method != http.MethodHead {
+					var apiErr APIError
+					require.NoError(t, json.NewDecoder(response.Body).Decode(&apiErr))
+					require.Equal(t, "INVALID_ARGUMENT", apiErr.Code)
+				}
+				select {
+				case <-finished:
+				case <-ctx.Done():
+					t.Fatal("file handler did not finish")
+				}
+				info, err := os.Lstat(pipePath)
+				require.NoError(t, err)
+				require.NotZero(t, info.Mode()&os.ModeNamedPipe)
+				if reader != nil {
+					var data [16]byte
+					n, err := syscall.Read(int(reader.Fd()), data[:])
+					require.NoError(t, err)
+					require.Zero(t, n, "append must leave the FIFO empty")
+				}
+			})
+		}
+	}
 }
 
 func TestPutCreatesParentDirectories(t *testing.T) {
@@ -548,6 +628,14 @@ func TestGetRecursiveListingEntryCap(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
 
+	// Stat returns one entry even when a recursive listing would exceed the cap.
+	rec = doRequest(handler, http.MethodGet, "/v1/files/?stat=true&type=directory&recursive=true", nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var entry FileEntry
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entry))
+	require.Equal(t, "/", entry.Name)
+	require.Equal(t, "directory", entry.Type)
+
 	// Exactly at the cap is allowed, and so are listings that are not recursive.
 	rec = doRequest(handler, http.MethodGet, "/v1/files/?recursive=true&max_depth=2", nil, nil)
 	require.Len(t, listingNames(t, rec), 5)
@@ -632,6 +720,143 @@ func TestGetRecursiveListingStopsWhenRequestCanceled(t *testing.T) {
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Equal(t, "INTERNAL", decodeError(t, rec).Code)
+}
+
+func TestGetFileStat(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(root, "dir"), 0o750))
+	file := filepath.Join(root, "dir", "file.txt")
+	require.NoError(t, os.WriteFile(file, []byte("contents"), 0o640))
+	mtime := time.Unix(1700000000, 123456789)
+	require.NoError(t, os.Chtimes(file, mtime, mtime))
+	require.NoError(t, os.Symlink(file, filepath.Join(root, "alias")))
+
+	for _, tc := range []struct {
+		path, name, kind string
+	}{
+		{"dir/file.txt", "file.txt", "file"},
+		{"dir%2Ffile.txt", "file.txt", "file"},
+		{"dir", "dir", "directory"},
+		{"dir/", "dir", "directory"},
+		{"", "/", "directory"},
+		{"alias", "alias", "file"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/"+tc.path+"?stat=true", nil, nil)
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+			var entry FileEntry
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entry))
+			require.Equal(t, tc.name, entry.Name)
+			require.Equal(t, tc.kind, entry.Type)
+			localPath, err := url.PathUnescape(tc.path)
+			require.NoError(t, err)
+			info, err := os.Stat(filepath.Join(root, localPath))
+			require.NoError(t, err)
+			require.Equal(t, info.Size(), entry.Size)
+			require.Equal(t, fmt.Sprintf("%04o", info.Mode().Perm()), entry.Mode)
+			gotTime, err := time.Parse(time.RFC3339Nano, entry.ModifiedAt)
+			require.NoError(t, err)
+			require.True(t, info.ModTime().Equal(gotTime), "stat must preserve filesystem timestamp precision")
+		})
+	}
+}
+
+func TestGetFileStatErrors(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("private"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "escape")))
+	require.NoError(t, os.Symlink(filepath.Join(root, "missing"), filepath.Join(root, "broken")))
+	for _, tc := range []struct {
+		path   string
+		status int
+		code   string
+	}{
+		{"missing?stat=banana", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"?stat=true&type=file", http.StatusConflict, "CONFLICT"},
+		{"?stat=true&max_depth=bad", http.StatusBadRequest, "INVALID_ARGUMENT"},
+		{"missing?stat=true", http.StatusNotFound, "NOT_FOUND"},
+		{"broken?stat=true", http.StatusNotFound, "NOT_FOUND"},
+		{"escape?stat=true", http.StatusForbidden, "PERMISSION_DENIED"},
+		{"%2E%2E/outside.txt?stat=true", http.StatusForbidden, "PERMISSION_DENIED"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			rec := doRequest(handler, http.MethodGet, "/v1/files/"+tc.path, nil, nil)
+			require.Equal(t, tc.status, rec.Code)
+			require.Equal(t, tc.code, decodeError(t, rec).Code)
+		})
+	}
+}
+
+func TestGetFileStatWithoutReadPermission(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "file.txt"), []byte("contents"), 0o000))
+	dir := filepath.Join(root, "dir")
+	require.NoError(t, os.Mkdir(dir, 0o000))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(dir, 0o700)) })
+	for _, path := range []string{"file.txt", "dir"} {
+		rec := doRequest(handler, http.MethodGet, "/v1/files/"+path+"?stat=true", nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "stat must not require reading the target")
+		var entry FileEntry
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entry))
+		require.Equal(t, "0000", entry.Mode)
+	}
+}
+
+func TestFileStatPreservesReadAndHead(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "file.txt"), []byte("contents"), 0o640))
+	for _, query := range []string{"", "?stat=false"} {
+		rec := doRequest(handler, http.MethodGet, "/v1/files/file.txt"+query, nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Equal(t, "contents", rec.Body.String())
+		rec = doRequest(handler, http.MethodGet, "/v1/files/"+query, nil, nil)
+		var listing DirectoryListing
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+		require.Len(t, listing.Entries, 1)
+	}
+	// Exercise the HTTP server's HEAD body suppression, including the JSON stat response.
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	for _, path := range []string{"file.txt", "file.txt?stat=true", "?stat=true"} {
+		resp, err := srv.Client().Head(srv.URL + "/v1/files/" + path)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Empty(t, body)
+		if path == "file.txt" {
+			require.Equal(t, "8", resp.Header.Get("Content-Length"))
+			require.NotEmpty(t, resp.Header.Get("Last-Modified"))
+		} else {
+			require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+		}
+	}
+}
+
+func TestDirectoryListingPreservesSubsecondModificationTime(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	file := filepath.Join(root, "file.txt")
+	require.NoError(t, os.WriteFile(file, []byte("contents"), 0o640))
+	var previous string
+	for _, nanos := range []int64{123456789, 987654321} {
+		mtime := time.Unix(1700000000, nanos)
+		require.NoError(t, os.Chtimes(file, mtime, mtime))
+		info, err := os.Stat(file)
+		require.NoError(t, err)
+		rec := doRequest(handler, http.MethodGet, "/v1/files/", nil, nil)
+		var listing DirectoryListing
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+		require.Len(t, listing.Entries, 1)
+		got := listing.Entries[0].ModifiedAt
+		parsed, err := time.Parse(time.RFC3339Nano, got)
+		require.NoError(t, err)
+		require.True(t, info.ModTime().Equal(parsed), "listing must preserve filesystem timestamp precision")
+		require.NotEqual(t, previous, got)
+		previous = got
+	}
 }
 
 func TestGetMissingFileNotFound(t *testing.T) {
@@ -769,6 +994,100 @@ func TestDirectoryListingOmitsEscapingSymlinks(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
 	require.Len(t, listing.Entries, 1)
 	require.Equal(t, "normal.txt", listing.Entries[0].Name)
+}
+
+func TestDeleteSymlinkRemovesLinkNotTarget(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "real.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink("real.txt", filepath.Join(root, "file-link")))
+	require.NoError(t, os.Symlink(".", filepath.Join(root, "root-link")))
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "outside-link")))
+
+	for _, path := range []string{"file-link", "root-link?recursive=true", "outside-link"} {
+		rec := doRequest(handler, http.MethodDelete, "/v1/files/"+path, nil, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, "%s: %s", path, rec.Body.String())
+	}
+
+	for _, link := range []string{"file-link", "root-link", "outside-link"} {
+		_, err := os.Lstat(filepath.Join(root, link))
+		require.True(t, os.IsNotExist(err), "%s should be removed", link)
+	}
+	_, err := os.Stat(filepath.Join(root, "real.txt"))
+	require.NoError(t, err, "the link target must survive")
+	_, err = os.Stat(outside)
+	require.NoError(t, err)
+}
+
+func TestPathUnderRegularFileNotFound(t *testing.T) {
+	_, handler, root := newRESTFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/files/f.txt/child"},
+		{http.MethodHead, "/v1/files/f.txt/child"},
+		{http.MethodDelete, "/v1/files/f.txt/child"},
+		{http.MethodPut, "/v1/files/f.txt/child"},
+		{http.MethodGet, "/v1/files/f.txt/a/b"},
+	} {
+		rec := doRequest(handler, tc.method, tc.path, []byte("y"), nil)
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s %s: %s", tc.method, tc.path, rec.Body.String())
+		if tc.method != http.MethodHead {
+			require.Equal(t, "NOT_FOUND", decodeError(t, rec).Code)
+		}
+	}
+}
+
+func TestPathComponentTooLongIsInvalidArgument(t *testing.T) {
+	_, handler, _ := newRESTFixture(t)
+	long := strings.Repeat("a", 300) // longer than any common filesystem's 255-byte name limit
+
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPut, "/v1/files/" + long},
+		{http.MethodGet, "/v1/files/" + long},
+		{http.MethodDelete, "/v1/files/" + long},
+		{http.MethodPut, "/v1/files/dir/" + long + "?type=directory&parents=true"},
+	} {
+		rec := doRequest(handler, tc.method, tc.path, []byte("y"), nil)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%s %s: %s", tc.method, tc.path[:20], rec.Body.String())
+		require.Equal(t, "INVALID_ARGUMENT", decodeError(t, rec).Code)
+	}
+}
+
+// A full disk cannot be produced in a portable unit test, so this checks the
+// mapping on the wrapped errors the filesystem calls return.
+func TestUnexpectedFSErrorCodes(t *testing.T) {
+	s, _, _ := newRESTFixture(t)
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"disk full", &os.PathError{Op: "write", Path: "/workspace/.sandboxd-tmp-1", Err: syscall.ENOSPC}, http.StatusInsufficientStorage, "RESOURCE_EXHAUSTED"},
+		{"quota exceeded", fmt.Errorf("failed to write file contents: %w", &os.PathError{Op: "write", Path: "x", Err: syscall.EDQUOT}), http.StatusInsufficientStorage, "RESOURCE_EXHAUSTED"},
+		{"anything else", &os.PathError{Op: "read", Path: "x", Err: syscall.EIO}, http.StatusInternalServerError, "INTERNAL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			s.writeUnexpectedFSError(rec, tc.err)
+			require.Equal(t, tc.status, rec.Code)
+			require.Equal(t, tc.code, decodeError(t, rec).Code)
+		})
+	}
+
+	// extract=tar and directory creation fall back to the same mapping, so a
+	// full disk during an extraction is a 507 too.
+	full := fmt.Errorf("writing archive entry: %w", &os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC})
+	for name, write := range map[string]func(http.ResponseWriter, error){
+		"extract":   s.writeExtractError,
+		"directory": s.writeMakeDirectoryError,
+	} {
+		rec := httptest.NewRecorder()
+		write(rec, full)
+		require.Equal(t, http.StatusInsufficientStorage, rec.Code, name)
+		require.Equal(t, "RESOURCE_EXHAUSTED", decodeError(t, rec).Code, name)
+	}
 }
 
 func TestDeleteInvalidRecursiveRejected(t *testing.T) {

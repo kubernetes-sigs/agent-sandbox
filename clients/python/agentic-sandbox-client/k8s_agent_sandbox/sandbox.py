@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import logging
-from typing import Callable
+import time
+from threading import Lock
+from typing import Any, Callable, Literal
 from .trace_manager import create_tracer_manager
 from .trace_manager import trace_span
 from .commands.command_executor import CommandExecutor
@@ -30,6 +32,7 @@ from .models import (
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION
+from .exceptions import SandboxError, SandboxNotFoundError
 from .utils import select_pod_ip, extract_sandbox_name_hash
 
 logger = logging.getLogger(__name__)
@@ -94,10 +97,68 @@ class Sandbox:
         self._watcher: FileWatcher | None = FileWatcher(self.connector, self.tracer, self.trace_service_name)
         
         # Internal state tracking
+        self._lifecycle_uid: str | None = None
+        self._lifecycle_lock = Lock()
         self._is_closed = False
         self._pod_name: str | None = None
         self._sandbox_name_hash: str | None = None
         
+    def suspend(self, *, timeout: int = 180) -> None:
+        """Suspend the Sandbox and wait for the controller to report `Suspended`.
+
+        This handle stays active. `timeout` covers the wait for the condition and
+        for another suspend or resume call on this handle to finish.
+        """
+        self._change_operating_mode("Suspended", timeout)
+
+    def resume(self, *, timeout: int = 180) -> None:
+        """Resume the Sandbox and wait for the controller to report `Ready`."""
+        self._change_operating_mode("Running", timeout)
+
+    def is_suspended(self) -> bool:
+        """Return whether the requested operating mode is `Suspended`."""
+        return self._read_lifecycle()[1] == "Suspended"
+
+    def _read_lifecycle(self) -> tuple[dict[str, Any], str]:
+        """Return the Sandbox and its requested operating mode,
+        and raise if the Sandbox was replaced.
+        """
+        resource = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace)
+        if resource is None:
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' no longer exists")
+        uid = resource["metadata"]["uid"]
+        if self._lifecycle_uid not in (None, uid):
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' was replaced")
+        self._lifecycle_uid = uid
+        return resource, resource.get("spec", {}).get("operatingMode", "Running")
+
+    def _change_operating_mode(self, mode: Literal["Running", "Suspended"], timeout: int) -> None:
+        if self._is_closed:
+            raise RuntimeError("Sandbox connection is closed")
+        start = time.monotonic()
+        if not self._lifecycle_lock.acquire(timeout=max(0, timeout)):
+            raise TimeoutError("Timed out waiting for the lifecycle lock")
+        try:
+            resource, current_mode = self._read_lifecycle()
+            if current_mode != mode:
+                resource = self.k8s_helper.patch_sandbox_operating_mode(
+                    self.sandbox_id, self.namespace, mode, resource["metadata"]["uid"],
+                )
+            if "Suspended" in (mode, current_mode):
+                self.connector.close()
+                self._pod_name = None
+            self.k8s_helper.wait_for_sandbox_ready(
+                self.sandbox_id, self.namespace, max(0, timeout - int(time.monotonic() - start)),
+                condition="Suspended" if mode == "Suspended" else "Ready",
+                min_generation=resource["metadata"]["generation"],
+            )
+            if self._read_lifecycle()[1] != mode:
+                raise SandboxError(
+                    f"Sandbox '{self.sandbox_id}' changed operating mode while waiting for {mode}"
+                )
+        finally:
+            self._lifecycle_lock.release()
+
     def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
         if self._pod_name is not None:

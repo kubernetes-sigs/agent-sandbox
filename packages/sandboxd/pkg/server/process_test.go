@@ -22,6 +22,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -255,6 +257,42 @@ func TestExecuteCwdEscapeDenied(t *testing.T) {
 	require.Equal(t, codes.PermissionDenied, status.Code(err))
 }
 
+func TestExecuteCwdUnderRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	cwd := "f.txt/child"
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"true"}, Cwd: &cwd},
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), err)
+}
+
+func TestExecuteCwdIsRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	cwd := "f.txt"
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"true"}, Cwd: &cwd},
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err), err)
+}
+
+func TestExecuteCommandPathUnderRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"f.txt/prog"}},
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), err)
+	require.ErrorContains(t, err, "not a directory")
+}
+
 func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 
@@ -270,6 +308,43 @@ func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	require.Equal(t, "out\n", res.stdout.String())
 	require.Equal(t, "err\n", res.stderr.String())
 	require.Equal(t, int32(7), res.exitCode)
+}
+
+func TestStartClosesOutputPipes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux /proc file descriptors")
+	}
+	// Disable GC so finalizers can't close the leaked readers and hide the leak.
+	previousGC := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(previousGC) })
+	client := newProcessClient(t, t.TempDir())
+
+	pipeCount := func() int {
+		t.Helper()
+		entries, err := os.ReadDir("/proc/self/fd")
+		require.NoError(t, err)
+		count := 0
+		for _, entry := range entries {
+			target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+			if err == nil && strings.HasPrefix(target, "pipe:[") {
+				count++
+			}
+		}
+		return count
+	}
+
+	before := pipeCount()
+	stream, err := client.Start(testCtx(t), &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{
+			"sh", "-c", "printf stdout; printf stderr >&2",
+		}},
+	})
+	require.NoError(t, err)
+	result := drainStart(t, stream)
+	require.Equal(t, "stdout", result.stdout.String())
+	require.Equal(t, "stderr", result.stderr.String())
+	require.Equal(t, int32(0), result.exitCode)
+	require.Equal(t, before, pipeCount(), "completed streams must close both output readers")
 }
 
 func TestWriteStdinAndEOF(t *testing.T) {
@@ -296,6 +371,33 @@ func TestWriteStdinAndEOF(t *testing.T) {
 
 	res := drainStart(t, stream)
 	require.Equal(t, "piped-through", res.stdout.String())
+	require.Equal(t, int32(0), res.exitCode)
+}
+
+func TestWriteStdinEOFWithPTYRejected(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	stream, err := client.Start(ctx, &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"cat"}},
+		Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+	})
+	require.NoError(t, err)
+	pid := recvInit(t, stream)
+
+	_, err = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: pid,
+		Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "err: %v", err)
+
+	// The terminal is still usable: Ctrl-D through the PTY ends cat normally.
+	_, err = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: pid,
+		Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("\x04")},
+	})
+	require.NoError(t, err)
+	res := drainStart(t, stream)
 	require.Equal(t, int32(0), res.exitCode)
 }
 

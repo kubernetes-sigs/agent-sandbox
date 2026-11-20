@@ -11,6 +11,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**analytics-tool**](./analytics-tool): An example of running an analytics workload in a sandbox with a companion service.
 - [**apf-insulation**](./apf-insulation): An opt-in API Priority and Fairness overlay giving the controller dedicated apiserver concurrency for high-rate claim workloads (claim path > bulk refill > events).
 - [**chrome-sandbox**](./chrome-sandbox): An example of running a Chrome browser in a sandbox.
+- [**ci-runner-sandbox**](./ci-runner-sandbox): Run each CI job in its own sandbox — a Python driver claims a warm sandbox per job, runs build/test commands, echoes logs back to the CI system, and destroys the sandbox even if the job crashes.
 - [**claimed-sandbox-service**](./claimed-sandbox-service): Route application traffic through one Kubernetes Service to multiple claimed, ready Sandboxes while excluding the unclaimed warm reserve.
 - [**claude-code-sandbox**](./claude-code-sandbox): Headless Claude Code driven by the Python SDK: JSON output, session resume, warm-pool claims, and Secret-injected credentials.
 - [**code-interpreter-agent-on-adk**](./code-interpreter-agent-on-adk): An example of using Agent Sandbox as a tool in Agent Development Kit (ADK).
@@ -41,11 +42,13 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**kueue-agent-sandbox**](./kueue-agent-sandbox): An example of admission-controlling sandbox workloads with Kueue.
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**latebind-storage-gke-sandbox**](./latebind-storage-gke-sandbox): Late-binding persistent storage for sandboxes on GKE using the managed add-on APIs.
+- [**managed-agents**](./managed-agents): Run managed agent platforms' self-hosted work items — bash and file tool calls — inside Sandbox pods, with warm-pool claims, lease hand-off, and idle suspend/resume.
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
 - [**n8n-mcp**](./n8n-mcp): An example of connecting n8n workflows to sandboxes through the MCP server integration.
 - [**nemoclaw-sandbox**](./nemoclaw-sandbox): A tutorial on setting up a testing environment for AI agents using NemoClaw, OpenClaw, and OpenShell within a Kubernetes Agent Sandbox.
 - [**network-policy-api-sandbox**](./network-policy-api-sandbox): Cluster-wide default deny and FQDN egress allowlists for sandboxes with the official Kubernetes `ClusterNetworkPolicy` API, on top of the template-managed `NetworkPolicy`, enforced by kube-network-policies (the SIG Network reference implementation).
+- [**nitro-eks-sandbox**](./nitro-eks-sandbox): An example of running VS Code in a sandbox isolated by an AWS Nitro Sandbox on Amazon EKS Auto Mode, with its own VM and kernel, reached with `kubectl port-forward`.
 - [**nono-sandbox**](./nono-sandbox): An example of running nono inside an Agent Sandbox, with fine-grained filesystem isolation, network filtering, credential brokering, and ephemeral per-tool micro-sandboxes.
 - [**nullclaw-sandbox**](./nullclaw-sandbox): An example of running Nullclaw, a minimal AI assistant runtime, inside the Agent Sandbox.
 - [**openclaw-fleet-gke**](./openclaw-fleet-gke): A measured enterprise-fleet blueprint on GKE: sub-second warm claims with late-bound per-employee Filestore workspaces, stable per-employee URLs, two-tier sleep/wake, and rolling updates.
@@ -57,6 +60,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**podsnapshot-golden-warmpool**](./podsnapshot-golden-warmpool): Golden-snapshot warm pools on GKE — snapshot one primed sandbox (memory + filesystem) and every pool member pre-warmed afterward boots already restored from it, so claims adopt pre-initialized sandboxes.
 - [**policy**](./policy): Examples of using different policies with sandboxes.
 - [**python-runtime-sandbox**](./python-runtime-sandbox): An example of a Python runtime sandbox.
+- [**router-scoped-mcp-sandbox**](./router-scoped-mcp-sandbox): An MCP server reached through sandbox-router's scoped-token authorizer — the agent holds a token bound to one sandbox, never a K8s credential or a third-party gateway.
 - [**python-sdk-quickstart**](./python-sdk-quickstart): A quickstart for the Python SDK: create a sandbox, run commands, and manage files without Kubernetes primitives.
 - [**quickstart**](./quickstart): An end-to-end getting-started walkthrough — controller install, warm pool, router, and SDK test client — plus gVisor and Kata isolation variants.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.

@@ -150,6 +150,21 @@ func (s *RESTServer) writeError(w http.ResponseWriter, httpCode int, code, messa
 	s.writeJSON(w, httpCode, APIError{Code: code, Message: message})
 }
 
+// writeUnexpectedFSError answers a filesystem error that no more specific
+// case matched. A full disk or exhausted quota, and a path or path component
+// longer than the filesystem allows, are the caller's to act on, so they get
+// their own codes; anything else is an internal error.
+func (s *RESTServer) writeUnexpectedFSError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, syscall.ENOSPC), errors.Is(err, syscall.EDQUOT):
+		s.writeError(w, http.StatusInsufficientStorage, "RESOURCE_EXHAUSTED", "no space left in the sandbox filesystem")
+	case errors.Is(err, syscall.ENAMETOOLONG):
+		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "path or path component is too long for the sandbox filesystem")
+	default:
+		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+	}
+}
+
 // writeFSError maps a filesystem error to the status the spec documents for it.
 func (s *RESTServer) writeFSError(w http.ResponseWriter, err error) {
 	switch {
@@ -160,7 +175,7 @@ func (s *RESTServer) writeFSError(w http.ResponseWriter, err error) {
 	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
 		s.writeError(w, http.StatusConflict, "CONFLICT", "path conflicts with an existing file or directory")
 	default:
-		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		s.writeUnexpectedFSError(w, err)
 	}
 }
 
@@ -180,8 +195,11 @@ func (s *RESTServer) resolveUserPath(w http.ResponseWriter, userPath string,
 		if errors.Is(err, pathutil.ErrPathEscapes) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED",
 				"path traversal outside sandbox root is forbidden")
+		} else if errors.Is(err, syscall.ENOTDIR) {
+			// A parent component is a regular file, so the path cannot exist.
+			s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
 		} else {
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			s.writeUnexpectedFSError(w, err)
 		}
 		return "", false
 	}
@@ -257,6 +275,10 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	stat, ok := s.boolQuery(w, r, "stat")
+	if !ok {
+		return
+	}
 	maxDepth, ok := s.listDepth(w, r)
 	if !ok {
 		return
@@ -274,7 +296,7 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		} else if os.IsPermission(err) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		} else {
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			s.writeUnexpectedFSError(w, err)
 		}
 		return
 	}
@@ -284,17 +306,28 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if stat {
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", errUnsupportedFileType.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusOK, fileEntryFromInfo(filepath.Base("/"+r.PathValue("path")), info))
+		return
+	}
+
 	if info.IsDir() {
 		s.serveDirectoryListing(w, r, target, maxDepth)
 		return
 	}
 
-	f, err := os.Open(target)
+	f, err := openRegularFile(target, os.O_RDONLY, 0)
 	if err != nil {
-		if os.IsPermission(err) {
+		if errors.Is(err, errUnsupportedFileType) {
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		} else if os.IsPermission(err) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		} else {
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			s.writeUnexpectedFSError(w, err)
 		}
 		return
 	}
@@ -384,7 +417,7 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		s.writeUnexpectedFSError(w, err)
 		return
 	}
 
@@ -412,6 +445,10 @@ func (s *RESTServer) fileEntry(d fs.DirEntry, name, sandboxPath string) (entry F
 			return FileEntry{}, false
 		}
 	}
+	return fileEntryFromInfo(name, info), true
+}
+
+func fileEntryFromInfo(name string, info fs.FileInfo) FileEntry {
 	entryType := entryTypeFile
 	if info.IsDir() {
 		entryType = entryTypeDirectory
@@ -420,9 +457,9 @@ func (s *RESTServer) fileEntry(d fs.DirEntry, name, sandboxPath string) (entry F
 		Name:       name,
 		Size:       info.Size(),
 		Type:       entryType,
-		ModifiedAt: info.ModTime().UTC().Format(time.RFC3339),
+		ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano),
 		Mode:       fmt.Sprintf("%04o", info.Mode().Perm()),
-	}, true
+	}
 }
 
 func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
@@ -518,10 +555,12 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case createOnly && errors.Is(err, os.ErrExist):
 			s.writePathExists(w)
+		case errors.Is(err, errUnsupportedFileType):
+			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		case errors.Is(err, os.ErrPermission):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		default:
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			s.writeUnexpectedFSError(w, err)
 		}
 		return
 	}
@@ -709,10 +748,10 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	}
 
 	// O_EXCL tells us whether this request created the file.
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
+	f, err := openRegularFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
 	created := err == nil
 	if errors.Is(err, os.ErrExist) {
-		f, err = os.OpenFile(target, os.O_WRONLY|os.O_APPEND, 0)
+		f, err = openRegularFile(target, os.O_WRONLY|os.O_APPEND, 0)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -734,6 +773,28 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 		return fmt.Errorf("failed to append file contents: %w", err)
 	}
 	return nil
+}
+
+// openRegularFile rejects special files without waiting for a FIFO peer. Check
+// the opened descriptor because a path can change after a prior Stat call.
+func openRegularFile(path string, flags int, mode os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(path, flags|syscall.O_NONBLOCK, mode)
+	if errors.Is(err, syscall.ENXIO) {
+		// A FIFO opened for writing without a reader fails before Stat.
+		return nil, fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(path))
+	}
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err == nil && !info.Mode().IsRegular() {
+		err = fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(path))
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 var (
@@ -897,16 +958,19 @@ func (s *RESTServer) writeExtractError(w http.ResponseWriter, err error) {
 }
 
 func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	target, ok := s.resolvePath(w, r)
+	// Delete a symlink in the last path component, not its target, as rm
+	// does. Following it would let "DELETE link?recursive=true" clear the
+	// directory the link points to, including the sandbox root itself.
+	target, ok := s.resolveUserPath(w, r.PathValue("path"), pathutil.SanitizeEntryPath)
 	if !ok {
 		return
 	}
 
 	if _, err := os.Lstat(target); err != nil {
-		if os.IsNotExist(err) {
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
 			s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
 		} else {
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			s.writeUnexpectedFSError(w, err)
 		}
 		return
 	}
@@ -934,12 +998,12 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		// than deleting the volume mount entity.
 		dirEntries, err := os.ReadDir(target)
 		if err != nil {
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			s.writeUnexpectedFSError(w, err)
 			return
 		}
 		for _, entry := range dirEntries {
 			if err := os.RemoveAll(filepath.Join(target, entry.Name())); err != nil {
-				s.writeError(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+				s.writeUnexpectedFSError(w, err)
 				return
 			}
 		}
@@ -961,7 +1025,7 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		case os.IsPermission(removeErr):
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
 		default:
-			s.writeError(w, http.StatusInternalServerError, "INTERNAL", removeErr.Error())
+			s.writeUnexpectedFSError(w, removeErr)
 		}
 		return
 	}
@@ -978,8 +1042,7 @@ const (
 // tmpPattern names the temporary entries sandboxd creates beside a target.
 const tmpPattern = ".sandboxd-tmp-*"
 
-// errUnsupportedFileType marks a copy source that is neither a regular file,
-// a directory, nor a symlink, such as a socket or a named pipe.
+// errUnsupportedFileType marks a special file that a transfer cannot handle.
 var errUnsupportedFileType = errors.New("unsupported file type")
 
 // handleFileAction serves POST /v1/files/{path}:move and :copy. A net/http

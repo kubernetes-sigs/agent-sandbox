@@ -53,9 +53,6 @@ kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER_NAME}"
 
 # --- Apply ------------------------------------------------------------------
 
-echo "Generating gateway token..."
-TOKEN="$(openssl rand -hex 32)"
-
 cleanup() {
   echo "Cleaning up..."
   kubectl delete --ignore-not-found -f kind-service.yaml
@@ -68,7 +65,7 @@ trap cleanup EXIT
 
 echo "Applying manifests..."
 kubectl apply -f openclaw-config.yaml
-sed "s/dummy-token-for-sandbox/${TOKEN}/g" openclaw-template.yaml | kubectl apply -f -
+kubectl apply -f openclaw-template.yaml
 kubectl apply -f openclaw-warmpool.yaml
 kubectl apply -f openclaw-claim.yaml
 kubectl apply -f kind-service.yaml
@@ -114,6 +111,41 @@ EOF
   exit 1
 fi
 echo "Gateway responded on NodePort ${NODE_PORT}."
+
+# The NodePort routes only to the claimed Pod. Try that gateway with each
+# Sandbox's credential, including the unused spare from the same template.
+gateway_status() {
+  local token
+  token=$(kubectl exec "$1" -c openclaw -- node -e '
+    const token = require(process.env.OPENCLAW_CONFIG_PATH).gateway.auth?.token;
+    if (!token) process.exit(1);
+    process.stdout.write(token);
+  ') || return 1
+  printf 'Authorization: Bearer %s\n' "${token}" | curl -sS --max-time 10 -o /dev/null -w '%{http_code}' --header @- \
+      --header 'Content-Type: application/json' --data '{"tool":"agents_list","args":{}}' \
+      "http://127.0.0.1:${NODE_PORT}/tools/invoke"
+}
+
+if ! STATUS=$(gateway_status "${POD}") || [ "${STATUS}" != 200 ]; then
+  echo "FAIL: the gateway did not accept the claimed Pod's token." >&2
+  exit 1
+fi
+
+# The claim can become ready before the pool has replenished its spare.
+SELECTOR='sandbox=openclaw-template-sandbox,!sandbox.users.io/openclaw-claim'
+for i in $(seq 1 60); do
+  SPARE=$(kubectl get pods -l "${SELECTOR}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  if [ -n "${SPARE}" ] && STATUS=$(gateway_status "${SPARE}" 2>/dev/null); then
+    break
+  fi
+  STATUS=""
+  sleep 2
+done
+if [ "${STATUS}" != 401 ]; then
+  echo "FAIL: expected HTTP 401 when using the spare Sandbox's token, got ${STATUS:-no response}." >&2
+  exit 1
+fi
+echo "PASS: the gateway accepted its own token and rejected the spare Sandbox's token."
 
 # --- PVC persistence test ---------------------------------------------------
 

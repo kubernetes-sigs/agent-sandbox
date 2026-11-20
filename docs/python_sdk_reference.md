@@ -67,6 +67,9 @@ def create_sandbox(warmpool: str,
                    claim_name: str | None = None,
                    adopt_existing: bool = False,
                    shutdown_after_seconds: int | None = None,
+                   shutdown_policy: Literal["Delete", "DeleteForeground",
+                                            "Retain"] | None = None,
+                   ttl_seconds_after_finished: int | None = None,
                    volume_claim_templates: list[dict[str, Any]] | None = None,
                    pod_labels: dict[str, str] | None = None,
                    pod_annotations: dict[str, str] | None = None,
@@ -85,15 +88,26 @@ the underlying infrastructure.
   (``SandboxClaim.metadata.labels``).
 - `claim_name` - Optional DNS-1123 Claim name. Explicit names remain
   caller-owned and are excluded from automatic cleanup.
-- `adopt_existing` - On 409, attach to the existing named Claim after
+- `adopt_existing` - On AlreadyExists, attach to the existing named Claim after
   checking its warm pool and that it is not terminating. Requires
   claim_name. Creation options are not reapplied on adoption;
-  an existing shutdownTime is preserved.
+  the existing lifecycle is preserved.
 - `shutdown_after_seconds` - Optional TTL in seconds. When set, the
   claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
   of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
-  of ``"Delete"``, so the controller auto-deletes the claim on
-  expiry. Must be a positive integer.
+  of ``"Delete"`` unless shutdown_policy is given.
+  Must be a positive integer.
+- `shutdown_policy` - Value for ``spec.lifecycle.shutdownPolicy``.
+  When a timer is set and no policy is given, the SDK sends Delete;
+  the API's own default for an omitted policy is Retain.
+  Retain keeps the claim and deletes its Sandbox. With cleanup
+  enabled and a generated name, the client still deletes a Retain
+  claim on exit.
+- `ttl_seconds_after_finished` - Seconds, zero or more, for
+  ``spec.lifecycle.ttlSecondsAfterFinished``. The timer starts only
+  when the Pod reaches Succeeded or Failed. A Pod with
+  restartPolicy Always never does, so pair this with
+  shutdown_after_seconds. With both timers, the earlier deadline wins.
 - `volume_claim_templates` - Optional list of volume claim templates
   to override/merge with the sandbox template.
 - `pod_labels` - Optional labels stamped onto the running Sandbox **Pod**
@@ -690,10 +704,9 @@ Connect to sandboxd through a port-forward to sandbox-router-svc.
 REST and gRPC share the router's port 8080. Routing headers and metadata
 select the Sandbox and its REST or gRPC port. gRPC requires sandbox-router
 v1.0.9 or later. Set ``router_auth_token`` when the router requires
-authentication. The SDK sends only that token as ``Authorization``.
-The router strips that header before forwarding, so token-protected
-sandboxd is unsupported until credential pass-through is defined (issue
-2102). The SDK never sends ``auth_token`` in this mode.
+authentication. The SDK sends that token as ``Authorization``, which the
+router strips. It sends ``auth_token`` as ``X-Sandboxd-Token``, which the
+router forwards to sandboxd.
 ``pod_ip_routing`` stays false so the router selects the Pod from its cache
 or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
 
@@ -701,7 +714,7 @@ or DNS. Scoped tokens reject ``X-Sandbox-Pod-IP``.
 
 #### auth\_token
 
-sandboxd bearer token. Not sent in this mode because the router strips Authorization (issue 2102).
+sandboxd token. Sent as X-Sandboxd-Token because the router strips Authorization.
 
 <a id="k8s_agent_sandbox.models.SandboxdRouterTunnelConnectionConfig.router_auth_token"></a>
 

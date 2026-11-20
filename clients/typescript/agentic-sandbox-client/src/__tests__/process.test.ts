@@ -16,8 +16,11 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type ConnectRouter } from "@connectrpc/connect";
-import { connectNodeAdapter } from "@connectrpc/connect-node";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  connectNodeAdapter,
+  Http2SessionManager,
+} from "@connectrpc/connect-node";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ExecuteResponseSchema,
   InitEventSchema,
@@ -25,6 +28,12 @@ import {
   ProcessService,
   StartResponseSchema,
 } from "../_proto/process/v1/process_pb.js";
+import {
+  FileEventSchema,
+  FileEventType,
+  FileWatcherService,
+  type WatchDirRequest,
+} from "../_proto/watcher/v1/watcher_pb.js";
 import {
   SandboxClosedError,
   SandboxConnectionError,
@@ -494,6 +503,79 @@ describe("ProcessClient authorization", () => {
   });
 });
 
+describe("ProcessClient routingMetadata", () => {
+  it("sends sandbox-router routing metadata on unary calls", async () => {
+    const seen: Array<Record<string, string | null>> = [];
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          seen.push({
+            id: ctx.requestHeader.get("x-sandbox-id"),
+            namespace: ctx.requestHeader.get("x-sandbox-namespace"),
+            port: ctx.requestHeader.get("x-sandbox-port"),
+            podIp: ctx.requestHeader.get("x-sandbox-pod-ip"),
+            token: ctx.requestHeader.get("x-sandboxd-token"),
+          });
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+      routingMetadata: {
+        "x-sandbox-id": "sb-kata",
+        "x-sandbox-namespace": "default",
+        "x-sandbox-port": "19090",
+        "x-sandbox-pod-ip": "10.244.0.7",
+        "x-sandboxd-token": "tok-sandboxd-9a2f",
+      },
+    });
+
+    await activeClient.run(
+      { command: ["true"] },
+      30_000,
+      new AbortController().signal,
+    );
+
+    expect(seen).toEqual([
+      {
+        id: "sb-kata",
+        namespace: "default",
+        port: "19090",
+        podIp: "10.244.0.7",
+        token: "tok-sandboxd-9a2f",
+      },
+    ]);
+  });
+
+  it("sends no routing metadata when none is configured", async () => {
+    const seen: Array<Record<string, string | null>> = [];
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          seen.push({
+            id: ctx.requestHeader.get("x-sandbox-id"),
+          });
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    await activeClient.run(
+      { command: ["true"] },
+      30_000,
+      new AbortController().signal,
+    );
+
+    expect(seen).toEqual([{ id: null }]);
+  });
+});
+
 describe("ProcessClient.start", () => {
   const initMsg = () =>
     create(StartResponseSchema, {
@@ -611,5 +693,165 @@ describe("ProcessClient.start", () => {
       name: "SandboxdRpcError",
       code: "permission_denied",
     });
+  });
+});
+
+describe("ProcessClient.watchDir", () => {
+  async function startClient(
+    watchDir: (
+      req: WatchDirRequest,
+      ctx: { signal: AbortSignal },
+    ) => AsyncIterable<never>,
+  ): Promise<ProcessClient> {
+    activeServer = await startH2Server((router) => {
+      router.service(FileWatcherService, { watchDir: watchDir as never });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    return activeClient;
+  }
+
+  it("sends path and recursive, names every event type, and ends with the stream", async () => {
+    let received: WatchDirRequest | undefined;
+    const client = await startClient(async function* (req) {
+      received = req;
+      for (const type of [
+        FileEventType.CREATE,
+        FileEventType.WRITE,
+        FileEventType.REMOVE,
+        FileEventType.RENAME,
+        FileEventType.CHMOD,
+      ]) {
+        yield create(FileEventSchema, { type, path: "src/a.txt" }) as never;
+      }
+      yield create(FileEventSchema, {
+        type: FileEventType.ERROR,
+        error: "watched directory was removed",
+      }) as never;
+    });
+
+    const events = await client.watchDir(
+      "src",
+      true,
+      new AbortController().signal,
+    );
+    const seen = [];
+    while (true) {
+      const step = await events.next();
+      if (step.done) break;
+      seen.push(step.value);
+    }
+
+    expect(received).toMatchObject({ path: "src", recursive: true });
+    expect(seen.map((e) => e.type)).toEqual([
+      "create",
+      "write",
+      "remove",
+      "rename",
+      "chmod",
+      "error",
+    ]);
+    expect(seen[0]).toEqual({ type: "create", path: "src/a.txt", error: "" });
+    expect(seen[5]).toEqual({
+      type: "error",
+      path: "",
+      error: "watched directory was removed",
+    });
+  });
+
+  it("reports an event type it does not know as unknown(<number>)", async () => {
+    const client = await startClient(async function* () {
+      yield create(FileEventSchema, {
+        type: 99 as FileEventType,
+        path: "a",
+      }) as never;
+    });
+
+    const events = await client.watchDir(
+      ".",
+      false,
+      new AbortController().signal,
+    );
+
+    expect((await events.next()).value).toEqual({
+      type: "unknown(99)",
+      path: "a",
+      error: "",
+    });
+  });
+
+  it("reports a runtime without the watcher service as unimplemented", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {});
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    const events = await activeClient.watchDir(
+      ".",
+      false,
+      new AbortController().signal,
+    );
+
+    const err = await events.next().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SandboxdRpcError);
+    expect(err).toMatchObject({ code: "unimplemented" });
+  });
+
+  it("reports an unreachable sandboxd before returning the iterator", async () => {
+    const server = await startH2Server(() => {});
+    await server.close();
+    activeClient = new ProcessClient({
+      grpcBaseUrl: server.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    const err = await activeClient
+      .watchDir(".", false, new AbortController().signal)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SandboxConnectionError);
+    expect(err).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("stops waiting for a stalled connection when the signal aborts", async () => {
+    const client = await startClient(async function* () {});
+    const connect = vi
+      .spyOn(Http2SessionManager.prototype, "connect")
+      .mockReturnValue(new Promise(() => {}));
+    const controller = new AbortController();
+    const reason = new Error("startup budget spent");
+
+    const opening = client.watchDir(".", false, controller.signal);
+    await vi.waitFor(() => expect(connect).toHaveBeenCalled());
+    controller.abort(reason);
+
+    await expect(opening).rejects.toBe(reason);
+    connect.mockRestore();
+  });
+
+  it("throws the signal's own reason when the caller aborts the stream", async () => {
+    const client = await startClient(async function* (_req, ctx) {
+      yield create(FileEventSchema, {
+        type: FileEventType.CREATE,
+        path: "a",
+      }) as never;
+      await new Promise<void>((resolve) =>
+        ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller gave up");
+    const events = await client.watchDir(".", false, controller.signal);
+    await events.next();
+    const next = events.next();
+
+    controller.abort(reason);
+
+    await expect(next).rejects.toBe(reason);
   });
 });

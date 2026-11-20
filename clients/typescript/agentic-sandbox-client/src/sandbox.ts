@@ -31,6 +31,7 @@ import {
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
   CLEANUP_TIMEOUT_MS,
+  DEFAULT_LIFECYCLE_TIMEOUT_MS,
   DEFAULT_MAX_COMMAND_OUTPUT_SIZE,
   DEFAULT_MAX_DOWNLOAD_SIZE,
   DEFAULT_MAX_METADATA_RESPONSE_SIZE,
@@ -38,6 +39,8 @@ import {
   DEFAULT_PORT_FORWARD_READY_TIMEOUT_MS,
   DEFAULT_SANDBOXD_GRPC_PORT,
   DEFAULT_SANDBOXD_REST_PORT,
+  LIFECYCLE_POLL_INTERVAL_MS,
+  POD_NAME_ANNOTATION,
   SANDBOX_API_GROUP,
   SANDBOX_API_VERSION,
   SANDBOX_PLURAL_NAME,
@@ -48,6 +51,8 @@ import {
   SandboxConnectionError,
   SandboxdApiError,
   SandboxError,
+  SandboxMetadataError,
+  SandboxNotFoundError,
   SandboxTimeoutError,
 } from "./exceptions.js";
 import { SandboxFiles } from "./files.js";
@@ -62,6 +67,7 @@ import {
   SandboxdRestClient,
   SourceFailure,
   validateMode,
+  validateWriteOptions,
 } from "./rest.js";
 import type { Span, TracerManager } from "./trace-manager.js";
 import { spanErrorStatusCode, withSpan } from "./trace-manager.js";
@@ -70,6 +76,8 @@ import type {
   DirectoryListing,
   ExecutionResult,
   FileCallOptions,
+  FileEntry,
+  FileEvent,
   ListOptions,
   Logger,
   MkdirOptions,
@@ -84,8 +92,11 @@ import type {
   SandboxMetadata,
   SandboxStatus,
   StartOptions,
+  SuspendResumeOptions,
+  WatchOptions,
   WriteOptions,
 } from "./types.js";
+import { SandboxWatcher } from "./watcher.js";
 
 /**
  * `status.conditions` of a Kubernetes object, or [] when it has none.
@@ -140,6 +151,53 @@ export async function raceWithTimeout<T>(
   }
 }
 
+function operatingModeOf(obj: Record<string, unknown>): string | undefined {
+  const spec = (obj.spec as Record<string, unknown>) ?? {};
+  return typeof spec.operatingMode === "string"
+    ? spec.operatingMode
+    : undefined;
+}
+
+function generationOf(obj: Record<string, unknown>): number {
+  const metadata = (obj.metadata as Record<string, unknown>) ?? {};
+  return typeof metadata.generation === "number" ? metadata.generation : 0;
+}
+
+function podNameOf(obj: Record<string, unknown>): string | undefined {
+  const metadata = (obj.metadata as Record<string, unknown>) ?? {};
+  const annotations = (metadata.annotations as Record<string, string>) ?? {};
+  return annotations[POD_NAME_ANNOTATION] || undefined;
+}
+
+function podIPOf(obj: Record<string, unknown>): string {
+  const status = (obj.status as Record<string, unknown>) ?? {};
+  return selectPodIP(Array.isArray(status.podIPs) ? status.podIPs : []);
+}
+
+/** True when the condition is `True` and was observed at `minGeneration` or later. */
+function conditionObserved(
+  obj: Record<string, unknown>,
+  type: string,
+  minGeneration: number,
+): boolean {
+  const cond = readConditions(obj).find((c) => c.type === type);
+  return (
+    cond?.status === "True" &&
+    Number(cond.observedGeneration ?? 0) >= minGeneration
+  );
+}
+
+function lifecycleBudget(opts: SuspendResumeOptions | undefined): {
+  timeoutMs: number;
+  deadline: number;
+} {
+  const timeoutMs =
+    opts?.timeoutMs === undefined
+      ? DEFAULT_LIFECYCLE_TIMEOUT_MS
+      : validateTimeoutMs("timeoutMs", opts.timeoutMs);
+  return { timeoutMs, deadline: Date.now() + timeoutMs };
+}
+
 /** @internal — fully validated/defaulted form of SandboxdOptions. */
 export interface ResolvedSandboxdOptions {
   connectivity: SandboxdConnectivity;
@@ -150,24 +208,39 @@ export interface ResolvedSandboxdOptions {
   maxUploadSize: number;
   maxMetadataResponseSize: number;
   maxCommandOutputSize: number;
-  /** Full `Authorization` header value ("Bearer <token>"), if configured. */
-  authorization?: string;
+  /**
+   * Bare sandboxd token: `Authorization: Bearer <token>`, or `X-Sandboxd-Token`
+   * (bare) in router mode because the router strips Authorization.
+   */
+  authToken?: string;
+  /**
+   * Bare sandbox-router token, sent as `Authorization: Bearer <token>` in
+   * router mode only; the router strips it before forwarding.
+   */
+  routerAuthToken?: string;
+  /** Namespace where sandbox-router-svc lives; undefined means the claim namespace. */
+  routerNamespace?: string;
+  /** Suppress the X-Sandbox-Pod-IP routing header/metadata. */
+  disablePodIPRouting: boolean;
 }
 
 // Printable ASCII without spaces, so the value is always a legal header value.
 // An illegal one would make fetch() throw an error that quotes the token.
 const AUTH_TOKEN_RE = /^[\x21-\x7e]+$/;
 
-function bearerAuthorization(token: string | undefined): string | undefined {
+function validateToken(
+  name: string,
+  token: string | undefined,
+): string | undefined {
   if (token === undefined) return undefined;
   // The message must not echo the token.
   if (typeof token !== "string" || !AUTH_TOKEN_RE.test(token)) {
     throw new SandboxError(
-      "sandboxd.authToken must be a non-empty string of printable ASCII characters with no spaces",
+      `${name} must be a non-empty string of printable ASCII characters with no spaces`,
       { telemetryCode: "invalid_argument" },
     );
   }
-  return `Bearer ${token}`;
+  return token;
 }
 
 function validateBoundedInt(
@@ -194,6 +267,11 @@ function validateBoundedInt(
 export function normalizeSandboxdOptions(
   opts?: SandboxdOptions,
 ): ResolvedSandboxdOptions {
+  const authToken = validateToken("sandboxd.authToken", opts?.authToken);
+  const routerAuthToken = validateToken(
+    "sandboxd.routerAuthToken",
+    opts?.routerAuthToken,
+  );
   const resolved: ResolvedSandboxdOptions = {
     connectivity: validateConnectivity(opts?.connectivity),
     restPort:
@@ -233,7 +311,10 @@ export function normalizeSandboxdOptions(
         opts?.maxCommandOutputSize,
         0xffffffff,
       ) ?? DEFAULT_MAX_COMMAND_OUTPUT_SIZE,
-    authorization: bearerAuthorization(opts?.authToken),
+    authToken,
+    routerAuthToken,
+    routerNamespace: validateRouterNamespace(opts?.routerNamespace),
+    disablePodIPRouting: validateDisablePodIPRouting(opts?.disablePodIPRouting),
   };
   // With in-cluster connectivity both would dial the same pod address, so
   // REST and gRPC must be on distinct ports; the Go client rejects this too.
@@ -248,6 +329,7 @@ export function normalizeSandboxdOptions(
 
 const CONNECTIVITY_VALUES: readonly SandboxdConnectivity[] = [
   "port-forward",
+  "router-port-forward",
   "in-cluster-service",
   "in-cluster-pod-ip",
 ];
@@ -259,6 +341,36 @@ function validateConnectivity(
   if (!CONNECTIVITY_VALUES.includes(value)) {
     throw new SandboxError(
       `sandboxd.connectivity must be one of ${CONNECTIVITY_VALUES.map((v) => `"${v}"`).join(", ")}, got: ${String(value)}`,
+      { telemetryCode: "invalid_argument" },
+    );
+  }
+  return value;
+}
+
+function validateRouterNamespace(
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  // A Kubernetes namespace is a DNS-1123 label.
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 63 ||
+    !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(value)
+  ) {
+    throw new SandboxError(
+      `sandboxd.routerNamespace must be a valid Kubernetes namespace (DNS label), got: ${String(value)}`,
+      { telemetryCode: "invalid_argument" },
+    );
+  }
+  return value;
+}
+
+function validateDisablePodIPRouting(value: boolean | undefined): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new SandboxError(
+      `sandboxd.disablePodIPRouting must be a boolean, got: ${String(value)}`,
       { telemetryCode: "invalid_argument" },
     );
   }
@@ -390,12 +502,8 @@ export interface SandboxInit {
 export class Sandbox {
   readonly claimName: string;
   readonly sandboxName: string;
-  readonly podName: string;
-  /**
-   * The pod IP (IPv4 preferred) observed when the handle was created, or ""
-   * when unknown. Not refreshed if the pod is later rescheduled.
-   */
-  readonly podIP: string;
+  private _podName: string;
+  private _podIP: string;
   /**
    * In-cluster DNS name of the Sandbox's headless Service, or "" when it has
    * none (spec.service unset or false).
@@ -407,7 +515,8 @@ export class Sandbox {
   protected readonly customObjectsApi: k8s.CustomObjectsApi;
   protected readonly logger: Logger;
 
-  private readonly connectionStrategy: SandboxdConnectionStrategy;
+  private connectionStrategy: SandboxdConnectionStrategy;
+  private readonly kubeConfig: k8s.KubeConfig;
   private readonly sandboxdOptions: ResolvedSandboxdOptions;
   private readonly traceServiceName: string;
 
@@ -420,39 +529,61 @@ export class Sandbox {
   private generationCounter = 0;
   private currentGeneration: ConnectionGeneration | null = null;
   private connectingPromise: Promise<ConnectionGeneration> | null = null;
+  private connectionEpoch = 0;
   private invalidationPromise: Promise<void> | null = null;
   private releaseLocalPromise: Promise<void> | null = null;
   private deletionPromise: Promise<void> | null = null;
+  private lifecycleTail: Promise<unknown> = Promise.resolve();
+  private lastModePatch: Promise<unknown> = Promise.resolve();
+  private lifecycleUid?: string;
 
   private _files?: SandboxFiles;
   private _commands?: SandboxCommands;
+  private _watcher?: SandboxWatcher;
 
   constructor(init: SandboxInit) {
     this.claimName = init.claimName;
     this.sandboxName = init.sandboxName;
-    this.podName = init.podName;
-    this.podIP = init.podIP ?? "";
+    this._podName = init.podName;
+    this._podIP = init.podIP ?? "";
     this.serviceFQDN = init.serviceFQDN ?? "";
     this.namespace = init.namespace;
     this.customObjectsApi = init.customObjectsApi;
+    this.kubeConfig = init.kubeConfig;
     this.sandboxdOptions = init.sandboxdOptions;
     this.tracingManager = init.tracingManager;
     this.traceServiceName = init.traceServiceName;
     this.logger = init.logger ?? noopLogger;
-    this.connectionStrategy = createConnectionStrategy(
-      init.sandboxdOptions.connectivity,
-      {
-        kubeConfig: init.kubeConfig,
-        namespace: this.namespace,
-        podName: this.podName,
-        podIP: this.podIP,
-        serviceFQDN: this.serviceFQDN,
-        restPort: init.sandboxdOptions.restPort,
-        grpcPort: init.sandboxdOptions.grpcPort,
-        handshakeTimeoutMs: init.sandboxdOptions.portForwardReadyTimeoutMs,
-        logger: this.logger,
-      },
-    );
+    this.connectionStrategy = this.createStrategy();
+  }
+
+  /** The Pod name. Refreshed by `resume()`. */
+  get podName(): string {
+    return this._podName;
+  }
+
+  /**
+   * The pod IP (IPv4 preferred) observed when the handle was created, or ""
+   * when unknown. Refreshed by `resume()`, but not if the pod is rescheduled
+   * for any other reason.
+   */
+  get podIP(): string {
+    return this._podIP;
+  }
+
+  private createStrategy(): SandboxdConnectionStrategy {
+    return createConnectionStrategy(this.sandboxdOptions.connectivity, {
+      kubeConfig: this.kubeConfig,
+      namespace: this.namespace,
+      podName: this._podName,
+      podIP: this._podIP,
+      serviceFQDN: this.serviceFQDN,
+      restPort: this.sandboxdOptions.restPort,
+      grpcPort: this.sandboxdOptions.grpcPort,
+      routerNamespace: this.sandboxdOptions.routerNamespace ?? this.namespace,
+      handshakeTimeoutMs: this.sandboxdOptions.portForwardReadyTimeoutMs,
+      logger: this.logger,
+    });
   }
 
   /**
@@ -483,6 +614,7 @@ export class Sandbox {
         readStream: (path, opts) => this.readStreamImpl(path, opts),
         writeStream: (path, content, opts) =>
           this.writeStreamImpl(path, content, opts),
+        stat: (path, opts) => this.statImpl(path, opts),
         exists: (path, opts) => this.existsImpl(path, opts),
         list: (path, opts) => this.listImpl(path, opts),
         delete: (path, opts) => this.deleteFileImpl(path, opts),
@@ -491,9 +623,20 @@ export class Sandbox {
           this.transferImpl("move", source, destination, opts),
         copy: (source, destination, opts) =>
           this.transferImpl("copy", source, destination, opts),
+        extract: (path, archive, opts) => this.extractImpl(path, archive, opts),
       });
     }
     return this._files;
+  }
+
+  /** Watches directories inside the sandbox. Connects to sandboxd lazily. */
+  get watcher(): SandboxWatcher {
+    if (!this._watcher) {
+      this._watcher = new SandboxWatcher({
+        watch: (path, opts) => this.watchImpl(path, opts),
+      });
+    }
+    return this._watcher;
   }
 
   /**
@@ -528,26 +671,12 @@ export class Sandbox {
    * Unlike `health()`, this does not connect to sandboxd.
    */
   async status(): Promise<SandboxStatus> {
-    let sandboxObj: Record<string, unknown>;
-    try {
-      sandboxObj = (await this.customObjectsApi.getNamespacedCustomObject({
-        group: SANDBOX_API_GROUP,
-        version: SANDBOX_API_VERSION,
-        namespace: this.namespace,
-        plural: SANDBOX_PLURAL_NAME,
-        name: this.sandboxName,
-      })) as Record<string, unknown>;
-    } catch (err: unknown) {
-      if (isK8s404(err)) {
-        return {
-          status: "SandboxNotFound",
-          message: "Sandbox object not found in Kubernetes.",
-        };
-      }
-      throw new SandboxError(
-        `Failed to read Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
-        { cause: err },
-      );
+    const sandboxObj = await this.readSandboxObject();
+    if (!sandboxObj) {
+      return {
+        status: "SandboxNotFound",
+        message: "Sandbox object not found in Kubernetes.",
+      };
     }
 
     const ready = findReadyCondition(sandboxObj);
@@ -573,9 +702,120 @@ export class Sandbox {
    * {@link SandboxError}.
    */
   async getPodIP(): Promise<string | undefined> {
-    let sandboxObj: Record<string, unknown>;
+    const sandboxObj = await this.readSandboxObject();
+    return (sandboxObj && podIPOf(sandboxObj)) || undefined;
+  }
+
+  /**
+   * Whether the Sandbox asks the controller to stay suspended
+   * (`spec.operatingMode` is `Suspended`). This is the desired state: the pod
+   * may still be terminating, which `suspend()` waits for. Rejects with a
+   * {@link SandboxNotFoundError} when the Sandbox object is gone.
+   */
+  async isSuspended(): Promise<boolean> {
+    const obj = await this.readLiveSandbox();
+    return operatingModeOf(obj) === "Suspended";
+  }
+
+  /**
+   * Sets `spec.operatingMode` to `Suspended`, closes the sandboxd connection,
+   * and waits for the `Suspended` condition. Idempotent. Persistent volumes
+   * survive; processes, memory and `emptyDir` data do not.
+   */
+  async suspend(opts?: SuspendResumeOptions): Promise<void> {
+    const budget = lifecycleBudget(opts);
+    const { signal, dispose } = this.lifecycleSignal(opts, budget, "suspend");
     try {
-      sandboxObj = (await this.customObjectsApi.getNamespacedCustomObject({
+      await this.serializeLifecycle(signal, async () => {
+        const { uid, generation } = await this.setOperatingMode(
+          "Suspended",
+          signal,
+        );
+        // Close first so a timed-out wait does not leave a connection to a dying pod.
+        await this.abortable(
+          signal,
+          this.dropConnection("Sandbox is suspending"),
+        );
+        await this.waitForSandbox(
+          "suspend",
+          uid,
+          budget,
+          signal,
+          (obj) =>
+            operatingModeOf(obj) === "Suspended" &&
+            conditionObserved(obj, "Suspended", generation),
+        );
+        this.logger.info(`Sandbox '${this.sandboxName}' suspended`);
+      });
+    } finally {
+      dispose();
+    }
+  }
+
+  /**
+   * Sets `spec.operatingMode` to `Running` and waits for the `Ready`
+   * condition. Idempotent. The next `files` or `commands` call connects to
+   * the new pod.
+   */
+  async resume(opts?: SuspendResumeOptions): Promise<void> {
+    const budget = lifecycleBudget(opts);
+    const { signal, dispose } = this.lifecycleSignal(
+      opts,
+      budget,
+      "become ready",
+    );
+    try {
+      await this.serializeLifecycle(signal, async () => {
+        const { uid, generation, changed } = await this.setOperatingMode(
+          "Running",
+          signal,
+        );
+        if (changed) {
+          await this.abortable(
+            signal,
+            this.dropConnection("Sandbox is resuming"),
+          );
+        }
+        const obj = await this.waitForSandbox(
+          "become ready",
+          uid,
+          budget,
+          signal,
+          (o) =>
+            operatingModeOf(o) === "Running" &&
+            conditionObserved(o, "Ready", generation),
+        );
+        const podIP = podIPOf(obj);
+        const podName = podNameOf(obj) ?? this.sandboxName;
+        if (
+          changed ||
+          (podIP && podIP !== this._podIP) ||
+          podName !== this._podName
+        ) {
+          this._podIP = podIP;
+          this._podName = podName;
+          this.connectionStrategy = this.createStrategy();
+          await this.abortable(
+            signal,
+            this.dropConnection("Sandbox pod changed"),
+          );
+        }
+        this.logger.info(`Sandbox '${this.sandboxName}' resumed`);
+      });
+    } finally {
+      dispose();
+    }
+  }
+
+  /**
+   * Reads the Sandbox object. Resolves with `undefined` when it is gone.
+   * Any other failure rejects with a {@link SandboxError}.
+   */
+  private async readSandboxObject(): Promise<
+    Record<string, unknown> | undefined
+  > {
+    try {
+      return (await this.customObjectsApi.getNamespacedCustomObject({
         group: SANDBOX_API_GROUP,
         version: SANDBOX_API_VERSION,
         namespace: this.namespace,
@@ -589,10 +829,218 @@ export class Sandbox {
         { cause: err },
       );
     }
+  }
 
-    const status = (sandboxObj.status as Record<string, unknown>) ?? {};
-    const podIPs = Array.isArray(status.podIPs) ? status.podIPs : [];
-    return selectPodIP(podIPs) || undefined;
+  /**
+   * Like readSandboxObject(), but rejects with a SandboxNotFoundError when the
+   * Sandbox is gone, terminating, or replaced. The first successful read pins
+   * the `uid` on the handle, so a same-name Sandbox created later is rejected.
+   */
+  private async readLiveSandbox(
+    uid?: string,
+  ): Promise<Record<string, unknown>> {
+    const obj = await this.readSandboxObject();
+    const metadata = (obj?.metadata as Record<string, unknown>) ?? {};
+    if (!obj) {
+      throw new SandboxNotFoundError(
+        `Sandbox '${this.sandboxName}' not found in namespace '${this.namespace}'.`,
+      );
+    }
+    if (metadata.deletionTimestamp) {
+      throw new SandboxNotFoundError(
+        `Sandbox '${this.sandboxName}' is terminating.`,
+      );
+    }
+    const expectedUid = uid ?? this.lifecycleUid;
+    if (expectedUid !== undefined && metadata.uid !== expectedUid) {
+      throw new SandboxNotFoundError(
+        `Sandbox '${this.sandboxName}' was replaced.`,
+      );
+    }
+    if (
+      this.lifecycleUid === undefined &&
+      typeof metadata.uid === "string" &&
+      metadata.uid !== ""
+    ) {
+      this.lifecycleUid = metadata.uid;
+    }
+    return obj;
+  }
+
+  /**
+   * Sets `spec.operatingMode` unless already set. Resolves with the UID and
+   * the generation the controller must observe.
+   */
+  private async setOperatingMode(
+    mode: "Running" | "Suspended",
+    signal: AbortSignal,
+  ): Promise<{ uid: string; generation: number; changed: boolean }> {
+    if (!this.isActive) {
+      throw new SandboxClosedError("Sandbox handle is closed");
+    }
+    if (signal.aborted) throw signal.reason;
+    // A patch abandoned by a timed-out call can still land. Read after it does.
+    await this.abortable(signal, this.lastModePatch);
+    if (signal.aborted) throw signal.reason;
+    const obj = await this.abortable(signal, this.readLiveSandbox());
+    // A cancelled or expired call must not change the operating mode.
+    if (signal.aborted) throw signal.reason;
+    const metadata = obj.metadata as Record<string, unknown>;
+    const uid = metadata.uid;
+    if (typeof uid !== "string" || uid === "") {
+      throw new SandboxMetadataError(
+        `Sandbox '${this.sandboxName}' has no metadata.uid.`,
+      );
+    }
+    if (operatingModeOf(obj) === mode) {
+      return { uid, generation: generationOf(obj), changed: false };
+    }
+    let patched: Record<string, unknown>;
+    try {
+      // The test op rejects the patch if the Sandbox was replaced after the read.
+      const patch = this.customObjectsApi.patchNamespacedCustomObject({
+        group: SANDBOX_API_GROUP,
+        version: SANDBOX_API_VERSION,
+        namespace: this.namespace,
+        plural: SANDBOX_PLURAL_NAME,
+        name: this.sandboxName,
+        body: [
+          { op: "test", path: "/metadata/uid", value: uid },
+          { op: "add", path: "/spec/operatingMode", value: mode },
+        ],
+      });
+      this.lastModePatch = patch.catch(() => {});
+      patched = (await this.abortable(signal, patch)) as Record<
+        string,
+        unknown
+      >;
+    } catch (err: unknown) {
+      if (isK8s404(err)) {
+        throw new SandboxNotFoundError(
+          `Sandbox '${this.sandboxName}' not found in namespace '${this.namespace}'.`,
+          { cause: err },
+        );
+      }
+      throw new SandboxError(
+        `Failed to set operatingMode ${mode} on Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
+        { cause: err },
+      );
+    }
+    return { uid, generation: generationOf(patched), changed: true };
+  }
+
+  /**
+   * Polls the Sandbox until `done` accepts it. Rejects with a
+   * SandboxTimeoutError once the budget runs out.
+   */
+  private async waitForSandbox(
+    description: string,
+    uid: string,
+    budget: { timeoutMs: number; deadline: number },
+    signal: AbortSignal,
+    done: (obj: Record<string, unknown>) => boolean,
+  ): Promise<Record<string, unknown>> {
+    while (true) {
+      if (signal.aborted) throw signal.reason;
+      const obj = await this.abortable(signal, this.readLiveSandbox(uid));
+      if (signal.aborted) throw signal.reason;
+      if (done(obj)) return obj;
+      const remaining = budget.deadline - Date.now();
+      if (remaining <= 0) {
+        throw new SandboxTimeoutError(
+          `Sandbox '${this.sandboxName}' did not ${description} within ${budget.timeoutMs}ms.`,
+        );
+      }
+      await this.sleep(Math.min(LIFECYCLE_POLL_INTERVAL_MS, remaining), signal);
+    }
+  }
+
+  /**
+   * Aborts when the caller cancels, the handle closes, or the budget runs out.
+   * The budget starts at the call, so it also covers time spent queued.
+   */
+  private lifecycleSignal(
+    opts: SuspendResumeOptions | undefined,
+    budget: { timeoutMs: number },
+    description: string,
+  ): { signal: AbortSignal; dispose: () => void } {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => {
+      timeout.abort(
+        new SandboxTimeoutError(
+          `Sandbox '${this.sandboxName}' did not ${description} within ${budget.timeoutMs}ms.`,
+        ),
+      );
+    }, budget.timeoutMs);
+    const signals = [this.connectAbortController.signal, timeout.signal];
+    if (opts?.signal) signals.push(opts.signal);
+    return {
+      signal: AbortSignal.any(signals),
+      dispose: () => {
+        clearTimeout(timer);
+        // Settles the composite signal so its wait listeners are released.
+        timeout.abort();
+      },
+    };
+  }
+
+  /**
+   * Runs suspend() and resume() calls one at a time. A call that is aborted or
+   * expires while queued rejects at once and never starts.
+   */
+  private serializeLifecycle<T>(
+    signal: AbortSignal,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const start = async () => {
+      if (signal.aborted) throw signal.reason;
+      return fn();
+    };
+    const run = this.lifecycleTail.then(start, start);
+    this.lifecycleTail = run.catch(() => {});
+    return this.abortable(signal, run);
+  }
+
+  /**
+   * Settles with `promise`, or rejects as soon as `signal` aborts. The
+   * underlying work keeps running, so an expired call never blocks the calls
+   * queued behind it.
+   */
+  private abortable<T>(signal: AbortSignal, promise: Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      if (signal.aborted) {
+        promise.catch(() => {});
+        reject(signal.reason);
+        return;
+      }
+      const onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(
+        (v) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(v);
+        },
+        (e) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(e);
+        },
+      );
+    });
+  }
+
+  /** Discards the current sandboxd connection; the next call reconnects. */
+  private async dropConnection(reason: string): Promise<void> {
+    // Connect attempts that started before the drop must not install a generation.
+    this.connectionEpoch++;
+    this.connectingPromise = null;
+    const gen = this.currentGeneration;
+    if (gen) {
+      this.invalidateGeneration(
+        gen,
+        new SandboxConnectionError(reason, "unavailable"),
+      );
+    }
+    await this.invalidationPromise;
   }
 
   /**
@@ -796,6 +1244,7 @@ export class Sandbox {
     }
 
     if (!this.connectingPromise) {
+      const epoch = this.connectionEpoch;
       const attempt = this.doConnect()
         .then(async (gen) => {
           // connectAbortController fires synchronously at the start of
@@ -806,11 +1255,18 @@ export class Sandbox {
             await this.teardownGeneration(gen);
             throw new SandboxClosedError("Sandbox handle is closed");
           }
+          if (this.connectionEpoch !== epoch) {
+            await this.teardownGeneration(gen);
+            throw new SandboxConnectionError(
+              "Connection was reset while connecting",
+              "unavailable",
+            );
+          }
           this.currentGeneration = gen;
           return gen;
         })
         .finally(() => {
-          this.connectingPromise = null;
+          if (this.connectingPromise === attempt) this.connectingPromise = null;
         });
       attempt.catch(() => {});
       this.connectingPromise = attempt;
@@ -837,24 +1293,36 @@ export class Sandbox {
 
     let transport: SandboxdTransport | undefined;
     try {
-      transport = await this.connectionStrategy.open();
+      transport = await this.connectionStrategy.open(signal);
       this.logger.debug(
         `sandboxd transport opened (connectivity: ${this.connectionStrategy.connectivity})`,
       );
+
+      // In router mode Authorization is the router's own credential; the
+      // sandboxd token rides X-Sandboxd-Token instead (see routerRouting()).
+      const isRouter =
+        this.sandboxdOptions.connectivity === "router-port-forward";
+      const token = isRouter
+        ? this.sandboxdOptions.routerAuthToken
+        : this.sandboxdOptions.authToken;
+      const authorization = token === undefined ? undefined : `Bearer ${token}`;
+      const routing = this.routerRouting();
 
       const rest = new SandboxdRestClient({
         baseUrl: transport.restBaseUrl,
         maxDownloadSize: this.sandboxdOptions.maxDownloadSize,
         maxUploadSize: this.sandboxdOptions.maxUploadSize,
         maxMetadataResponseSize: this.sandboxdOptions.maxMetadataResponseSize,
-        authorization: this.sandboxdOptions.authorization,
+        authorization,
+        routingHeaders: routing?.restHeaders,
       });
       await this.waitForHealthy(rest, transport, signal);
 
       const process = new ProcessClient({
         grpcBaseUrl: transport.grpcBaseUrl,
         maxCommandOutputSize: this.sandboxdOptions.maxCommandOutputSize,
-        authorization: this.sandboxdOptions.authorization,
+        authorization,
+        routingMetadata: routing?.grpcMetadata,
       });
 
       return {
@@ -870,6 +1338,48 @@ export class Sandbox {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Lowercase routing headers/metadata the router consumes; REST and gRPC
+   * share one map and differ only in x-sandbox-port.
+   */
+  private routerRouting():
+    | {
+        restHeaders: Record<string, string>;
+        grpcMetadata: Record<string, string>;
+      }
+    | undefined {
+    if (this.sandboxdOptions.connectivity !== "router-port-forward") {
+      return undefined;
+    }
+    const common: Record<string, string> = {
+      "x-sandbox-id": this.sandboxName,
+      "x-sandbox-namespace": this.namespace,
+    };
+    // A captured pod IP overrides the router's cache and DNS.
+    if (
+      this.podIP !== "" &&
+      this.serviceFQDN === "" &&
+      !this.sandboxdOptions.disablePodIPRouting
+    ) {
+      common["x-sandbox-pod-ip"] = this.podIP;
+    }
+    // The router strips Authorization but forwards X-Sandboxd-Token, which
+    // sandboxd reads as its bearer token (#2164). Send the bare token there.
+    if (this.sandboxdOptions.authToken !== undefined) {
+      common["x-sandboxd-token"] = this.sandboxdOptions.authToken;
+    }
+    return {
+      restHeaders: {
+        ...common,
+        "x-sandbox-port": String(this.sandboxdOptions.restPort),
+      },
+      grpcMetadata: {
+        ...common,
+        "x-sandbox-port": String(this.sandboxdOptions.grpcPort),
+      },
+    };
   }
 
   private async waitForHealthy(
@@ -900,15 +1410,15 @@ export class Sandbox {
         reject(signal.reason);
         return;
       }
-      const timer = setTimeout(resolve, ms);
-      signal.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          reject(signal.reason);
-        },
-        { once: true },
-      );
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
     });
   }
 
@@ -1264,6 +1774,179 @@ export class Sandbox {
     );
   }
 
+  /**
+   * Returns the iterator behind sandbox.watcher.watch(). Arguments are
+   * validated here, and the stream opens on the first `next()`. Only that
+   * opening is an in-flight operation with a deadline (runOperation()). Like
+   * a started process, a running watch is not counted in-flight, so it never
+   * holds up close(). The lifecycle abort and generation teardown end it.
+   *
+   * The tracing span stays open until the watch ends, as in
+   * readStreamImpl(). sandboxd reports a watch it cannot start on the first
+   * read, after the stream is open, so a span that ended at the opening
+   * would never record that failure.
+   */
+  private watchImpl(
+    path: string,
+    opts?: WatchOptions,
+  ): AsyncIterableIterator<FileEvent> {
+    resolveSandboxPath(path, "watch");
+    const recursive = opts?.recursive ?? false;
+    if (typeof recursive !== "boolean") {
+      throw invalidArgumentError("recursive must be a boolean");
+    }
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    const userSignal = opts?.signal;
+
+    type OpenWatch = { next(): Promise<IteratorResult<FileEvent, undefined>> };
+    const watchAbort = new AbortController();
+    const done = { done: true, value: undefined } as const;
+    let opening: Promise<OpenWatch> | undefined;
+    let ended = false;
+
+    // Settles when the watch ends, which is what ends the span.
+    let finish!: () => void;
+    let fail!: (err: unknown) => void;
+    const finished = new Promise<void>((resolve, reject) => {
+      finish = resolve;
+      fail = reject;
+    });
+    // The caller already receives a failure from next(). The span is the
+    // only other reader, and it is absent when the opening itself failed.
+    finished.catch(() => {});
+
+    // Lets return() end a read that still waits for the shared connection,
+    // without cancelling that connection for other callers.
+    const openingSignal = userSignal
+      ? AbortSignal.any([userSignal, watchAbort.signal])
+      : watchAbort.signal;
+
+    const openStream = (): Promise<OpenWatch> =>
+      this.runOperation<OpenWatch>(
+        timeoutMs,
+        openingSignal,
+        async (gen, openSignal) => {
+          // As in startCommandImpl(), the deadline inside `openSignal` stops
+          // applying once this returns.
+          const streamSignal = AbortSignal.any([openSignal, watchAbort.signal]);
+          const events = await gen.process.watchDir(
+            path,
+            recursive,
+            streamSignal,
+          );
+          // The caller's signal or closeLocal() can stop the stream while no
+          // read is pending. The span must end then, not at a later read
+          // that may never come.
+          streamSignal.addEventListener(
+            "abort",
+            () => {
+              if (ended) return;
+              fail(
+                this.classifyOperationFailure(
+                  streamSignal.reason,
+                  gen,
+                  undefined,
+                  userSignal,
+                ),
+              );
+            },
+            { once: true },
+          );
+          return {
+            next: async () => {
+              try {
+                return await events.next();
+              } catch (err) {
+                throw this.classifyOperationFailure(
+                  err,
+                  gen,
+                  undefined,
+                  userSignal,
+                );
+              }
+            },
+          };
+        },
+      );
+
+    const open = (): Promise<OpenWatch> => {
+      let opened!: (watch: OpenWatch) => void;
+      let openFailed!: (err: unknown) => void;
+      const ready = new Promise<OpenWatch>((resolve, reject) => {
+        opened = resolve;
+        openFailed = reject;
+      });
+      const tracingPromise = withSpan(
+        this.tracingManager?.tracer ?? null,
+        this.traceServiceName,
+        "watcher.watch",
+        async (span) => {
+          if (span.isRecording()) {
+            span.setAttribute("sandbox.recursive", recursive);
+          }
+          let watch: OpenWatch;
+          try {
+            watch = await openStream();
+          } catch (err) {
+            openFailed(err);
+            // return() interrupted the opening, which is not a failure.
+            if (ended) return;
+            throw err;
+          }
+          opened(watch);
+          await finished;
+        },
+        this.tracingManager?.parentContext,
+        (span, err) => {
+          const { code, message } = classifyForTelemetry(err, userSignal);
+          if (span.isRecording()) {
+            span.setAttribute("sandbox.error.code", code);
+          }
+          span.setStatus({ code: spanErrorStatusCode(), message });
+        },
+      );
+      // The caller receives every failure through `ready` or next(). This
+      // promise exists only to keep the span open.
+      tracingPromise.catch(() => {});
+      return ready;
+    };
+
+    const iterator: AsyncIterableIterator<FileEvent> = {
+      [Symbol.asyncIterator]: () => iterator,
+      next: async () => {
+        if (ended) return done;
+        try {
+          opening ??= open();
+          const step = await (await opening).next();
+          if (step.done) {
+            ended = true;
+            // Detaches the stream's signal from the caller's signal and the
+            // Sandbox handle's, which both outlive this watch.
+            watchAbort.abort();
+            finish();
+          }
+          return step;
+        } catch (err) {
+          // return() interrupted this read, so it ends like the iteration.
+          if (ended) return done;
+          ended = true;
+          watchAbort.abort();
+          fail(err);
+          throw err;
+        }
+      },
+      // Called when a `for await` loop is left. Aborting the stream is what
+      // makes sandboxd release the watch.
+      return: async () => {
+        ended = true;
+        watchAbort.abort();
+        finish();
+        return done;
+      },
+    };
+    return iterator;
+  }
+
   private async readFileImpl(
     path: string,
     opts?: FileCallOptions,
@@ -1292,7 +1975,7 @@ export class Sandbox {
     opts?: WriteOptions,
   ): Promise<void> {
     resolveSandboxPath(path, "write");
-    validateMode(opts?.mode);
+    validateWriteOptions(opts ?? {});
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     const bytes =
       typeof content === "string" ? new TextEncoder().encode(content) : content;
@@ -1541,22 +2224,57 @@ export class Sandbox {
     opts?: WriteOptions,
   ): Promise<void> {
     resolveSandboxPath(path, "write");
-    validateMode(opts?.mode);
+    validateWriteOptions(opts ?? {});
+    return this.streamUpload(
+      "write_stream",
+      "writeStream content",
+      content,
+      opts,
+      (gen, signal) => gen.rest.writeStream(path, content, opts ?? {}, signal),
+    );
+  }
+
+  private async extractImpl(
+    path: string,
+    archive: ReadableStream<Uint8Array>,
+    opts?: FileCallOptions,
+  ): Promise<void> {
+    resolveSandboxPath(path, "extract");
+    return this.streamUpload(
+      "extract",
+      "extract archive",
+      archive,
+      opts,
+      (gen, signal) => gen.rest.extract(path, archive, signal),
+    );
+  }
+
+  /**
+   * Runs a streaming upload. A failure of the caller's source stream is
+   * never a sandboxd connection problem, so it is unwrapped for the caller.
+   * `operation` names the span, `what` names the stream in error messages.
+   */
+  private async streamUpload(
+    operation: string,
+    what: string,
+    content: ReadableStream<Uint8Array>,
+    opts: RuntimeCallOptions | undefined,
+    send: (gen: ConnectionGeneration, signal: AbortSignal) => Promise<number>,
+  ): Promise<void> {
     if (content.locked) {
-      throw new SandboxError(
-        "writeStream content is already locked by another reader",
-        { telemetryCode: "invalid_argument" },
-      );
+      throw new SandboxError(`${what} is already locked by another reader`, {
+        telemetryCode: "invalid_argument",
+      });
     }
     const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
     try {
       await this.operate<number>(
-        "files.write_stream",
+        `files.${operation}`,
         timeoutMs,
         opts?.signal,
         (span) => {
           if (span.isRecording()) {
-            span.setAttribute("sandbox.file.operation", "write_stream");
+            span.setAttribute("sandbox.file.operation", operation);
           }
         },
         (span, bytesSent) => {
@@ -1564,8 +2282,7 @@ export class Sandbox {
             span.setAttribute("sandbox.file.size", bytesSent);
           }
         },
-        (gen, signal) =>
-          gen.rest.writeStream(path, content, opts ?? {}, signal),
+        send,
       );
     } catch (err) {
       if (err instanceof SourceFailure) {
@@ -1573,6 +2290,28 @@ export class Sandbox {
       }
       throw err;
     }
+  }
+
+  private async statImpl(
+    path: string,
+    opts?: FileCallOptions,
+  ): Promise<FileEntry> {
+    resolveSandboxPath(path, "stat");
+    const timeoutMs = validateTimeoutMs("timeoutMs", opts?.timeoutMs);
+    return this.operate<FileEntry>(
+      "files.stat",
+      timeoutMs,
+      opts?.signal,
+      (span) => {
+        if (span.isRecording())
+          span.setAttribute("sandbox.file.operation", "stat");
+      },
+      (span, result) => {
+        if (span.isRecording())
+          span.setAttribute("sandbox.file.size", result.size);
+      },
+      (gen, signal) => gen.rest.stat(path, signal),
+    );
   }
 
   private async existsImpl(

@@ -34,6 +34,8 @@ from k8s_agent_sandbox.models import (
 # int forms let callers pass Python's own signal.SIGINT and friends.
 _SIGNAL_NAMES = {"SIGINT": 2, "SIGTERM": 15, "SIGKILL": 9}
 
+_DEFAULT_SIGNAL_TIMEOUT_SECONDS = 5.0
+
 
 def _to_proto_signal(proto_module: Any, sig: int | str) -> int:
     """Map a signal name or number to the proto Signal enum.
@@ -132,6 +134,8 @@ def _signal_error(exc: Any, code: Any, process_id: int) -> Exception:
     """Translate a SendSignal gRPC error into the SDK's exception taxonomy."""
     import grpc
 
+    if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+        return TimeoutError("sandboxd SendSignal timed out: {}".format(exc.details()))
     if code == grpc.StatusCode.NOT_FOUND:
         return LookupError(f"process {process_id} not found: {exc.details()}")
     if code == grpc.StatusCode.PERMISSION_DENIED:
@@ -209,15 +213,22 @@ class ProcessHandle:
                 "sandboxd protocol error: the process stream ended without an "
                 "Exit event")
 
-    def signal(self, sig: int | str) -> None:
-        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process."""
+    def signal(self, sig: int | str,
+               timeout: float = _DEFAULT_SIGNAL_TIMEOUT_SECONDS) -> None:
+        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
+
+        ``timeout`` sets how many seconds to wait for the RPC response.
+        It defaults to five. A timeout raises ``TimeoutError`` with the
+        gRPC error as its cause. Timeout leaves Start open; the signal may
+        already have been delivered.
+        """
         import grpc
 
         request = self._proto.SendSignalRequest(
             process_id=self.process_id, signal=_to_proto_signal(self._proto, sig)
         )
         try:
-            self._stub.SendSignal(request)
+            self._stub.SendSignal(request, timeout=timeout)
         except grpc.RpcError as e:
             rpc_error = cast("grpc.Call", e)
             raise _signal_error(
@@ -295,15 +306,22 @@ class AsyncProcessHandle:
                 "sandboxd protocol error: the process stream ended without an "
                 "Exit event")
 
-    async def signal(self, sig: int | str) -> None:
-        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process."""
+    async def signal(self, sig: int | str,
+                     timeout: float = _DEFAULT_SIGNAL_TIMEOUT_SECONDS) -> None:
+        """Deliver ``sig`` (SIGINT/SIGTERM/SIGKILL) to the running process.
+
+        ``timeout`` sets how many seconds to wait for the RPC response.
+        It defaults to five. A timeout raises ``TimeoutError`` with the
+        gRPC error as its cause. Timeout leaves Start open; the signal may
+        already have been delivered.
+        """
         import grpc
 
         request = self._proto.SendSignalRequest(
             process_id=self.process_id, signal=_to_proto_signal(self._proto, sig)
         )
         try:
-            await self._stub.SendSignal(request)
+            await self._stub.SendSignal(request, timeout=timeout)
         except grpc.aio.AioRpcError as e:
             raise _signal_error(e, e.code(), self.process_id) from e
 

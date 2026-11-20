@@ -201,9 +201,22 @@ router answers `OPTIONS` itself, before any routing or authorization:
   only carry CORS headers when the request itself was gRPC-Web.
 - Responses echo the exact origin with `Access-Control-Allow-Credentials:
   true` (never `*`), so cookie-authenticated deployments
-  (`--authz-cookie-name`) work from the browser too. The cookie credential
-  rides on the `fetch` automatically; the existing cookie origin guard is
-  unchanged and applies on top.
+  (`--authz-cookie-name`) can work from the browser too. Sending and reading
+  are separate conditions: the browser attaches the cookie only when the
+  caller opts into credentials mode — `fetch(url, { credentials: 'include'
+  })`, or the gRPC-Web client library's equivalent (the official `grpc-web`
+  client's `withCredentials`) — and it lets a cross-origin caller read the
+  response only when the origin is listed in `--grpc-web-allowed-origins`.
+  Same-origin calls attach a path-matching cookie with the default
+  credentials mode. When the credential came from a cookie, the separate
+  cookie origin guard still checks `Origin` against
+  `--authz-cookie-allowed-origins` (see [Browser-session
+  credentials](#browser-session-credentials)). One caveat: the bootstrapped
+  cookie is `Path`-scoped to `<path-routing-prefix>/<namespace>/<id>/<port>/`
+  while a gRPC-Web call posts to `/package.Service/Method`, so the browser
+  does not attach it there — cookie auth for gRPC-Web needs a cookie whose
+  `Path` matches the gRPC-Web endpoint, or the caller can send the
+  `Authorization` header instead, which `fetch` sets freely.
 
 Remember that every sandbox behind the router shares one origin (see the
 shared-origin caveat under [Browser-session credentials](#browser-session-credentials)):
@@ -244,6 +257,19 @@ curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
 # -> 101 Switching Protocols, no X-Sandbox-* header sent anywhere in this request
 ```
 
+#### Keeping redirects and cookies under the prefix
+
+An app that has no base-path setting does not know it was addressed as `<prefix>/<namespace>/<id>/<port>/`. Its redirects and cookies would then send the browser out of that prefix, to a path that is not this sandbox. For path-routed requests, the router therefore rewrites:
+
+- an upstream `Location` that points at the sandbox or at the router's own host, to a path under the prefix (`/login` becomes `<prefix>/<namespace>/<id>/<port>/login`). This happens only in the default strip mode;
+- every `Path` attribute of an upstream `Set-Cookie`, so the browser attaches the cookie only to requests for this sandbox. This happens in both modes. A `__Host-` cookie is left alone, because it must keep `Path=/` to be accepted.
+
+Only `Location` and `Set-Cookie` are touched, and only for path-routed requests. Header-routed requests and gRPC responses pass through unchanged, and response bodies are never buffered. This is collision avoidance, not isolation: sandboxes still share one origin, so the prefix does not stop one sandbox's script from reading another's cookie.
+
+This is on by default, which changes the responses of existing path-routed deployments. Set `--path-routing-rewrite-responses=false` to forward them unmodified.
+
+If the sandbox serves under its own base path (for example JupyterLab started with `--ServerApp.base_url`), set `--path-routing-preserve-prefix` instead. The router then forwards the full `<prefix>/<namespace>/<id>/<port>/` path, and it does not rewrite `Location`, because the app already emits prefixed redirects and a second rewrite would double the prefix. `Set-Cookie` paths are still rescoped under the prefix. Authorization still sees the stripped path in both modes, so existing policies do not change. The examples in `examples/jupyterlab-base-path` show this mode.
+
 ## Flags
 
 Run `sandbox-router --help` for the full list. The most relevant:
@@ -267,6 +293,8 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
 | `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
+| `--path-routing-preserve-prefix` | `false` | Forward path-routed requests with the full `<prefix>/<namespace>/<id>/<port>/` path, for a sandbox that serves under its own base path. Requires `--path-routing-prefix`. See [Keeping redirects and cookies under the prefix](#keeping-redirects-and-cookies-under-the-prefix). |
+| `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Set-Cookie Path is rewritten in both modes; Location only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
 | `--grpc-web-allowed-origins` | `""` (same-origin only) | Comma-separated `scheme://host[:port]` allowlist of browser origins permitted to call the router with gRPC-Web. Gates only gRPC-Web CORS — see [gRPC-Web](#grpc-web-browser-clients). Transcoding itself is always on. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
@@ -331,7 +359,7 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
 
-Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
+Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry, or only the Sandbox for a sandbox-scoped token. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
 
 The router reads the verification key file once during startup. It does not reload projected file updates. Use a versioned ConfigMap name in the Pod template so each reader-first key-set change rolls the Deployment, and wait for every router replica to accept the overlapping set before issuers use a new `kid`. The [`examples/scoped-token-v2`](examples/scoped-token-v2/) overlay carries the upstream patch and rotation sequence. Helm values, content-hash annotations, and rollout policy belong to the downstream deployment.
 
@@ -354,7 +382,9 @@ The v2 key file contains unpadded base64url public keys:
 {"keys":[{"kid":"2026-08","publicKey":"<base64url-ed25519-public-key>"}]}
 ```
 
-A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+An exact v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Header-routed requests forward that path byte-for-byte, escaping included, the same way a path-routed request forwards everything after `<port>`. An encoded separator inside one segment (a filename containing `/`, sent as `%2F`) stays escaped on the hop, and the token binds that escaped form. Mint the token for the path the client sends: a token for `/x/y` does not authorize a request sent as `/x%2Fy`. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+
+`authz.MintScopedTokenV2Sandbox` mints a sandbox-scoped token instead. It authorizes every port, method, and path of the bound Sandbox UID until expiry, including sidecar ports, so keep its TTL short. Use it for clients that send one token on every call, such as the Python SDK's router mode. Routers without sandbox-scope support reject these tokens with 403, so upgrade every router replica before issuers mint them.
 
 The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
 

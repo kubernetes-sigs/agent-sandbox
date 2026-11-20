@@ -18,7 +18,7 @@ package server
 // Hand-written rather than generated: the repo carries no OpenAPI codegen
 // toolchain and the surface is small; conformance is pinned by tests.
 
-// FileEntry is one row of a DirectoryListing.
+// FileEntry is path metadata returned by stat or as one row of a DirectoryListing.
 type FileEntry struct {
 	Name       string `json:"name"`
 	Size       int64  `json:"size"`

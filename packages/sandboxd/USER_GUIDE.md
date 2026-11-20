@@ -59,7 +59,9 @@ same workspace and execution environment:
   when the configured runtime is the legacy python-runtime. Against a runtime
   that does not serve the service, the `Unimplemented` gRPC status surfaces
   from the stream instead: the Go SDK delivers it as a terminal `error`
-  FileEvent, and the Python SDK raises `RuntimeError` during iteration. A
+  FileEvent, and the Python SDK raises `RuntimeError` during iteration. The
+  TypeScript SDK supports only sandboxd-compatible runtimes, and its iteration
+  rejects with a `SandboxdRpcError` whose code is `unimplemented`. A
   compatible runtime that wants watcher support must implement `WatchDir` with
   the same path-confinement and terminal-ERROR semantics as the reference
   server.
@@ -115,7 +117,7 @@ explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 | `Start` | Server stream | Run a command, stream `stdout`/`stderr` in real time until `ExitEvent`. Optional PTY. |
 | `Execute` | Unary | Run a command synchronously, return `stdout`/`stderr`/`exit_code` atomically. |
 | `ExecuteWithLimits` | Unary | Run a command with time and output limits, returning explicit execution outcomes. |
-| `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. |
+| `WriteStdin` | Unary | Send `stdin` bytes or `EOF` to a running process. `EOF` on a PTY process fails with `FAILED_PRECONDITION`: the terminal decides what ends input. In canonical mode, write `0x04` (Ctrl-D) at the start of a line (send `\n` first if a partial line is pending). A program in raw mode does not treat `0x04` as EOF; use its own quit input or `SendSignal`. |
 | `SendSignal` | Unary | Deliver `SIGINT`/`SIGTERM`/`SIGKILL` to the process group. |
 | `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
 
@@ -195,17 +197,19 @@ non-directory path).
 the call with `ErrUnsupportedByRuntime` (Go) / `RuntimeError` (Python) when
 the configured runtime is the legacy python-runtime; against a runtime that
 does not serve the service, the `Unimplemented` gRPC status surfaces from the
-stream as a terminal `error` FileEvent (Go) or a `RuntimeError` raised during
-iteration (Python).
+stream as a terminal `error` FileEvent (Go), a `RuntimeError` raised during
+iteration (Python), or a `SandboxdRpcError` with code `unimplemented` rejected
+during iteration (TypeScript).
 
 ### Filesystem & Runtime REST API (`:8080`)
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/v1/files/{path}` | File → raw bytes (`application/octet-stream`); directory → JSON `DirectoryListing`. Optional `type` query (`file` or `directory`, also on `HEAD`): `409` if the path is the other kind. `recursive=true` lists nested directories too, and `max_depth=N` limits how deep (entry names become paths relative to the listed directory). A recursive listing over 10000 entries fails with `400`. |
+| `GET` | `/v1/files/{path}?stat=true` | Metadata for one file or directory as a JSON `FileEntry`. |
 | `HEAD` | `/v1/files/{path}` | Existence/metadata probe without transferring the body. |
 | `PUT` | `/v1/files/{path}` | Atomic write (temp file + rename), auto-creates parents. Optional `mode` query (`^0[0-7]{3}$`, default `0644`). `append=true` adds to the end of the file instead (not atomic). `type=directory` creates a directory instead (body ignored, `parents=true` also creates missing parents, default mode `0755`). `If-None-Match: *` creates the file only if the path does not exist, else `412`. `extract=tar` unpacks a tar body, optionally gzipped, into the directory at the path (not atomic). Accepts raw bytes or `multipart/form-data` (`file` part). |
-| `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. |
+| `DELETE` | `/v1/files/{path}` | Remove a file or directory; `recursive=true` for `rm -rf` behavior; `409` on a non-empty directory otherwise. A symlink as the last path component is removed itself, not followed. |
 | `POST` | `/v1/files/{path}:move` | Rename or move to the required `destination` query path, auto-creating parents. `409` if the destination exists, except that `overwrite=true` replaces a file with a file. Directories are never replaced. A symlink as the last path component is moved or replaced itself, not followed. |
 | `POST` | `/v1/files/{path}:copy` | Same as `:move`, but copies. Directories are copied recursively, files keep their mode, and symlinks inside a directory are copied as links. |
 | `GET` | `/v1/health` | Readiness probe: `200 {"status":"ok"}` or `503` during shutdown. |
@@ -214,6 +218,22 @@ iteration (Python).
 All `{path}` values are resolved against the sandbox root (`/workspace` by
 default) via symlink-aware sanitization; traversal attempts return
 `403 {"code":"PERMISSION_DENIED"}`.
+A write that finds the sandbox filesystem full (or its quota exhausted)
+returns `507 {"code":"RESOURCE_EXHAUSTED"}`, and a path or path component
+longer than the filesystem allows returns `400 {"code":"INVALID_ARGUMENT"}`; other
+unexpected filesystem errors return `500 {"code":"INTERNAL"}`.
+
+For example, `GET /v1/files/notes.txt?stat=true` returns:
+
+```json
+{"name":"notes.txt","size":11,"type":"file","modified_at":"2026-10-26T10:00:00.123456789Z","mode":"0644"}
+```
+
+Stat follows symlinks within the sandbox root and uses the requested basename
+(`/` for the root). It returns the filesystem-reported size and permission bits
+without reading the file or walking a directory, even with `recursive=true`.
+The optional `type` check still applies. Both stat and directory listings
+preserve sub-second modification times in UTC.
 
 ### Concurrency semantics
 
@@ -560,8 +580,8 @@ curl -sf -H "Authorization: Bearer $ROUTER_TOKEN" \
   "$ROUTER_URL/v1/files/src"
 ```
 
-The Python and TypeScript SDKs still send the token only in `Authorization`
-(#2102, #1785), so `auth_token` through the router needs an SDK follow-up.
+The Python SDK sends `auth_token` in `X-Sandboxd-Token` through the router.
+The TypeScript SDK still sends it only in `Authorization` (#2102, #1785).
 
 `/v1/health` stays open so a kubelet `httpGet` readiness probe works without
 the token. Comparison is constant time.

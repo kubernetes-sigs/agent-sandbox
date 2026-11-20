@@ -40,6 +40,7 @@ const (
 	headerSandboxPort      = "X-Sandbox-Port"
 	headerSandboxPodIP     = "X-Sandbox-Pod-IP"
 	headerSandboxTimeout   = "X-Sandbox-Timeout"
+	headerSandboxdToken    = "X-Sandboxd-Token"
 	headerRequestID        = "X-Request-ID"
 )
 
@@ -91,6 +92,10 @@ type callOptions struct {
 	maxAttempts int // 0 = use default (maxAttempts const); 1 = no retry
 	env         map[string]string
 	cwd         string
+	appendWrite bool
+	createOnly  bool
+	recursive   bool
+	maxDepth    int // 0 = unlimited
 }
 
 // WithTimeout sets the total timeout for a single operation. HTTP operations
@@ -141,6 +146,48 @@ func WithWorkingDir(dir string) CallOption {
 	}
 }
 
+// WithAppend makes Files.Write or Files.WriteReader add to the end of the file
+// instead of replacing it. An append is not atomic, and the call does not retry
+// unless WithMaxAttempts is set, because a retry can add the content twice.
+// Other operations ignore it. It cannot be combined with WithCreateOnly.
+// Returns ErrUnsupportedByRuntime on the legacy python-runtime.
+func WithAppend() CallOption {
+	return func(o *callOptions) {
+		o.appendWrite = true
+	}
+}
+
+// WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412
+// HTTPError if the path already exists. The call does not retry unless
+// WithMaxAttempts is set, because a retry after a lost response would fail
+// with 412. Other operations ignore it. It cannot be combined with WithAppend.
+// Returns ErrUnsupportedByRuntime on the legacy python-runtime.
+func WithCreateOnly() CallOption {
+	return func(o *callOptions) {
+		o.createOnly = true
+	}
+}
+
+// WithRecursive makes Files.List include nested entries. Entry names are then
+// paths relative to the listed directory. List returns ErrUnsupportedByRuntime
+// on the legacy python-runtime. Other operations ignore it.
+func WithRecursive() CallOption {
+	return func(o *callOptions) {
+		o.recursive = true
+	}
+}
+
+// WithMaxDepth limits how many directory levels a recursive Files.List
+// descends, where 1 lists only the directory's own entries. Values <= 0 are
+// ignored. It has no effect without WithRecursive.
+func WithMaxDepth(n int) CallOption {
+	return func(o *callOptions) {
+		if n > 0 {
+			o.maxDepth = n
+		}
+	}
+}
+
 // ListOption configures Client.ListAllSandboxes.
 type ListOption func(*listOptions)
 
@@ -175,6 +222,8 @@ type createOptions struct {
 	claimName            string
 	adoptExisting        bool
 	shutdownAfter        *time.Duration
+	shutdownPolicy       *extv1beta1.ShutdownPolicy
+	ttlAfterFinished     *int32
 	sandboxReadyTimeout  time.Duration
 }
 
@@ -195,6 +244,12 @@ func (co *createOptions) apply(o *Options) {
 	o.AdoptExisting = co.adoptExisting
 	if co.shutdownAfter != nil {
 		o.ShutdownAfter = *co.shutdownAfter
+	}
+	if co.shutdownPolicy != nil {
+		o.ShutdownPolicy = *co.shutdownPolicy
+	}
+	if co.ttlAfterFinished != nil {
+		o.TTLSecondsAfterFinished = co.ttlAfterFinished
 	}
 	if co.sandboxReadyTimeout != 0 {
 		o.SandboxReadyTimeout = co.sandboxReadyTimeout
@@ -266,6 +321,22 @@ func WithVolumeClaimTemplates(templates []sandboxv1beta1.PersistentVolumeClaimTe
 func WithShutdownAfter(d time.Duration) CreateOption {
 	return func(o *createOptions) {
 		o.shutdownAfter = &d
+	}
+}
+
+// WithShutdownPolicy sets spec.lifecycle.shutdownPolicy for a single
+// CreateSandbox call, replacing Client-level Options.ShutdownPolicy.
+func WithShutdownPolicy(p extv1beta1.ShutdownPolicy) CreateOption {
+	return func(o *createOptions) {
+		o.shutdownPolicy = &p
+	}
+}
+
+// WithTTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished for a
+// single CreateSandbox call, replacing Client-level Options.TTLSecondsAfterFinished.
+func WithTTLSecondsAfterFinished(seconds int32) CreateOption {
+	return func(o *createOptions) {
+		o.ttlAfterFinished = &seconds
 	}
 }
 
@@ -387,6 +458,8 @@ const (
 // float POSIX timestamp) and the sandboxd wire format (modified_at as an
 // RFC 3339 string, plus mode) into this one shape.
 type FileEntry struct {
+	// Name is the entry's base name, or its path relative to the listed
+	// directory after a WithRecursive listing.
 	Name    string
 	Size    int64
 	Type    FileType

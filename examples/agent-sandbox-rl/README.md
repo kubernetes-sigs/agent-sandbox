@@ -606,8 +606,9 @@ objects; a shared `run_id` or `adopt_existing` is the only layout that shares
 warm pods; `run_isolation="namespace"` gives each run a namespace but needs
 cluster rights to create it. A namespace per user costs the sharing of warm
 pods and nothing else: two users warming the same image hold two pools, on
-image layers they share. Several clusters are a follow-up example: the
-namespace, quota and pre-pull are then needed on each cluster.
+image layers they share. With several clusters, the namespace, the quota and
+the pre-pull are needed on each cluster, and the example's "Several clusters"
+section shows the same commands with a context list.
 
 ## Configuration reference
 

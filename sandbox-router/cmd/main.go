@@ -385,6 +385,9 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 		"otelMetrics", cfg.EnableOTelMetrics,
 		"cache", cfg.CacheEnabled,
 		"authz", cfg.AuthzMode,
+		"pathRoutingPrefix", cfg.PathRoutingPrefix,
+		"pathRoutingPreservePrefix", cfg.PathRoutingPreservePrefix,
+		"pathRoutingRewriteResponses", cfg.PathRoutingRewriteResponses,
 	)
 	return srv.Run(ctx)
 }

@@ -112,7 +112,7 @@ func TestExtractControllerMetrics(t *testing.T) {
 			// MustNewConstMetric call in sandbox_collector.go.
 			Name:   "agent_sandboxes",
 			Type:   typeGauge,
-			Labels: []string{"namespace", "ready_condition", "expired", "launch_type", "sandbox_template", "owned_by", "created_by"},
+			Labels: []string{"namespace", "ready_condition", "expired", "operating_mode", "launch_type", "sandbox_template", "owned_by", "created_by"},
 		},
 	}
 

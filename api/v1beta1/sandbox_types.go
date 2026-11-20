@@ -75,8 +75,8 @@ const (
 	// Service already exists even though one was not explicitly requested.
 	// In all other states Status is False with a reason describing why: the Sandbox is
 	// still provisioning (DependenciesNotReady), suspended (SandboxSuspended), its Pod
-	// has reached a terminal phase (PodSucceeded/PodFailed), it has expired
-	// (SandboxExpired), or the controller hit an error (ReconcilerError).
+	// is terminating (PodTerminating) or terminal (PodSucceeded/PodFailed), it has
+	// expired (SandboxExpired), or the controller hit an error (ReconcilerError).
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxReasonDependenciesReady is the Ready=True reason: the Pod (and Service, if
 	// requested) are provisioned and the Pod reports Ready with an assigned IP.
@@ -111,8 +111,9 @@ const (
 	// Unschedulable, SchedulingGated) without reading the Pod. The Pod
 	// condition's status, reason and message are copied through verbatim,
 	// except when an unscheduled Pod is terminating (Status is False with
-	// reason PodTerminating); the condition is absent while the Sandbox has
-	// no backing Pod.
+	// reason PodTerminating). The condition is never removed: while the
+	// Sandbox has no backing Pod it reports False with reason PodAbsent, and
+	// once the Sandbox has expired, False with reason SandboxExpired.
 	SandboxConditionPodScheduled ConditionType = "PodScheduled"
 	// SandboxReasonPodScheduled indicates the backing Pod has been scheduled
 	// to a node. Used when the Pod's PodScheduled condition carries no reason
@@ -122,20 +123,35 @@ const (
 	// determined: the Pod has not reported PodScheduled yet, reports it without a
 	// reason (and not True), or could not be read.
 	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
-	// SandboxReasonPodTerminating indicates the backing Pod is terminating
-	// (its DeletionTimestamp is set).
+	// SandboxReasonPodTerminating indicates the backing Pod has a deletion
+	// timestamp. Ready keeps it even after the Pod reaches Failed or Succeeded,
+	// and Finished stays unchanged rather than reporting that phase. With
+	// failedPodPolicy Recreate, the controller replaces a Failed Pod instead, so
+	// Ready is DependenciesNotReady and Finished stays absent unless it was
+	// already set.
 	SandboxReasonPodTerminating = "PodTerminating"
+	// SandboxReasonPodAbsent indicates the PodScheduled condition is False because
+	// the Sandbox has no backing Pod, for example before the Pod is created, while
+	// a failed Pod is replaced, or while the Sandbox is suspended. While the Sandbox
+	// is suspended, a Pod with its name that it does not own counts as absent.
+	SandboxReasonPodAbsent = "PodAbsent"
 
-	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
-	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason
-	// recording which; it is absent while the Pod is still running or does not exist.
+	// SandboxConditionFinished reports whether the backing Pod reached a terminal phase.
+	// It is absent until the Pod first has Succeeded or Failed, and then set (Status
+	// True) with the reason recording which. Once set, it is never removed. It keeps
+	// its last value while the Sandbox is suspended, while its Pod is terminating, and
+	// when a later Pod read fails. Otherwise it is False with reason NotFinished until
+	// a later Pod finishes.
 	SandboxConditionFinished ConditionType = "Finished"
 	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
 	SandboxReasonPodSucceeded = "PodSucceeded"
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
+	// SandboxReasonNotFinished indicates the Finished condition is False because the
+	// Sandbox has no backing Pod or its Pod has not reached a terminal phase.
+	SandboxReasonNotFinished = "NotFinished"
 
-	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime.
+	// SandboxReasonExpired is a Ready=False and PodScheduled=False reason: the Sandbox reached its shutdownTime.
 	// Teardown of its underlying resources may still be pending (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 

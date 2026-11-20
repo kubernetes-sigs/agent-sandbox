@@ -22,12 +22,12 @@ import atexit
 import functools
 import logging
 from types import TracebackType
-from typing import Any, Dict, Generic, List, Self, Tuple, Type, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Self, Tuple, Type, TypeVar
 
 from kubernetes import client
 from kubernetes.client import ApiException
 
-from .claim_adoption import validate_claim_name, validate_claim_for_adoption
+from .claim_adoption import validate_claim_name, validate_claim_for_adoption, is_already_exists
 
 # Import all tracing components from the trace_manager module
 from .trace_manager import (
@@ -133,6 +133,8 @@ class SandboxClient(Generic[T]):
         claim_name: str | None = None,
         adopt_existing: bool = False,
         shutdown_after_seconds: int | None = None,
+        shutdown_policy: Literal["Delete", "DeleteForeground", "Retain"] | None = None,
+        ttl_seconds_after_finished: int | None = None,
         volume_claim_templates: list[dict[str, Any]] | None = None,
         pod_labels: dict[str, str] | None = None,
         pod_annotations: dict[str, str] | None = None,
@@ -149,15 +151,26 @@ class SandboxClient(Generic[T]):
                 (``SandboxClaim.metadata.labels``).
             claim_name: Optional DNS-1123 Claim name. Explicit names remain
                 caller-owned and are excluded from automatic cleanup.
-            adopt_existing: On 409, attach to the existing named Claim after
+            adopt_existing: On AlreadyExists, attach to the existing named Claim after
                 checking its warm pool and that it is not terminating. Requires
                 claim_name. Creation options are not reapplied on adoption;
-                an existing shutdownTime is preserved.
+                the existing lifecycle is preserved.
             shutdown_after_seconds: Optional TTL in seconds. When set, the
                 claim's ``spec.lifecycle`` is populated with a ``shutdownTime``
                 of *now + shutdown_after_seconds* (UTC) and a ``shutdownPolicy``
-                of ``"Delete"``, so the controller auto-deletes the claim on
-                expiry. Must be a positive integer.
+                of ``"Delete"`` unless shutdown_policy is given.
+                Must be a positive integer.
+            shutdown_policy: Value for ``spec.lifecycle.shutdownPolicy``.
+                When a timer is set and no policy is given, the SDK sends Delete;
+                the API's own default for an omitted policy is Retain.
+                Retain keeps the claim and deletes its Sandbox. With cleanup
+                enabled and a generated name, the client still deletes a Retain
+                claim on exit.
+            ttl_seconds_after_finished: Seconds, zero or more, for
+                ``spec.lifecycle.ttlSecondsAfterFinished``. The timer starts only
+                when the Pod reaches Succeeded or Failed. A Pod with
+                restartPolicy Always never does, so pair this with
+                shutdown_after_seconds. With both timers, the earlier deadline wins.
             volume_claim_templates: Optional list of volume claim templates
                 to override/merge with the sandbox template.
             pod_labels: Optional labels stamped onto the running Sandbox **Pod**
@@ -185,7 +198,10 @@ class SandboxClient(Generic[T]):
 
         pod_metadata = build_pod_metadata(pod_labels, pod_annotations)
 
-        lifecycle = construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds) if shutdown_after_seconds is not None else None
+        lifecycle = construct_sandbox_claim_lifecycle_spec(
+            shutdown_after_seconds, shutdown_policy=shutdown_policy,
+            ttl_seconds_after_finished=ttl_seconds_after_finished,
+        ) or None
 
         generated_name = claim_name is None
         if adopt_existing and generated_name:
@@ -214,7 +230,7 @@ class SandboxClient(Generic[T]):
             except ApiException as error:
                 if error.status == 409:
                     cleanup_generated = False
-                if not (adopt_existing and error.status == 409):
+                if not (adopt_existing and is_already_exists(error)):
                     raise
                 created_claim = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
             if not generated_name:
@@ -298,24 +314,31 @@ class SandboxClient(Generic[T]):
 
         # Check if the sandbox actually exists in Kubernetes
         try:
-            sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout)
+            claim_object = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
+            if not claim_object:
+                raise SandboxNotFoundError(f"SandboxClaim '{claim_name}' not found in namespace '{namespace}'.")
+            sandbox_id = self.k8s_helper.resolve_sandbox_name(claim_name, namespace, timeout=resolve_timeout, initial_claim=claim_object)
             sandbox_object = self.k8s_helper.get_sandbox(sandbox_id, namespace)
             if not sandbox_object:
                 raise SandboxNotFoundError(f"Underlying Sandbox '{sandbox_id}' not found.")
         except Exception as e:
-            if existing:
-                # A failed lookup doesn't mean the claim is gone, and cleanup
-                # only reaches tracked handles, so close locally and stay tracked.
+            # Other callers may hold this handle, so close it only once its claim
+            # or Sandbox is gone. It stays tracked because cleanup only reaches
+            # tracked handles.
+            if existing and self._claim_or_sandbox_gone(claim_name, existing.sandbox_id, namespace):
                 existing.close_connection()
             raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
-        # If it's already in the registry and active (and verified on K8s), return the existing object
-        if existing and existing.is_active:
+        # Reuse the tracked handle only while it is active and still bound to the claim's current Sandbox
+        if existing and existing.is_active and existing.sandbox_id == sandbox_id:
             return existing
 
-        # If the sandbox is not active, pop it out from the tracking list
+        # Close the inactive or stale handle. A failed close must not block its replacement.
         if existing:
-            self._active_connection_sandboxes.pop(key, None)
+            try:
+                existing.close_connection()
+            except Exception as e:
+                logger.error(f"Failed to close stale sandbox connection for '{claim_name}' in namespace '{namespace}': {e}")
 
         # Re-attach: Create a fresh handle for the existing ID
         new_handle = self.sandbox_class(
@@ -332,6 +355,16 @@ class SandboxClient(Generic[T]):
         self._active_connection_sandboxes[key] = new_handle
         return new_handle
     
+    def _claim_or_sandbox_gone(self, claim_name: str, sandbox_id: str, namespace: str) -> bool:
+        """Returns True if the claim or the Sandbox is gone, False if both exist or a GET fails."""
+        try:
+            claim = self.k8s_helper.get_sandbox_claim(claim_name, namespace)
+            if not claim:
+                return True
+            return self.k8s_helper.get_sandbox(sandbox_id, namespace) is None
+        except Exception:
+            return False
+
     def list_active_sandboxes(self) -> List[Tuple[str, str]]:
         """Returns a list of tuples containing (namespace, claim_name) currently managed by this client.
         
@@ -461,7 +494,8 @@ class SandboxClient(Generic[T]):
         if span.is_recording():
             span.set_attribute("sandbox.claim.name", claim_name)
             if lifecycle:
-                span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
+                if "shutdownTime" in lifecycle:
+                    span.set_attribute("sandbox.lifecycle.shutdown_time", lifecycle["shutdownTime"])
                 span.set_attribute("sandbox.lifecycle.shutdown_policy", lifecycle["shutdownPolicy"])
 
         annotations = {}

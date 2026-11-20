@@ -216,6 +216,25 @@ func TestRead_ReturnsContent(t *testing.T) {
 	}
 }
 
+func TestRead_SandboxdRejectsDirectory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("type") != "file" {
+			t.Errorf("query = %q, want type=file", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"code":"CONFLICT","message":"path is a directory"}`))
+	}))
+	defer server.Close()
+
+	c := newReadyTestSandbox(server.URL)
+	c.files.runtime = RuntimeSandboxd
+	_, err := c.Read(context.Background(), "dir")
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusConflict {
+		t.Fatalf("Read() error = %v, want 409 HTTPError", err)
+	}
+}
+
 func TestRead_EmptyFileReturnsNonNilSlice(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
@@ -486,6 +505,18 @@ func TestList_DotPathDoesNotRedirect(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected no entries, got %d", len(entries))
+	}
+}
+
+func TestList_RecursiveUnsupportedOnLegacy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("legacy runtime must not receive a request")
+	}))
+	defer server.Close()
+
+	_, err := newReadyTestSandbox(server.URL).List(context.Background(), ".", WithRecursive())
+	if !errors.Is(err, ErrUnsupportedByRuntime) {
+		t.Fatalf("List() error = %v, want ErrUnsupportedByRuntime", err)
 	}
 }
 
@@ -1304,8 +1335,8 @@ func TestWriteReader_LegacyMultipartUpload(t *testing.T) {
 
 func TestWriteReader_SandboxdRawUpload(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.EscapedPath() != "/v1/files/dir%2Fstream.txt" {
-			t.Errorf("request = %s %s, want PUT /v1/files/dir%%2Fstream.txt", r.Method, r.URL.EscapedPath())
+		if r.Method != http.MethodPut || r.URL.EscapedPath() != "/v1/files/dir/stream.txt" {
+			t.Errorf("request = %s %s, want PUT /v1/files/dir/stream.txt", r.Method, r.URL.EscapedPath())
 		}
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -1352,7 +1383,10 @@ func TestWriteReader_PreservesPathValidation(t *testing.T) {
 		want    string
 	}{
 		{name: "legacy directory", runtime: RuntimeLegacyPython, path: "dir/file.txt", want: "not a plain filename"},
-		{name: "sandboxd traversal", runtime: RuntimeSandboxd, path: "dir/../file.txt", want: "must not contain"},
+		{name: "sandboxd trailing slash", runtime: RuntimeSandboxd, path: "dir/", want: "not a valid file path"},
+		{name: "sandboxd root", runtime: RuntimeSandboxd, path: ".", want: "sandbox root"},
+		{name: "sandboxd escape", runtime: RuntimeSandboxd, path: "../file.txt", want: "escapes the sandbox root"},
+		{name: "sandboxd dotdot segment", runtime: RuntimeSandboxd, path: "dir/../file.txt", want: "escapes the sandbox root"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

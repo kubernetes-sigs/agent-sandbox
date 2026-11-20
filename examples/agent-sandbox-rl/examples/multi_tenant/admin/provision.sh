@@ -16,30 +16,33 @@
 # Provision one tenant: namespace rl-<user>, RBAC, quota, limits, network policy.
 # Run as a cluster admin. Re-running is safe (kubectl apply).
 #
-#   provision.sh <user> [--context ctx] [--user-subject name]
+#   provision.sh <user> [--contexts a,b] [--user-subject name]
 #                [--pods 16] [--cpu 4] [--memory 8Gi] [--claims 16]
 #                [--max-cpu 2] [--max-memory 4Gi] [--controller-namespace agent-sandbox-system]
 #                [--shared-namespace rl-shared] [--dry-run] [--delete]
 #
-# --user-subject binds a User identity next to the tenant's ServiceAccount
-# (default: the user name). --delete removes the tenant's namespace and its
-# cluster-scoped bindings. --shared-namespace is the namespace the admin
-# pre-pulls from (created if missing; "" to skip).
+# --contexts applies everything to each listed kube context in turn (default:
+# the current context); a tenant on several clusters has the same namespace,
+# quota and policy on each. --user-subject binds a User identity next to the
+# tenant's ServiceAccount (default: the user name). --delete removes the
+# tenant's namespace and its cluster-scoped bindings, on every context.
+# --shared-namespace is the namespace the admin pre-pulls from (created if
+# missing; "" to skip).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 user="${1:-}"
 if [[ -z "$user" || "$user" == -* ]]; then
-  sed -n '16,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2
+  sed -n '/^# Provision one tenant/,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 2
 fi
 shift
 
-context=""; user_subject="$user"; pods=16; cpu=4; memory=8Gi; claims=16
+contexts=""; user_subject="$user"; pods=16; cpu=4; memory=8Gi; claims=16
 max_cpu=2; max_memory=4Gi; controller_ns=agent-sandbox-system; shared_ns=rl-shared
 dry_run=0; delete=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --context) context="$2"; shift 2;;
+    --contexts|--context) contexts="$2"; shift 2;;
     --user-subject) user_subject="$2"; shift 2;;
     --pods) pods="$2"; shift 2;;
     --cpu) cpu="$2"; shift 2;;
@@ -55,9 +58,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-K=(kubectl)
-if [[ -n "$context" ]]; then K+=(--context "$context"); fi
-
 render() {
   python3 "$here/render.py" "$here/tenant.yaml" \
     "TENANT=$user" "TENANT_USER=$user_subject" "CONTROLLER_NAMESPACE=$controller_ns" \
@@ -65,24 +65,30 @@ render() {
     "LIMIT_MAX_CPU=$max_cpu" "LIMIT_MAX_MEMORY=$max_memory"
 }
 
-if [[ "$delete" == "1" ]]; then
-  echo "deleting tenant $user (namespace rl-$user and its bindings)"
-  "${K[@]}" delete clusterrolebinding "rl-tenant-cluster-read-$user" --ignore-not-found
-  "${K[@]}" delete rolebinding "rl-tenant-controller-view-$user" -n "$controller_ns" --ignore-not-found
-  "${K[@]}" delete namespace "rl-$user" --ignore-not-found --wait=false
-  exit 0
-fi
-
 if [[ "$dry_run" == "1" ]]; then
   cat "$here/cluster-read.yaml"; echo "---"; render; exit 0
 fi
 
-"${K[@]}" apply -f "$here/cluster-read.yaml"
-render | "${K[@]}" apply -f -
-if [[ -n "$shared_ns" ]]; then
-  "${K[@]}" create namespace "$shared_ns" --dry-run=client -o yaml | "${K[@]}" apply -f -
-fi
+IFS=',' read -r -a ctx_list <<< "$contexts"
+if [[ ${#ctx_list[@]} -eq 0 ]]; then ctx_list=(""); fi
+for ctx in "${ctx_list[@]}"; do
+  K=(kubectl)
+  if [[ -n "$ctx" ]]; then K+=(--context "$ctx"); echo "== context $ctx"; fi
+  if [[ "$delete" == "1" ]]; then
+    echo "deleting tenant $user (namespace rl-$user and its bindings)"
+    "${K[@]}" delete clusterrolebinding "rl-tenant-cluster-read-$user" --ignore-not-found
+    "${K[@]}" delete rolebinding "rl-tenant-controller-view-$user" -n "$controller_ns" --ignore-not-found
+    "${K[@]}" delete namespace "rl-$user" --ignore-not-found --wait=false
+    continue
+  fi
+  "${K[@]}" apply -f "$here/cluster-read.yaml"
+  render | "${K[@]}" apply -f -
+  if [[ -n "$shared_ns" ]]; then
+    "${K[@]}" create namespace "$shared_ns" --dry-run=client -o yaml | "${K[@]}" apply -f -
+  fi
+done
+if [[ "$delete" == "1" ]]; then exit 0; fi
 echo
-echo "tenant $user is provisioned in namespace rl-$user"
-echo "  kubeconfig for its ServiceAccount:  $here/tenant_kubeconfig.sh $user${context:+ --context $context}"
+echo "tenant $user is provisioned in namespace rl-$user${contexts:+ on $contexts}"
+echo "  kubeconfig for its ServiceAccount:  $here/tenant_kubeconfig.sh $user${contexts:+ --contexts $contexts}"
 echo "  quota:                             kubectl describe resourcequota rl-tenant -n rl-$user"

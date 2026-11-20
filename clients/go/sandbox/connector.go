@@ -74,6 +74,10 @@ type connector struct {
 	// for sandboxd and for any in-cluster dial, which address the pod and so
 	// have nothing to consume them.
 	routerHeaders bool
+	// authHeader and authValue carry the sandboxd token on every REST request
+	// and gRPC call. Both are empty when no token is set.
+	authHeader string
+	authValue  string
 	// grpcTarget is the dial address for sandboxd's gRPC services. The pod
 	// tunnel and in-cluster strategies publish it, and Connect publishes it
 	// for the router port-forward.
@@ -99,6 +103,7 @@ type connectorConfig struct {
 	ServerPort          int
 	SandboxdGRPCPort    int
 	RouterHeaders       bool
+	SandboxdAuthToken   string
 	RequestTimeout      time.Duration
 	PerAttemptTimeout   time.Duration
 	HTTPTransport       http.RoundTripper
@@ -122,7 +127,19 @@ func newConnector(cfg connectorConfig) *connector {
 			ExpectContinueTimeout: 1 * time.Second,
 		}
 	}
+	// The router consumes Authorization for its own credential and does not
+	// forward it, so the sandboxd token travels in its own header there.
+	var authHeader, authValue string
+	switch {
+	case cfg.SandboxdAuthToken == "":
+	case cfg.RouterHeaders:
+		authHeader, authValue = headerSandboxdToken, cfg.SandboxdAuthToken
+	default:
+		authHeader, authValue = "Authorization", "Bearer "+cfg.SandboxdAuthToken
+	}
 	return &connector{
+		authHeader:          authHeader,
+		authValue:           authValue,
 		strategy:            cfg.Strategy,
 		namespace:           cfg.Namespace,
 		serverPort:          cfg.ServerPort,
@@ -239,6 +256,9 @@ func (c *connector) GRPCConn() (*grpc.ClientConn, error) {
 	if ts, ok := c.strategy.(*tunnelStrategy); ok && ts.routerREST {
 		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(routerRouting{c: c}))
 	}
+	if c.authHeader != "" {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(sandboxdAuth{key: strings.ToLower(c.authHeader), value: c.authValue}))
+	}
 	conn, err := grpc.NewClient(c.grpcTarget, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("%s: failed to create gRPC client: %w", prefix, err)
@@ -269,6 +289,18 @@ func (r routerRouting) GetRequestMetadata(context.Context, ...string) (map[strin
 
 // RequireTransportSecurity returns false because GRPCConn dials without TLS.
 func (routerRouting) RequireTransportSecurity() bool { return false }
+
+// sandboxdAuth sends the sandboxd token as metadata on every gRPC call.
+type sandboxdAuth struct {
+	key, value string
+}
+
+func (a sandboxdAuth) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{a.key: a.value}, nil
+}
+
+// RequireTransportSecurity returns false because GRPCConn dials without TLS.
+func (sandboxdAuth) RequireTransportSecurity() bool { return false }
 
 // Close clears state (so concurrent SendRequests see ErrNotReady
 // immediately) then tears down the strategy.
@@ -344,6 +376,12 @@ func (cc *cancelOnClose) Close() error {
 // (e.g., 301, 302, 303, 307, 308), the response is returned directly to the caller
 // with its body unclosed and a nil error (instead of being followed automatically).
 func (c *connector) SendRequest(ctx context.Context, method, endpoint string, body io.Reader, contentType string, maxRetries int) (*http.Response, error) {
+	return c.SendRequestWithHeaders(ctx, method, endpoint, body, contentType, nil, maxRetries)
+}
+
+// SendRequestWithHeaders is SendRequest with extra request headers. The SDK's
+// own headers override extra on a name clash.
+func (c *connector) SendRequestWithHeaders(ctx context.Context, method, endpoint string, body io.Reader, contentType string, extra http.Header, maxRetries int) (*http.Response, error) {
 	limit := maxRetries
 	if limit <= 0 {
 		limit = maxAttempts
@@ -408,6 +446,12 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			return nil, fmt.Errorf("sandbox: failed to create request: %w", err)
 		}
 
+		for name, values := range extra {
+			for _, v := range values {
+				req.Header.Add(name, v)
+			}
+		}
+
 		// Router headers only apply to router-based transports; the
 		// sandboxd pod tunnel talks to the pod directly.
 		if c.routerHeaders {
@@ -427,6 +471,9 @@ func (c *connector) SendRequest(ctx context.Context, method, endpoint string, bo
 			if podIP != "" && !c.disablePodIPRouting {
 				req.Header.Set(headerSandboxPodIP, podIP)
 			}
+		}
+		if c.authHeader != "" {
+			req.Header.Set(c.authHeader, c.authValue)
 		}
 		req.Header.Set(headerRequestID, reqID)
 		if contentType != "" {

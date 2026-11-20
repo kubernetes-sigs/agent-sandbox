@@ -16,16 +16,19 @@ package proxy
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"sync"
 	"syscall"
 	"time"
 )
 
 // retryTransport wraps an http.RoundTripper and retries on dial-class errors.
 // Retrying on dial failures is safe for any request — including POST/PUT with
-// non-replayable bodies — because Go's http.Transport does not touch the
-// request body until after a successful Dial. After-dial failures
+// non-replayable bodies — because Go's http.Transport does not read the
+// request body until after a successful Dial. It does close the body when the
+// Dial fails, so RoundTrip hands it a retryBody that holds that Close back. After-dial failures
 // (response timeouts, mid-stream EOF, etc.) bypass the retry path so we never
 // risk re-sending a partially-consumed body.
 //
@@ -65,18 +68,29 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	delay := t.initialDelay
 	var lastErr error
 
+	var body *retryBody
+	if t.maxAttempts > 1 && req.Body != nil && req.Body != http.NoBody {
+		body = &retryBody{ReadCloser: req.Body}
+		outreq := *req
+		outreq.Body = body
+		req = &outreq
+	}
+
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
 	for attempt := 1; attempt <= t.maxAttempts; attempt++ {
 		resp, err := t.base.RoundTrip(req)
 		if err == nil {
+			body.release()
 			return resp, nil
 		}
 		lastErr = err
 		if !isRetriableDialError(err) || attempt == t.maxAttempts {
+			body.closeNow()
 			return nil, err
 		}
+		body.rearm()
 		if t.onRetry != nil {
 			t.onRetry(req, err, attempt)
 		}
@@ -93,6 +107,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		case <-req.Context().Done():
 			// Surface the original dial error rather than the context error so
 			// the proxy ErrorHandler reports the actual upstream failure.
+			body.closeNow()
 			return nil, lastErr
 		}
 
@@ -101,7 +116,66 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			delay = t.maxDelay
 		}
 	}
+	body.closeNow()
 	return nil, lastErr
+}
+
+// retryBody wraps a request body so that the Close http.Transport issues after
+// a failed Dial does not close the body before the next attempt. While an
+// attempt is in flight, Close is only recorded. Once RoundTrip settles on a
+// result, release or closeNow forwards it, and later Close calls go straight
+// to the wrapped body.
+type retryBody struct {
+	io.ReadCloser
+
+	mu             sync.Mutex
+	settled        bool
+	closeRequested bool
+}
+
+func (b *retryBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.settled {
+		return b.ReadCloser.Close()
+	}
+	b.closeRequested = true
+	return nil
+}
+
+// rearm drops a Close recorded during a failed attempt, before the next one.
+func (b *retryBody) rearm() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closeRequested = false
+}
+
+// release stops holding Close back after a successful attempt, and forwards a
+// Close the transport already issued during it.
+func (b *retryBody) release() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.settled = true
+	if b.closeRequested {
+		_ = b.ReadCloser.Close()
+	}
+}
+
+// closeNow closes the wrapped body when RoundTrip gives up.
+func (b *retryBody) closeNow() {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.settled = true
+	_ = b.ReadCloser.Close()
 }
 
 // isRetriableDialError reports whether err indicates a dial-time failure that

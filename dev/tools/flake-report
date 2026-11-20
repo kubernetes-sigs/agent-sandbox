@@ -27,6 +27,16 @@ test's own sources; such PR-local failures are listed but never filed. A test
 whose failures cluster in one breakage window that has since cleared is
 recovered breakage, also listed but never filed.
 
+Postsubmit and periodic jobs that write no junit (the image push job, the
+kops benchmark periodics) have no per-test rows, so their health only shows
+in the job-level Overall cell. When every recent run of such a job failed,
+the report lists the job as consistently failing and, with --update-issues,
+files a `kind/failing-test` issue that names the first failing commit. When
+such a job fails intermittently, the report lists it as flaky and files a
+`kind/flake` issue, because a flaky publish job can skip images a release
+promotes. The report skips junit-less presubmit tabs (lint, autogen): a red
+run there is the PR's own change, not a broken main.
+
 With --update-issues it also files or refreshes one `kind/flake` GitHub issue
 per flaky test, so the issue tracker is the durable state: reruns are
 idempotent and no local files are written. Requires `gh` to be authenticated
@@ -44,6 +54,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -71,19 +82,44 @@ JOB_LEVEL_ROW = re.compile(r"\.(Overall|Pod)$")
 
 ISSUE_MARKER_PREFIX = "<!-- flake-report:test="
 INFRA_MARKER_PREFIX = "<!-- flake-report:infra-tab="
+JOB_MARKER_PREFIX = "<!-- flake-report:job="
+JOB_FLAKE_MARKER_PREFIX = "<!-- flake-report:job-flake="
+
+
+class FetchUnavailable(RuntimeError):
+    """The server could not be reached, so nothing is known about the URL.
+
+    Distinct from a plain RuntimeError, which means the server answered and
+    the resource is absent (HTTP 4xx). Callers that classify CI runs must
+    treat an unreachable artifact as unknown, never as missing.
+    """
+
+
+# curl exit codes for failures that happen before any HTTP answer: DNS,
+# connect, timeout, TLS, and dropped connections. Anything else, above all
+# 22 (HTTP error under -f), is an answer and is not retried.
+TRANSIENT_CURL_EXITS = {6, 7, 28, 35, 52, 55, 56}
+FETCH_ATTEMPTS = 3
+FETCH_RETRY_SECONDS = (2, 5)
 
 
 def fetch_text(url):
     # curl rather than urllib: python installs without CA bundles (common on
     # macOS) fail TLS verification, and curl is already a repo-tooling
     # prerequisite alongside gh and jq.
-    result = subprocess.run(
-        ["curl", "-fsSL", "--max-time", "60", url],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"fetch {url} failed: {result.stderr.strip()}")
-    return result.stdout
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        result = subprocess.run(
+            ["curl", "-fsSL", "--max-time", "60", url],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        if result.returncode not in TRANSIENT_CURL_EXITS:
+            raise RuntimeError(f"fetch {url} failed: {result.stderr.strip()}")
+        if attempt < FETCH_ATTEMPTS:
+            time.sleep(FETCH_RETRY_SECONDS[min(attempt, len(FETCH_RETRY_SECONDS)) - 1])
+    raise FetchUnavailable(
+        f"fetch {url} unreachable after {FETCH_ATTEMPTS} attempts: {result.stderr.strip()}")
 
 
 def fetch_json(url):
@@ -154,6 +190,8 @@ def make_artifact_fetcher(gcs_query, build_id):
                 try:
                     pointer = fetch_text(
                         f"{GCS_HTTP}/{gcs_query}/{build_id}.txt").strip()
+                except FetchUnavailable:
+                    raise
                 except RuntimeError:
                     return None
                 if pointer.startswith("gs://"):
@@ -163,11 +201,18 @@ def make_artifact_fetcher(gcs_query, build_id):
         return cache["dir"]
 
     def fetch(name):
+        """Returns the parsed artifact, None when the run has no such file.
+
+        Raises FetchUnavailable when the server could not be reached, so a
+        network blip is never mistaken for a missing artifact.
+        """
         base = resolve()
         if not base:
             return None
         try:
             return fetch_json(f"{base}/{name}")
+        except FetchUnavailable:
+            raise
         except (RuntimeError, ValueError):
             return None
 
@@ -207,12 +252,18 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
                            (rebase needed)
       "infra"           -- pod started, produced no junit, and none of the
                            above explains the red run
+      "unknown"         -- the run's artifacts could not be fetched, so no
+                           verdict is possible; counted nowhere
 
     fetch_artifact(name) returns the parsed JSON artifact from the run's GCS
-    dir, or None when unavailable; only artifacts needed for the verdict are
-    fetched.
+    dir, None when the run has no such file, and raises FetchUnavailable
+    when the server could not be reached; only artifacts needed for the
+    verdict are fetched.
     """
-    finished = fetch_artifact("finished.json") or {}
+    try:
+        finished = fetch_artifact("finished.json") or {}
+    except FetchUnavailable:
+        return "unknown"
     # podutils writes "ABORTED" but crier writes "aborted" when the pod died
     # before podutils could upload — exactly the junit-less runs classified
     # here, so the comparison must be case-insensitive.
@@ -222,7 +273,10 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
         return "test_failure"
     if has_test_results:
         return "pretest_failure"
-    clone_records = fetch_artifact("clone-records.json")
+    try:
+        clone_records = fetch_artifact("clone-records.json")
+    except FetchUnavailable:
+        return "unknown"
     if clone_records is not None:
         failed = [r for r in clone_records if r.get("failed")]
         if failed:
@@ -302,9 +356,22 @@ def test_source_paths(name):
     this test the PR's own regression rather than a flake. SDK suites
     (pytest, vitest) match their whole SDK and e2e trees, since a change to
     the SDK implementation or harness breaks tests in any file; Go suites
-    match their package."""
+    match their package.
+
+    TestGrid reports every pytest test as "pytest.<name>" with no suite, and
+    dev/tools/test-unit runs pytest suites from the Python SDK, the
+    integrations, the examples and three dev tooling directories, so a
+    pytest name has to match all of those roots. Otherwise a PR that adds a
+    failing test to an integration is reported as main-wide breakage. The
+    cost is that a genuine SDK flake on a PR touching one of these trees is
+    counted as that PR's regression; flaky still needs two distinct PRs, so
+    a real flake surfaces on the next unrelated PR. Attributing a pytest
+    name to its exact suite would need the per-run junit file names."""
     if name.startswith("pytest."):
-        return ["test/e2e/clients/python/", "clients/python/"]
+        return ["test/e2e/clients/python/", "clients/python/",
+                "clients/integrations/", "examples/",
+                "dev/tools/", "dev/ci/presubmits/shared/",
+                "dev/load-test/test-recipes/"]
     if re.match(r"(.*?\.test\.ts)", name):
         return ["test/e2e/clients/typescript/",
                 "clients/typescript/agentic-sandbox-client/"]
@@ -363,6 +430,119 @@ def is_recovered_breakage(fail_cols, pass_cols, recent):
     return dense and bool(recent) and recent[0] in PASS_STATUSES
 
 
+def is_presubmit_tab(gcs_query, tab):
+    """True for tabs whose runs belong to PRs rather than to main.
+
+    Prow writes presubmit results under pr-logs/ and everything else under
+    logs/. When the table has no query, the tab name prefix decides. An
+    unrecognized tab counts as presubmit, so the report stays quiet about
+    its job-level failures rather than filing a false breakage.
+    """
+    if gcs_query:
+        return "/pr-logs/" in gcs_query
+    return not tab.startswith(("post-", "periodic-", "ci-"))
+
+
+def run_commit(fetch):
+    """Returns the SHA a run built, or "" when the artifacts do not say.
+
+    started.json carries the resolved SHA in repo-commit for postsubmit and
+    periodic runs alike. finished.json has a revision field too, but on
+    periodic runs it holds the branch name, so it only counts when it looks
+    like a SHA.
+    """
+    sha = (fetch("started.json") or {}).get("repo-commit") or ""
+    if not sha:
+        revision = (fetch("finished.json") or {}).get("revision") or ""
+        if re.fullmatch(r"[0-9a-f]{7,40}", revision):
+            sha = revision
+    return sha
+
+
+def job_health(tab, overall, timestamps, fetcher, job_history):
+    """Judges a junit-less job on its Overall row.
+
+    Returns ("breakage", finding) when the newest RECENT_RUNS completed,
+    non-aborted runs all failed and there are at least two of them, so one
+    failed run of a brand-new job does not file an issue. The finding names
+    the first run of the failing streak because its commit is where the
+    breakage landed. Returns ("flaky", finding) when the window holds at
+    least two non-aborted failures mixed with passes, and ("recovered",
+    finding) when those failures form one breakage window that has since
+    cleared, the same rule per-test rows use. Returns None otherwise.
+    Failure times come from finished.json, so a run that ends after its
+    tracking issue was closed counts as a new failure.
+    """
+    def cell(i):
+        return overall[i] if i < len(overall) else 0
+
+    finished_cache = {}
+
+    def finished_of(i):
+        if i not in finished_cache:
+            finished_cache[i] = fetcher(i)("finished.json") or {}
+        return finished_cache[i]
+
+    def aborted(i):
+        return (finished_of(i).get("result") or "").upper() == "ABORTED"
+
+    def failure_ms(i):
+        seconds = finished_of(i).get("timestamp")
+        if seconds:
+            return int(seconds) * 1000
+        return timestamps[i] if i < len(timestamps) else 0
+
+    completed = [i for i in range(len(overall))
+                 if cell(i) not in (0, RUNNING_STATUS)]
+    failed = [i for i in completed if cell(i) in FAIL_STATUSES and not aborted(i)]
+    passed = [i for i in completed if cell(i) in PASS_STATUSES]
+    recent = [i for i in completed
+              if cell(i) not in FAIL_STATUSES or i in failed][:RECENT_RUNS]
+
+    if len(recent) >= 2 and all(i in failed for i in recent):
+        # An aborted run inside the streak is neither a pass nor a failure:
+        # it neither ends the streak nor counts toward it.
+        streak = []
+        for i in completed:
+            if cell(i) not in FAIL_STATUSES:
+                break
+            if i in failed:
+                streak.append(i)
+        first = streak[-1]
+        return "breakage", {
+            "job": "breakage",
+            "tab": tab,
+            "test": f"{tab}.Overall",
+            "short": tab,
+            "fails": len(streak),
+            "first_failure_ts": timestamps[first] if first < len(timestamps) else 0,
+            "first_failing_commit": run_commit(fetcher(first)),
+            "last_failure_ts": failure_ms(streak[0]),
+            "job_history": job_history,
+        }
+
+    if len(failed) >= 2 and passed:
+        # A fixed breakage leaves a dense run of failures followed by
+        # passes; that is the breakage issue's history, not a flake.
+        kind = "recovered" if is_recovered_breakage(
+            failed, passed, [cell(i) for i in recent]) else "flaky"
+        return kind, {
+            "job": kind,
+            "tab": tab,
+            "test": f"{tab}.Overall",
+            "short": tab,
+            "fails": len(failed),
+            "passes": len(passed),
+            "distinct_changelists": len(failed),
+            "retest_flips": 0,
+            "flaky_cells": 0,
+            "self_regression_cols": 0,
+            "last_failure_ts": failure_ms(failed[0]),
+            "job_history": job_history,
+        }
+    return None
+
+
 def analyze_tab(dashboard, tab, window, pr_files=None):
     """Returns (flaky, consistent, infra, pr_local, recovered) for one tab.
 
@@ -416,8 +596,11 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
     # failure, and those errors must not count as flakes. Only meaningful
     # on tabs that report per-test rows; on junit-less tabs (lint, autogen)
     # a red run is indistinguishable from a legitimately failing PR.
+    # A column whose artifacts could not be fetched is unknown: it might be
+    # an aborted run, so it is kept out of every count rather than guessed.
     col_class = {}
     aborted_cols = set()
+    unknown_cols = set()
     if test_rows:
         for i in range(ncols):
             red = overall is not None and cell(overall, i) in FAIL_STATUSES
@@ -426,8 +609,14 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
                 col_class[i] = classify_red_run(has_fail, ran_in(i), fetcher(i))
                 if col_class[i] == "aborted":
                     aborted_cols.add(i)
+                elif col_class[i] == "unknown":
+                    unknown_cols.add(i)
             elif has_fail:
-                finished = fetcher(i)("finished.json") or {}
+                try:
+                    finished = fetcher(i)("finished.json") or {}
+                except FetchUnavailable:
+                    unknown_cols.add(i)
+                    continue
                 if (finished.get("result") or "").upper() == "ABORTED":
                     aborted_cols.add(i)
 
@@ -438,7 +627,10 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
         artifact fetcher already located; None on periodic tabs."""
         if i not in col_pr:
             resolve = getattr(fetcher(i), "resolved_dir", None)
-            col_pr[i] = pr_number_from_dir(resolve()) if resolve else None
+            try:
+                col_pr[i] = pr_number_from_dir(resolve()) if resolve else None
+            except FetchUnavailable:
+                col_pr[i] = None
         return col_pr[i]
 
     # Columns where a large fraction of tests failed at once are a broken PR
@@ -481,7 +673,8 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
         suite = suite_of(name)
 
         def excluded(i):
-            return i in aborted_cols or i in mass_cols or (suite, i) in suite_mass
+            return (i in aborted_cols or i in unknown_cols or i in mass_cols
+                    or (suite, i) in suite_mass)
 
         fail_cols = [i for i in range(ncols)
                      if cell(statuses, i) in FAIL_STATUSES and not excluded(i)]
@@ -615,6 +808,7 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
                 1 for c in col_class.values() if c == "clone_failure"),
             "pretest_failures": sum(
                 1 for c in col_class.values() if c == "pretest_failure"),
+            "unknown_runs": sum(1 for c in col_class.values() if c == "unknown"),
             "total_runs": sum(1 for i in range(ncols) if cell(overall, i) != 0),
             "last_failure_ts": max(
                 (timestamps[i] for i in infra_cols if i < len(timestamps)),
@@ -622,6 +816,19 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
             ),
             "job_history": job_history,
         }
+
+    # A junit-less postsubmit or periodic job has no test rows for the
+    # per-test rules above to see, so the Overall row decides whether it is
+    # broken or flaky. Presubmit tabs stay out: a red lint or autogen run is
+    # the PR's own doing.
+    if not test_rows and overall is not None and not is_presubmit_tab(gcs_query, tab):
+        health = job_health(tab, overall, timestamps, fetcher, job_history)
+        if health and health[0] == "breakage":
+            consistent.append(health[1])
+        elif health and health[0] == "recovered":
+            recovered.append(health[1])
+        elif health:
+            flaky.append(health[1])
     return flaky, consistent, infra, pr_local, recovered
 
 
@@ -641,6 +848,12 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
     ]
     if flaky:
         for f in sorted(flaky, key=lambda f: -f["fails"]):
+            if f.get("job"):
+                lines.append(
+                    f"- `{f['tab']}` (job): {f['fails']} of "
+                    f"{f['fails'] + f['passes']} completed runs failed; "
+                    f"last failed {fmt_ts(f['last_failure_ts'])} — see {f['job_history']}")
+                continue
             lines.append(
                 f"- `{f['test']}` ({f['tab']}): {f['fails']} failure(s) across "
                 f"{f['distinct_changelists']} PR(s)/commit(s), {f['passes']} pass(es), "
@@ -655,7 +868,14 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
     lines += ["", "## Consistently failing (not flakes — investigate as breakage)"]
     if consistent:
         for f in consistent:
-            lines.append(f"- `{f['test']}` ({f['tab']}): failing at head")
+            if f.get("job"):
+                lines.append(
+                    f"- `{f['tab']}` (job): every run since "
+                    f"{fmt_ts(f['first_failure_ts'])} failed ({f['fails']} run(s), "
+                    f"first failing commit {f['first_failing_commit'][:12] or 'unknown'})"
+                    f" — see {f['job_history']}")
+            else:
+                lines.append(f"- `{f['test']}` ({f['tab']}): failing at head")
     else:
         lines.append("- none")
     lines += ["", "## Recovered breakage (not flakes, failures clustered in "
@@ -706,8 +926,14 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
                 f"- {i['tab']}: {i['pretest_failures']} red run(s) were "
                 f"pre-test PR breakage (compile/vet/mypy gates — "
                 f"author-actionable)")
+        if i.get("unknown_runs"):
+            lines.append(
+                f"- {i['tab']}: {i['unknown_runs']} red run(s) could not be "
+                f"classified because their artifacts were unreachable; rerun "
+                f"the report before acting on this tab")
         excluded_any = excluded_any or any(
-            i.get(k) for k in ("aborted_runs", "clone_failures", "pretest_failures"))
+            i.get(k) for k in ("aborted_runs", "clone_failures",
+                               "pretest_failures", "unknown_runs"))
     if not excluded_any:
         lines.append("- none")
     return "\n".join(lines) + "\n"
@@ -728,6 +954,33 @@ def find_existing_issue(existing_issues, marker, test_name=None):
             m = re.match(r"\[FLAKE\]\s+(\S+)", issue.get("title", ""))
             if m and m.group(1) in names:
                 return issue
+    return None
+
+
+def find_manual_job_issue(existing_issues, tab):
+    """Finds a hand-filed open issue about a job's flakiness, or None.
+
+    A maintainer who files a job's flakiness by hand rarely uses the
+    `[FLAKE] <name>` form, so an issue counts when its title names the tab
+    as a whole word. Issues the tool created carry a marker and are matched
+    by that marker instead, so one tab's issue never stands in for a tab
+    whose name merely contains it.
+    """
+    pattern = re.compile(r"(?<![\w-])" + re.escape(tab) + r"(?![\w-])")
+    for issue in existing_issues:
+        title = issue.get("title", "")
+        if "<!-- flake-report:" in issue.get("body", ""):
+            continue
+        # `[FLAKE] <test> (<tabs>)` is the per-test title form: one
+        # unspaced test name, then the tabs it flakes in. Such an issue names
+        # the tab as a place, not as the thing that flakes. A hand-written
+        # job title like `[FLAKE] Push images job (post-x)` has spaces
+        # before the parenthesis and does not match.
+        per_test = re.match(r"\[FLAKE\]\s+(\S+)\s+\(([^)]*)\)\s*$", title)
+        if per_test and per_test.group(1) != tab and pattern.search(per_test.group(2)):
+            continue
+        if pattern.search(title):
+            return issue
     return None
 
 
@@ -815,27 +1068,83 @@ or triage manually per [docs/testing.md](https://github.com/kubernetes-sigs/agen
 """
 
 
-def update_issues(repo, flaky, infra, dry_run):
-    existing = json.loads(
-        gh(
-            "issue", "list", "--repo", repo, "--label", "kind/flake",
-            "--state", "open", "--limit", "200", "--json", "number,title,body",
-        )
-    )
+def issue_body_for_job(b, marker, repo):
+    """Issue text for a junit-less job whose recent runs all failed."""
+    sha = b["first_failing_commit"]
+    commit = (f"[`{sha[:12]}`](https://github.com/{repo}/commit/{sha})"
+              if sha else "unknown")
+    return f"""{marker}
+**Job failing on every recent run, detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
+
+| | |
+|---|---|
+| Job | `{b['tab']}` |
+| Consecutive failing runs | {b['fails']} |
+| First failing run | {fmt_ts(b['first_failure_ts'])} at commit {commit} |
+| Last failure | {fmt_ts(b['last_failure_ts'])} |
+| Job history | {b['job_history']} |
+
+This job writes no per-test results, so every recent run failing means the
+job itself is broken, not one test. For a build or publish job that means
+`main` is broken for what it produces; start from the first failing commit.
+For the kops benchmark periodics it can also be cluster bring-up or GCP
+quota, so read the newest failed run's build log in the job history before
+bisecting.
+
+Close this issue once the job is green again. The report does not close it.
+
+/kind failing-test
+"""
+
+
+def issue_body_for_job_flake(f, marker):
+    """Issue text for a junit-less job that fails intermittently."""
+    return f"""{marker}
+**Job failing intermittently, detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
+
+| | |
+|---|---|
+| Job | `{f['tab']}` |
+| Failed runs in window | {f['fails']} of {f['fails'] + f['passes']} completed |
+| Last failure | {fmt_ts(f['last_failure_ts'])} |
+| Job history | {f['job_history']} |
+
+This job writes no per-test results and every run is a commit on `main`, so
+these failures are not a PR's change. Open the failed runs in the job history
+and look for the step they share: a registry push, a timeout, or a kops
+cluster bring-up. A publish job that fails part way can skip images a
+release promotes, so treat it with the same urgency as a flaky test.
+
+/kind flake
+"""
+
+
+def list_issues(repo, label, state, fields):
+    """Returns up to 200 issues with the label in the given state."""
+    return json.loads(
+        gh("issue", "list", "--repo", repo, "--label", label,
+           "--state", state, "--limit", "200", "--json", fields))
+
+
+def update_issues(repo, flaky, infra, dry_run, breakages=()):
+    existing = list_issues(repo, "kind/flake", "open", "number,title,body")
     # Closed issues participate in dedup too: a maintainer closing a
     # verified false positive must not have it re-filed while the stale
     # failing columns are still inside the TestGrid window.
-    closed = json.loads(
-        gh(
-            "issue", "list", "--repo", repo, "--label", "kind/flake",
-            "--state", "closed", "--limit", "200",
-            "--json", "number,body,closedAt",
-        )
-    )
+    closed = list_issues(repo, "kind/flake", "closed", "number,body,closedAt")
     actions = []
     for f in flaky:
-        marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
-        issue = find_existing_issue(existing, marker, f["short"])
+        if f.get("job"):
+            marker = f"{JOB_FLAKE_MARKER_PREFIX}{f['tab']} -->"
+            title = f"[FLAKE] {f['tab']}: job fails intermittently"
+            body_text = issue_body_for_job_flake(f, marker)
+            issue = find_existing_issue(existing, marker) or find_manual_job_issue(
+                existing, f["tab"])
+        else:
+            marker = f"{ISSUE_MARKER_PREFIX}{f['test']} -->"
+            title = f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})"
+            body_text = issue_body_for_flake(f, marker)
+            issue = find_existing_issue(existing, marker, f["short"])
         if issue and marker not in issue.get("body", ""):
             # Matched by title only: a maintainer filed it by hand. Don't
             # clobber their body with our template — just don't duplicate it.
@@ -849,7 +1158,7 @@ def update_issues(repo, flaky, infra, dry_run):
             if m and int(m.group(1)) >= f["last_failure_ts"]:
                 actions.append(f"skip #{issue['number']} (no new failures): {f['short']}")
                 continue
-            body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
+            body = body_text + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
             actions.append(f"update #{issue['number']}: {f['short']}")
             if not dry_run:
                 # Refresh the title too: it embeds the tab list, which goes
@@ -857,8 +1166,7 @@ def update_issues(repo, flaky, infra, dry_run):
                 # issues were skipped above, so this only ever rewrites
                 # titles this tool created.
                 gh("issue", "edit", str(issue["number"]), "--repo", repo,
-                   "--title", f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})",
-                   "--body", body)
+                   "--title", title, "--body", body)
         else:
             prior = find_closed_issue(closed, marker)
             if prior and should_skip_for_closed(
@@ -867,17 +1175,23 @@ def update_issues(repo, flaky, infra, dry_run):
                     f"skip (closed #{prior['number']}, no failures since "
                     f"close): {f['short']}")
                 continue
-            body = issue_body_for_flake(f, marker) + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
+            body = body_text + f"\n<!-- last-reported-failure={f['last_failure_ts']} -->\n"
             if prior:
                 body += lineage_note(prior)
-            actions.append(f"create: [FLAKE] {f['short']}")
+            actions.append(f"create: {title if f.get('job') else '[FLAKE] ' + f['short']}")
             if not dry_run:
-                gh("issue", "create", "--repo", repo,
-                   "--title", f"[FLAKE] {f['short']} ({', '.join(f['tabs'])})",
+                gh("issue", "create", "--repo", repo, "--title", title,
                    "--label", "kind/flake", "--body", body)
 
     for i in infra:
         if not i or not i["infra_runs"]:
+            continue
+        if i.get("unknown_runs"):
+            # Some red runs could not be classified, so the infra count is
+            # a lower bound at best and the issue text would be wrong.
+            actions.append(
+                f"skip ({i['unknown_runs']} red run(s) unclassified, artifacts "
+                f"unreachable): infra {i['tab']}")
             continue
         marker = f"{INFRA_MARKER_PREFIX}{i['tab']} -->"
         issue = find_existing_issue(existing, marker)
@@ -919,6 +1233,40 @@ this count.
                 gh("issue", "create", "--repo", repo,
                    "--title", f"[FLAKE] {i['tab']}: infrastructure failures before tests ran",
                    "--label", "kind/flake", "--body", body)
+
+    # Broken jobs are tracked as kind/failing-test, so they are listed and
+    # deduplicated separately from the flake issues above.
+    if breakages:
+        existing = list_issues(repo, "kind/failing-test", "open", "number,title,body")
+        closed = list_issues(repo, "kind/failing-test", "closed", "number,body,closedAt")
+    for b in breakages:
+        marker = f"{JOB_MARKER_PREFIX}{b['tab']} -->"
+        title = f"[FAILING] {b['tab']}: job fails on every recent run"
+        body = (issue_body_for_job(b, marker, repo)
+                + f"\n<!-- last-reported-failure={b['last_failure_ts']} -->\n")
+        issue = find_existing_issue(existing, marker)
+        if issue:
+            m = re.search(r"last-reported-failure=(\d+)", issue["body"])
+            if m and int(m.group(1)) >= b["last_failure_ts"]:
+                actions.append(f"skip #{issue['number']} (no new failures): job {b['tab']}")
+                continue
+            actions.append(f"update #{issue['number']}: job {b['tab']}")
+            if not dry_run:
+                gh("issue", "edit", str(issue["number"]), "--repo", repo, "--body", body)
+        else:
+            prior = find_closed_issue(closed, marker)
+            if prior and should_skip_for_closed(
+                    prior.get("closedAt"), b["last_failure_ts"]):
+                actions.append(
+                    f"skip (closed #{prior['number']}, no failures since "
+                    f"close): job {b['tab']}")
+                continue
+            if prior:
+                body += lineage_note(prior)
+            actions.append(f"create: {title}")
+            if not dry_run:
+                gh("issue", "create", "--repo", repo, "--title", title,
+                   "--label", "kind/failing-test", "--body", body)
     return actions
 
 
@@ -934,7 +1282,9 @@ def main():
                         help="minimum flake events before an issue is filed "
                              "(retest flips always qualify)")
     parser.add_argument("--update-issues", action="store_true",
-                        help="file/refresh kind/flake GitHub issues (default: report only)")
+                        help="file/refresh kind/flake issues for flaky tests and "
+                             "kind/failing-test issues for broken postsubmit/periodic "
+                             "jobs (default: report only)")
     parser.add_argument("--dry-run", action="store_true",
                         help="with --update-issues, print planned issue actions only")
     parser.add_argument("--json", dest="json_out", metavar="PATH",
@@ -989,7 +1339,8 @@ def main():
             f for f in merge_flaky_by_test(flaky)
             if f["retest_flips"] or f["flaky_cells"] or f["fails"] >= args.min_flakes
         ]
-        actions = update_issues(args.repo, issue_worthy, infra, args.dry_run)
+        actions = update_issues(args.repo, issue_worthy, infra, args.dry_run,
+                                [c for c in consistent if c.get("job")])
         prefix = "[dry-run] " if args.dry_run else ""
         for a in actions:
             print(f"{prefix}{a}")

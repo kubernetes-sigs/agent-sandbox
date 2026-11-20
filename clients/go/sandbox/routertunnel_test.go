@@ -165,7 +165,7 @@ func TestRouterTunnelStrategy_Connect_ForwardsRouterHTTP(t *testing.T) {
 			TargetRef: &corev1.ObjectReference{Name: "router-pod-abc"},
 		}},
 	}
-	kubeCS := fake.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(slice)
 
 	fw := &fakeForwarder{
 		ports:       []portforward.ForwardedPort{{Local: 23456, Remote: routerProxyPort}},
@@ -214,7 +214,7 @@ func TestRouterTunnelStrategy_Connect_ForwardsRouterHTTP(t *testing.T) {
 }
 
 func TestRouterTunnelStrategy_Connect_NoEndpoints(t *testing.T) {
-	kubeCS := fake.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset()
 	tracer, svcName := newTracer(Options{TraceServiceName: "sandbox-client-test"})
 	s := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
@@ -253,7 +253,7 @@ func routerSliceIn(namespace string) *discoveryv1.EndpointSlice {
 // the Options -> namespace wiring is what gets exercised.
 func newRouterTunnelForTest(t *testing.T, opts Options, slice *discoveryv1.EndpointSlice) (*tunnelStrategy, *string) {
 	t.Helper()
-	kubeCS := fake.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(slice)
 	k8s := &K8sHelper{
 		CoreClient:      kubeCS.CoreV1(),
 		DiscoveryClient: kubeCS.DiscoveryV1(),
@@ -421,14 +421,20 @@ func (r *fakeGRPCRouter) lastGRPCHeaders(t *testing.T) http.Header {
 // listener on routerLocal.
 func newRouterPortForwardSandbox(t *testing.T, routerLocal uint16) (*Sandbox, *fakeForwarder, *[]string) {
 	t.Helper()
-	opts := routerPortForwardOpts()
+	return newRouterPortForwardSandboxWith(t, routerLocal, routerPortForwardOpts())
+}
+
+// newRouterPortForwardSandboxWith is newRouterPortForwardSandbox with
+// caller-supplied Options.
+func newRouterPortForwardSandboxWith(t *testing.T, routerLocal uint16, opts Options) (*Sandbox, *fakeForwarder, *[]string) {
+	t.Helper()
 	opts.RequestTimeout = 5 * time.Second
 	opts.PerAttemptTimeout = 2 * time.Second
 	sb, _, _ := newTestSandbox(opts)
 
 	ts, ok := sb.connector.strategy.(*tunnelStrategy)
 	require.True(t, ok, "expected *tunnelStrategy, got %T", sb.connector.strategy)
-	kubeCS := fake.NewSimpleClientset(routerSliceIn("default")) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(routerSliceIn("default"))
 	ts.discoveryClient = kubeCS.DiscoveryV1()
 	ts.tunnel.coreClient = kubeCS.CoreV1()
 	ts.tunnel.restConfig = &rest.Config{}
@@ -506,6 +512,27 @@ func TestRouterPortForward_RunReachesSandboxdThroughRouter(t *testing.T) {
 	require.Equal(t, "ok", health.Status)
 }
 
+// The router strips Authorization, so the sandboxd token must travel in
+// X-Sandboxd-Token on both REST and gRPC.
+func TestRouterPortForward_SandboxdTokenUsesOwnHeader(t *testing.T) {
+	opts := routerPortForwardOpts()
+	opts.SandboxdAuthToken = "tok"
+	svc := &fakeProcessService{response: &processv1.ExecuteResponse{}}
+	router := startFakeGRPCRouter(t, opts.SandboxdGRPCPort, svc)
+	sb, fw, _ := newRouterPortForwardSandboxWith(t, router.port, opts)
+	require.NoError(t, sb.connector.Connect(context.Background()))
+	t.Cleanup(func() {
+		_ = sb.connector.Close()
+		waitForwardReturned(t, fw)
+	})
+
+	_, err := sb.Run(context.Background(), "true")
+	require.NoError(t, err)
+	h := router.lastGRPCHeaders(t)
+	require.Equal(t, "tok", h.Get(headerSandboxdToken))
+	require.Empty(t, h.Get("Authorization"))
+}
+
 // A custom SandboxdGRPCPort must reach the router as X-Sandbox-Port.
 func TestRouterPortForward_RunUsesConfiguredGRPCPort(t *testing.T) {
 	const grpcPort = 19090
@@ -518,7 +545,7 @@ func TestRouterPortForward_RunUsesConfiguredGRPCPort(t *testing.T) {
 	opts.PerAttemptTimeout = 2 * time.Second
 	sb, _, _ := newTestSandbox(opts)
 	ts := sb.connector.strategy.(*tunnelStrategy)
-	kubeCS := fake.NewSimpleClientset(routerSliceIn("default")) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fake.NewClientset(routerSliceIn("default"))
 	ts.discoveryClient = kubeCS.DiscoveryV1()
 	ts.tunnel.coreClient = kubeCS.CoreV1()
 	ts.tunnel.restConfig = &rest.Config{}

@@ -177,6 +177,7 @@ async def test_channel_authentication(rpc_server, asynchronous, token, router):
             ("x-sandbox-id", "caller-override"),
             ("x-sandbox-namespace", "caller-override"),
             ("x-sandbox-port", "1"),
+            ("x-sandboxd-token", "caller-override"),
         )
     if token is not None:
         metadata += (("authorization", "caller-override"),)
@@ -201,6 +202,9 @@ async def test_channel_authentication(rpc_server, asynchronous, token, router):
             received = rpc_server.received[-1]
             expected = [] if token is None else [f"Bearer {token}"]
             assert [value for key, value in received if key == "authorization"] == expected
+            assert [value for key, value in received if key == "x-sandboxd-token"] == (
+                ["sandboxd-token"] if router else []
+            )
             assert ("x-request-id", "request") in received
             assert ("x-request-id", "second") in received
             assert ("custom-bin", b"\x00\xff") in received
@@ -238,7 +242,10 @@ async def test_rest_authentication(asynchronous, token, router):
     try:
         headers = {"AUTHORIZATION": "caller-override"} if token else {}
         if router:
-            headers.update({"x-sandbox-id": "wrong", "x-sandbox-namespace": "wrong", "x-sandbox-port": "1"})
+            headers.update({
+                "x-sandbox-id": "wrong", "x-sandbox-namespace": "wrong", "x-sandbox-port": "1",
+                "X-Sandboxd-Token": "wrong",
+            })
         response = connector.send_request("GET", "v1/files/a", headers=headers)
         if asynchronous:
             response = await response
@@ -250,6 +257,7 @@ async def test_rest_authentication(asynchronous, token, router):
             assert sent["x-sandbox-namespace"] == "ns"
             assert sent["x-sandbox-port"] == "8181"
             assert len([key for key in send.call_args.kwargs["headers"] if key.lower() == "x-sandbox-port"]) == 1
+        assert sent.get("x-sandboxd-token") == ("sandboxd-token" if router else None)
         assert sent.get("authorization") == (f"Bearer {token}" if token else None)
     finally:
         if asynchronous:
@@ -397,7 +405,7 @@ def test_router_auth_token_redaction():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", (False, True))
 @pytest.mark.parametrize("router_token", ("router-token", None))
-async def test_router_never_uses_sandboxd_auth_token(rpc_server, asynchronous, router_token):
+async def test_router_sends_sandboxd_auth_token_separately(rpc_server, asynchronous, router_token):
     config = SandboxdRouterTunnelConnectionConfig(
         auth_token="sandboxd-token", router_auth_token=router_token, grpc_port=9191,
     )
@@ -426,7 +434,8 @@ async def test_router_never_uses_sandboxd_auth_token(rpc_server, asynchronous, r
         received = rpc_server.received[-1]
         expected = [authorization] if authorization else []
         assert [value for key, value in received if key == "authorization"] == expected
-        assert all("sandboxd-token" not in str(value) for _, value in received)
+        assert [value for key, value in received if key == "x-sandboxd-token"] == ["sandboxd-token"]
+        assert all("sandboxd-token" not in str(value) for key, value in received if key != "x-sandboxd-token")
 
         headers = {"AUTHORIZATION": "caller-override"} if router_token else {}
         response = connector.send_request(
@@ -437,7 +446,8 @@ async def test_router_never_uses_sandboxd_auth_token(rpc_server, asynchronous, r
         assert response.status_code == 200
         sent = {key.lower(): value for key, value in send.call_args.kwargs["headers"].items()}
         assert sent.get("authorization") == authorization
-        assert all("sandboxd-token" not in value for value in sent.values())
+        assert sent["x-sandboxd-token"] == "sandboxd-token"
+        assert all("sandboxd-token" not in value for key, value in sent.items() if key != "x-sandboxd-token")
     finally:
         if asynchronous:
             await connector.close()

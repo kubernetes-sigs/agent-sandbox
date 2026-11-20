@@ -39,6 +39,7 @@ from .models import AdditionalPodMetadata
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
     construct_sandbox_claim_env_spec,
+    current_not_ready,
     is_valid_gateway_hostname,
     is_valid_ip,
     select_pod_ip,
@@ -156,7 +157,8 @@ class AsyncK8sHelper:
         ))
 
     async def resolve_sandbox_name(
-        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None
+        self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
+        *, initial_claim: dict[str, Any] | None = None,
     ) -> str:
         """Resolves the actual Sandbox name from the SandboxClaim status.
         With warm pool adoption, the sandbox name may differ from the claim
@@ -167,9 +169,11 @@ class AsyncK8sHelper:
             resource_version: Optional resourceVersion to start the watch
                 from (e.g. ``metadata.resourceVersion`` of the create
                 response). Defaults to ``"0"`` — see ``_watch_claim``.
+            initial_claim: Optional GET response to evaluate before
+                waiting for future watch events.
         """
         return await self._watch_claim(claim_name, namespace, timeout, require_ready=False,
-                                       resource_version=resource_version)
+                                       resource_version=resource_version, initial_claim=initial_claim)
 
     async def wait_for_claim_ready(
         self, claim_name: str, namespace: str, timeout: int, resource_version: str | None = None,
@@ -280,31 +284,27 @@ class AsyncK8sHelper:
                             rv = seen_rv
                         status = claim_object.get("status") or {}
 
-                        ready = False
-                        for cond in status.get("conditions", []):
-                            if (
-                                cond.get("type") == "Ready"
-                                and cond.get("status") == "False"
-                                and cond.get("reason") == "TemplateNotFound"
-                            ):
+                        not_ready = current_not_ready(claim_object)
+                        if not_ready is not None:
+                            reason = not_ready.get("reason")
+                            if reason == "TemplateNotFound":
                                 raise SandboxTemplateNotFoundError(
-                                    f"SandboxTemplate requested does not exist: {cond.get('message', 'Template not found')}"
+                                    f"SandboxTemplate requested does not exist: {not_ready.get('message', 'Template not found')}"
                                 )
-                            elif cond.get("reason") == "WarmPoolNotFound":
+                            if reason == "WarmPoolNotFound":
                                 raise SandboxWarmPoolNotFoundError(
-                                    f"SandboxWarmPool requested does not exist: {cond.get('message', 'WarmPool not found')}"
+                                    f"SandboxWarmPool requested does not exist: {not_ready.get('message', 'WarmPool not found')}"
                                 )
-                            elif (
-                                cond.get("type") == "Ready"
-                                and cond.get("status") == "False"
-                                and cond.get("reason") in TERMINAL_CLAIM_READY_REASONS
-                            ):
+                            if reason in TERMINAL_CLAIM_READY_REASONS:
                                 # The controller reported a failure it will not
                                 # retry; waiting out the timeout cannot succeed.
                                 raise SandboxClaimFailedError(
                                     f"SandboxClaim '{claim_name}' failed with terminal reason "
-                                    f"{cond.get('reason')}: {cond.get('message', '')}"
+                                    f"{reason}: {not_ready.get('message', '')}"
                                 )
+
+                        ready = False
+                        for cond in status.get("conditions", []):
                             if (cond.get("type") == "Ready" and cond.get("status") == "True"
                                     and (not require_current_generation
                                          or (metadata.get("generation") is not None
@@ -349,22 +349,27 @@ class AsyncK8sHelper:
                 await w.close()
 
     async def wait_for_sandbox_ready(
-        self, name: str, namespace: str, timeout: int
+        self, name: str, namespace: str, timeout: int,
+        *, condition: str = "Ready", min_generation: int = 0,
     ) -> str | None:
         """Waits for the Sandbox custom resource to have a 'Ready' status.
 
         Returns the selected pod IP from the sandbox status when ready, or None if
         no valid IP can be selected.
+
+        `condition` names the condition to wait for. The wait ignores a condition
+        whose `observedGeneration` is less than `min_generation`.
         """
         await self._ensure_initialized()
 
+        description = "ready" if condition == "Ready" else f"{condition}=True"
         deadline = time.monotonic() + timeout
-        logger.info(f"Watching for Sandbox {name} to become ready...")
+        logger.info(f"Watching for Sandbox {name} to become {description}...")
         while True:
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
                 raise TimeoutError(
-                    f"Sandbox {name} did not become ready within {timeout} seconds."
+                    f"Sandbox {name} did not become {description} within {timeout} seconds."
                 )
             w = watch.Watch()
             try:
@@ -385,18 +390,19 @@ class AsyncK8sHelper:
                         conditions = status.get("conditions", [])
                         for cond in conditions:
                             if (
-                                cond.get("type") == "Ready"
+                                cond.get("type") == condition
                                 and cond.get("status") == "True"
+                                and (cond.get("observedGeneration") or 0) >= min_generation
                             ):
-                                logger.info(f"Sandbox {name} is ready.")
+                                logger.info(f"Sandbox {name} is {description}.")
                                 pod_ips = status.get("podIPs", [])
                                 return select_pod_ip(pod_ips)
                     elif event["type"] == "DELETED":
                         logger.error(
-                            f"Sandbox {name} was deleted before becoming ready."
+                            f"Sandbox {name} was deleted before becoming {description}."
                         )
                         raise SandboxNotFoundError(
-                            f"Sandbox {name} was deleted before becoming ready."
+                            f"Sandbox {name} was deleted before becoming {description}."
                         )
             except aiohttp.ClientSSLError:
                 raise
@@ -437,6 +443,25 @@ class AsyncK8sHelper:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
+
+    async def patch_sandbox_operating_mode(
+        self, name: str, namespace: str, mode: str, uid: str,
+    ) -> dict[str, Any]:
+        """Change operating mode only if the named Sandbox still has this UID."""
+        if not uid:
+            raise ValueError("Sandbox UID must not be empty")
+        await self._ensure_initialized()
+        # kubernetes_asyncio otherwise sends this dictionary body as JSON Patch.
+        request_options: dict[str, Any] = {"_content_type": "application/merge-patch+json"}
+        return cast(dict[str, Any], await self.custom_objects_api.patch_namespaced_custom_object(
+            group=SANDBOX_API_GROUP,
+            version=SANDBOX_API_VERSION,
+            namespace=namespace,
+            plural=SANDBOX_PLURAL_NAME,
+            name=name,
+            body={"metadata": {"uid": uid}, "spec": {"operatingMode": mode}},
+            **request_options,
+        ))
 
     async def get_sandbox(self, name: str, namespace: str) -> dict[str, Any] | None:
         """Gets a Sandbox custom resource."""

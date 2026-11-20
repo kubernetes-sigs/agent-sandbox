@@ -1330,7 +1330,7 @@ SendSignal sends SIGINT, SIGTERM or SIGKILL to this process group using its orig
 func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error
 ```
 
-WriteStdin sends data to the process's standard input in chunks of at most 1 MiB. Calls on one handle are serialized. It is not retried: if it fails partway, an unknown prefix of data has already been delivered. The context controls only these RPCs and does not cancel Start.
+WriteStdin sends data to the process's standard input in chunks of at most 1 MiB. Calls on one handle are serialized; a call waiting its turn returns when its context is done. It is not retried: if it fails partway, an unknown prefix of data has already been delivered. The context controls only these RPCs and does not cancel Start.
 
 <a name="ProcessSignal"></a>
 ### type [ProcessSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)

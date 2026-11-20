@@ -39,7 +39,7 @@ type ProcessHandle struct {
 	prefix string
 	span   trace.Span
 
-	writeMu   sync.Mutex // serializes stdin writes so chunks never interleave
+	writeSem  chan struct{} // serializes stdin writes so chunks never interleave
 	mu        sync.Mutex
 	receiving bool
 	exitSeen  bool
@@ -81,12 +81,15 @@ func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) er
 const stdinChunkBytes = 1 << 20
 
 // WriteStdin sends data to the process's standard input in chunks of at most
-// 1 MiB. Calls on one handle are serialized. It is not retried: if it fails
-// partway, an unknown prefix of data has already been delivered. The context
-// controls only these RPCs and does not cancel Start.
+// 1 MiB. Calls on one handle are serialized; a call waiting its turn returns
+// when its context is done. It is not retried: if it fails partway, an unknown
+// prefix of data has already been delivered. The context controls only these
+// RPCs and does not cancel Start.
 func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error {
-	h.writeMu.Lock()
-	defer h.writeMu.Unlock()
+	if err := h.lockStdin(ctx); err != nil {
+		return fmt.Errorf("%s: write stdin: %w", h.prefix, err)
+	}
+	defer h.unlockStdin()
 	if err := h.checkLive(); err != nil {
 		return fmt.Errorf("%s: write stdin: %w", h.prefix, err)
 	}
@@ -107,8 +110,10 @@ func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error {
 // CloseStdin sends EOF on the process's standard input. The daemon rejects it
 // with FailedPrecondition for a PTY process.
 func (h *ProcessHandle) CloseStdin(ctx context.Context) error {
-	h.writeMu.Lock()
-	defer h.writeMu.Unlock()
+	if err := h.lockStdin(ctx); err != nil {
+		return fmt.Errorf("%s: close stdin: %w", h.prefix, err)
+	}
+	defer h.unlockStdin()
 	if err := h.checkLive(); err != nil {
 		return fmt.Errorf("%s: close stdin: %w", h.prefix, err)
 	}
@@ -121,6 +126,18 @@ func (h *ProcessHandle) CloseStdin(ctx context.Context) error {
 	}
 	return nil
 }
+
+// lockStdin waits for the stdin lock until ctx is done.
+func (h *ProcessHandle) lockStdin(ctx context.Context) error {
+	select {
+	case h.writeSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return status.FromContextError(ctx.Err()).Err()
+	}
+}
+
+func (h *ProcessHandle) unlockStdin() { <-h.writeSem }
 
 // checkLive returns an error when the process can no longer take a request:
 // the stream failed, the process exited, or the handle's context is done.

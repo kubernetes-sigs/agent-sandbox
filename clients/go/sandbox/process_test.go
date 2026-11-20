@@ -598,6 +598,31 @@ func TestProcessHandle_WriteStdinFailureKeepsStreamOpen(t *testing.T) {
 	require.NoError(t, handle.SendSignal(ctx, SignalSIGTERM), "a failed write must not end the session")
 }
 
+func TestProcessHandle_StdinWaitHonorsContext(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	svc := blockingProcessService()
+	svc.stdin = func(_ context.Context, _ *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+		close(started)
+		<-release
+		return &processv1.WriteStdinResponse{}, nil
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "example")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- handle.WriteStdin(ctx, []byte("a")) }()
+	<-started
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	require.Equal(t, codes.DeadlineExceeded, status.Code(handle.WriteStdin(waitCtx, []byte("b"))))
+	require.Equal(t, codes.DeadlineExceeded, status.Code(handle.CloseStdin(waitCtx)))
+	close(release)
+	require.NoError(t, <-firstDone)
+}
+
 func TestProcessHandle_StdinAfterExitOrCloseDoesNotSend(t *testing.T) {
 	for _, closed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "exit", true: "close"}[closed], func(t *testing.T) {

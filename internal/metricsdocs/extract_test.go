@@ -52,16 +52,16 @@ func TestExtractSupportedDeclarations(t *testing.T) {
 			name: "histogram vector ignores buckets",
 			declarations: `var Latency = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
-		Name:    "sandbox_latency_ms",
-		Help:    "Latency in milliseconds.",
-		Buckets: []float64{100, 250},
+		Name:    "sandbox_latency_seconds",
+		Help:    "Latency in seconds.",
+		Buckets: []float64{0.1, 0.25},
 	},
 	[]string{"launch_type", "sandbox_template"},
 )`,
 			want: []family{{
-				Name:   "sandbox_latency_ms",
+				Name:   "sandbox_latency_seconds",
 				Type:   typeHistogram,
-				Help:   "Latency in milliseconds.",
+				Help:   "Latency in seconds.",
 				Labels: []string{"launch_type", "sandbox_template"},
 			}},
 		},
@@ -69,7 +69,7 @@ func TestExtractSupportedDeclarations(t *testing.T) {
 			name: "concatenated help string is joined",
 			declarations: `var Latency = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
-		Name: "sandbox_latency_ms",
+		Name: "sandbox_latency_seconds",
 		Help: "First part. " +
 			"Second part. " +
 			"Third part.",
@@ -77,7 +77,7 @@ func TestExtractSupportedDeclarations(t *testing.T) {
 	[]string{"launch_type"},
 )`,
 			want: []family{{
-				Name:   "sandbox_latency_ms",
+				Name:   "sandbox_latency_seconds",
 				Type:   typeHistogram,
 				Help:   "First part. Second part. Third part.",
 				Labels: []string{"launch_type"},

@@ -417,9 +417,9 @@ def display_prometheus_latency_metrics():
 
     for metric in prometheus_client.REGISTRY.collect():
         if metric.name in (
-            "sandbox_client_suspend_latency_ms",
-            "sandbox_client_resume_latency_ms",
-            "sandbox_client_restore_latency_ms",
+            "sandbox_client_suspend_latency_seconds",
+            "sandbox_client_resume_latency_seconds",
+            "sandbox_client_restore_latency_seconds",
         ):
             print(f"\nMetric: {metric.name}")
             
@@ -443,7 +443,7 @@ def display_prometheus_latency_metrics():
                     p50 = calculate_quantile(0.5, v["buckets"], v["count"])
                     p90 = calculate_quantile(0.9, v["buckets"], v["count"])
                     p99 = calculate_quantile(0.99, v["buckets"], v["count"])
-                    print(f"  {dict(label_key)}: p50={p50:.2f}ms p90={p90:.2f}ms p99={p99:.2f}ms")
+                    print(f"  {dict(label_key)}: p50={p50:.2f}s p90={p90:.2f}s p99={p99:.2f}s")
             else:
                 print("  No metrics recorded (Count: 0)")
 

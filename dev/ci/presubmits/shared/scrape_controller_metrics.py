@@ -130,21 +130,25 @@ def main():
         raw = urllib.request.urlopen(args.metrics_url, timeout=5).read().decode("utf-8")
 
         # 1. Controller Claim Adoption Latency (Gated SLO)
-        res = parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", raw)
+        res = parse_histogram("agent_sandbox_claim_controller_startup_latency_seconds", raw)
         print("  • Controller Claim Adoption Latency (ms):")
         if res:
             p50, p90, p99, count = res
-            v50 = " [VIOLATION]" if p50 > args.threshold_50 else ""
-            v90 = " [VIOLATION]" if p90 > args.threshold_90 else ""
-            v99 = " [VIOLATION]" if p99 > args.threshold_99 else ""
+            # Convert from seconds to milliseconds for display and comparison
+            p50_ms = p50 * 1000
+            p90_ms = p90 * 1000
+            p99_ms = p99 * 1000
+            v50 = " [VIOLATION]" if p50_ms > args.threshold_50 else ""
+            v90 = " [VIOLATION]" if p90_ms > args.threshold_90 else ""
+            v99 = " [VIOLATION]" if p99_ms > args.threshold_99 else ""
             print(f"      Sample Size: {count}")
-            print(f"      P50: ~{p50:.1f} ms (Target: <= {args.threshold_50:.1f} ms){v50}")
-            print(f"      P90: ~{p90:.1f} ms (Target: <= {args.threshold_90:.1f} ms){v90}")
-            print(f"      P99: ~{p99:.1f} ms (Target: <= {args.threshold_99:.1f} ms){v99}")
+            print(f"      P50: ~{p50_ms:.1f} ms (Target: <= {args.threshold_50:.1f} ms){v50}")
+            print(f"      P90: ~{p90_ms:.1f} ms (Target: <= {args.threshold_90:.1f} ms){v90}")
+            print(f"      P99: ~{p99_ms:.1f} ms (Target: <= {args.threshold_99:.1f} ms){v99}")
             for label, value, threshold in (
-                ("p50", p50, args.threshold_50),
-                ("p90", p90, args.threshold_90),
-                ("p99", p99, args.threshold_99),
+                ("p50", p50_ms, args.threshold_50),
+                ("p90", p90_ms, args.threshold_90),
+                ("p99", p99_ms, args.threshold_99),
             ):
                 failure = None
                 if value > threshold:
@@ -152,7 +156,7 @@ def main():
                         f"{label.upper()}: ~{value:.1f} ms exceeded target <= {threshold:.1f} ms"
                     )
                 testcases.append((f"claim-adoption-latency-{label}", failure))
-            if p50 > args.threshold_50 or p90 > args.threshold_90 or p99 > args.threshold_99:
+            if p50_ms > args.threshold_50 or p90_ms > args.threshold_90 or p99_ms > args.threshold_99:
                 print("      Status: [FAILED] ❌ (Latency exceeded threshold)")
                 all_passed = False
             else:
@@ -166,11 +170,15 @@ def main():
 
         print("")
         # 2. Sandbox Pod Provisioning Latency (Informational Telemetry)
-        res_prov = parse_histogram("agent_sandbox_creation_latency_ms", raw)
+        res_prov = parse_histogram("agent_sandbox_creation_latency_seconds", raw)
         if res_prov:
             p50, p90, p99, count = res_prov
+            # Convert from seconds to milliseconds for display
+            p50_ms = p50 * 1000
+            p90_ms = p90 * 1000
+            p99_ms = p99 * 1000
             print(f"  • Sandbox Pod Provisioning Latency (ms) (Sample Size: {count}):")
-            print(f"      P50: ~{p50:.1f} ms | P90: ~{p90:.1f} ms | P99: ~{p99:.1f} ms")
+            print(f"      P50: ~{p50_ms:.1f} ms | P90: ~{p90_ms:.1f} ms | P99: ~{p99_ms:.1f} ms")
         else:
             print("  • Sandbox Pod Provisioning Latency (ms): No metrics recorded")
 

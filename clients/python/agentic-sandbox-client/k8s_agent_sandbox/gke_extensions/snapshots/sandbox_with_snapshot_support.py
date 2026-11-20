@@ -26,9 +26,9 @@ from k8s_agent_sandbox.constants import (
 )
 from k8s_agent_sandbox.exceptions import SnapshotNotFoundError
 from k8s_agent_sandbox.metrics import (
-    sandbox_client_resume_latency_ms,
-    sandbox_client_restore_latency_ms,
-    sandbox_client_suspend_latency_ms,
+    sandbox_client_resume_latency_seconds,
+    sandbox_client_restore_latency_seconds,
+    sandbox_client_suspend_latency_seconds,
 )
 from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.utils import record_latency
@@ -192,7 +192,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 return list_result.snapshots[0].snapshot_uid
         return None
 
-    @record_latency(sandbox_client_suspend_latency_ms)
+    @record_latency(sandbox_client_suspend_latency_seconds)
     def suspend(  # type: ignore[override]  # Returns a response model; the base method returns None.
         self, snapshot_before_suspend: bool = True, wait_timeout: int = 180,
         *, timeout: int | None = None,
@@ -409,7 +409,7 @@ class SandboxWithSnapshotSupport(Sandbox):
             error_code=ERROR_CODE,
         )
 
-    @record_latency(sandbox_client_resume_latency_ms)
+    @record_latency(sandbox_client_resume_latency_seconds)
     def resume(  # type: ignore[override]  # Returns a response model; the base method returns None.
         self, wait_timeout: int = 180, *, timeout: int | None = None,
     ) -> ResumeResponse:
@@ -509,7 +509,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 f"Snapshot '{snapshot_uid}' does not exist for this sandbox."
             )
 
-    @record_latency(sandbox_client_restore_latency_ms)
+    @record_latency(sandbox_client_restore_latency_seconds)
     def restore(self, snapshot_uid: str, sandbox_ready_timeout: int = 180) -> RestorationResponse:
         """Restores this sandbox from a specific snapshot."""
         try:

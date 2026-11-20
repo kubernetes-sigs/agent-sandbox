@@ -8,17 +8,17 @@
 {{$ENABLE_SYSTEM_POD_METRICS := DefaultParam .CL2_ENABLE_SYSTEM_POD_METRICS true}}
 {{$ENABLE_CLUSTER_OOMS_TRACKER := DefaultParam .CL2_ENABLE_CLUSTER_OOMS_TRACKER false}}
 {{$CLUSTER_OOMS_FAILURE_ENABLED := DefaultParam .CL2_CLUSTER_OOMS_FAILURE_ENABLED true}}
-{{$sandboxClaimControllerStartupLatencyThreshold50Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_50_MS 1000}}
-{{$sandboxClaimControllerStartupLatencyThreshold90Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90_MS 1000}}
-{{$sandboxClaimControllerStartupLatencyThreshold99Ms := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99_MS 5000}}
+{{$sandboxClaimControllerStartupLatencyThreshold50 := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_50 1}}
+{{$sandboxClaimControllerStartupLatencyThreshold90 := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_90 1}}
+{{$sandboxClaimControllerStartupLatencyThreshold99 := DefaultParam .CL2_SANDBOX_CLAIM_CONTROLLER_STARTUP_LATENCY_THRESHOLD_99 5}}
 {{$podStartupLatencyThreshold := DefaultParam .CL2_POD_STARTUP_LATENCY_THRESHOLD "5s"}}
 {{$ENABLE_SCHEDULING_METRICS := DefaultParam .CL2_ENABLE_SCHEDULING_METRICS true}}
 {{$ENABLE_API_AVAILABILITY := DefaultParam .CL2_ENABLE_API_AVAILABILITY true}}
 {{$ENABLE_PROMETHEUS := DefaultParam .CL2_ENABLE_PROMETHEUS false}}
 
 # Standard continuous throughput. Uses un-filtered irate since continuous scenario has no breaks or idle time.
-{{$claimThroughputQuery := `(sum(irate(agent_sandbox_claim_controller_startup_latency_ms_count[5m])) by (launch_type, sandbox_template))[%v:5s]`}}
-{{$claimControllerStartupLatencyQuery := `sum(rate(agent_sandbox_claim_controller_startup_latency_ms_bucket{}[%v])) by (le)`}}
+{{$claimThroughputQuery := `(sum(irate(agent_sandbox_claim_controller_startup_latency_seconds_count[5m])) by (launch_type, sandbox_template))[%v:5s]`}}
+{{$claimControllerStartupLatencyQuery := `sum(rate(agent_sandbox_claim_controller_startup_latency_seconds_bucket{}[%v])) by (le)`}}
 
 name: agent-sandbox-continuous-burst
 namespace:
@@ -49,21 +49,21 @@ steps:
     Method: GenericPrometheusQuery
     Params:
       action: start
-      metricName: Agent Sandbox Claim Controller Startup Latency (ms)
+      metricName: Agent Sandbox Claim Controller Startup Latency (s)
       metricVersion: v1
-      unit: ms
+      unit: s
       queries:
         - name: ControllerStartupLatency50
           query: histogram_quantile(0.50, {{$claimControllerStartupLatencyQuery}})
-          threshold: {{$sandboxClaimControllerStartupLatencyThreshold50Ms}}
+          threshold: {{$sandboxClaimControllerStartupLatencyThreshold50}}
           requireSamples: true
         - name: ControllerStartupLatency90
           query: histogram_quantile(0.90, {{$claimControllerStartupLatencyQuery}})
-          threshold: {{$sandboxClaimControllerStartupLatencyThreshold90Ms}}
+          threshold: {{$sandboxClaimControllerStartupLatencyThreshold90}}
           requireSamples: true
         - name: ControllerStartupLatency99
           query: histogram_quantile(0.99, {{$claimControllerStartupLatencyQuery}})
-          threshold: {{$sandboxClaimControllerStartupLatencyThreshold99Ms}}
+          threshold: {{$sandboxClaimControllerStartupLatencyThreshold99}}
           requireSamples: true
 
   - Identifier: SandboxClaimControllerThroughput

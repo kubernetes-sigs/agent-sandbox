@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -45,6 +46,8 @@ import (
 )
 
 const clientAnnotation = "agents.x-k8s.io/client-first-requested-at"
+
+const claimDeletePollInterval = 500 * time.Millisecond
 
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
 type sandboxState struct {
@@ -238,19 +241,75 @@ func (h *K8sHelper) getClaim(ctx context.Context, name, namespace string, tracer
 
 // deleteClaim deletes a SandboxClaim. Returns nil if the claim is already gone.
 func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) error {
+	return h.deleteClaimWithOptions(ctx, name, namespace, metav1.DeleteOptions{})
+}
+
+// deleteClaimForeground deletes a SandboxClaim with foreground propagation, so
+// the claim stays until its dependents are gone. A non-empty uid makes the
+// delete a no-op if a same-name claim has replaced the original.
+func (h *K8sHelper) deleteClaimForeground(ctx context.Context, name, namespace string, uid types.UID) error {
+	foreground := metav1.DeletePropagationForeground
+	opts := metav1.DeleteOptions{PropagationPolicy: &foreground}
+	if uid != "" {
+		opts.Preconditions = &metav1.Preconditions{UID: &uid}
+	}
+	return h.deleteClaimWithOptions(ctx, name, namespace, opts)
+}
+
+func (h *K8sHelper) deleteClaimWithOptions(ctx context.Context, name, namespace string, opts metav1.DeleteOptions) error {
 	if name == "" {
 		return nil
 	}
-	err := h.ExtensionsClient.SandboxClaims(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	err := h.ExtensionsClient.SandboxClaims(namespace).Delete(ctx, name, opts)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			h.Log.V(1).Info("claim already deleted (404)", "claim", name)
+			return nil
+		}
+		if opts.Preconditions != nil && k8serrors.IsConflict(err) {
+			h.Log.V(1).Info("claim was replaced, nothing to delete", "claim", name)
 			return nil
 		}
 		return fmt.Errorf("sandbox: failed to delete claim %s: %w", name, err)
 	}
 	h.Log.Info("claim deleted", "claim", name)
 	return nil
+}
+
+// waitForClaimDeleted waits until the claim is gone or replaced by a claim
+// with a different UID. Foreground deletion keeps the claim until the
+// dependents the garbage collector has seen are gone.
+func (h *K8sHelper) waitForClaimDeleted(ctx context.Context, name, namespace string, uid types.UID) error {
+	if name == "" {
+		return nil
+	}
+	var lastErr error
+	err := wait.PollUntilContextCancel(ctx, claimDeletePollInterval, true, func(ctx context.Context) (bool, error) {
+		claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+		switch {
+		case err == nil:
+			return uid != "" && claim.UID != uid, nil
+		case k8serrors.IsNotFound(err):
+			return true, nil
+		case k8serrors.IsForbidden(err) || k8serrors.IsUnauthorized(err):
+			return false, err
+		}
+		// Keep the last transient error when the deadline cancels the GET.
+		if ctx.Err() == nil {
+			lastErr = err
+		}
+		return false, nil
+	})
+	if err == nil {
+		return nil
+	}
+	if lastErr != nil && !errors.Is(err, lastErr) {
+		err = errors.Join(err, lastErr)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: waiting for claim %s to be deleted: %w", ErrTimeout, name, err)
+	}
+	return fmt.Errorf("sandbox: waiting for claim %s to be deleted: %w", name, err)
 }
 
 // terminalReadyReasons are Ready=False reasons that the claim and Sandbox

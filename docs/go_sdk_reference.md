@@ -1159,6 +1159,14 @@ type Options struct {
     // the caller's context is already cancelled. Default: 30s.
     CleanupTimeout time.Duration
 
+    // WaitForTermination makes Close delete the claim with foreground
+    // propagation and wait until the claim is gone. The wait shares
+    // CleanupTimeout, so raise it above the Pod's termination grace period.
+    // Cancelling the context passed to Close stops the wait. The caller needs
+    // "get" on SandboxClaims. Client.DeleteSandbox on a claim this client does
+    // not track deletes it without waiting. Default: false.
+    WaitForTermination bool
+
     // RequestTimeout is the total timeout for a single SDK method call
     // (e.g., Run, Read, Write), encompassing all retry attempts and backoff
     // sleeps. Applied only when the caller's context has no deadline.

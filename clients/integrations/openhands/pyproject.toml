@@ -21,7 +21,9 @@ dependencies = [
     # release the example template pins, and the workspace's advisory
     # version-skew check (get_server_info vs installed SDK) flags drift at
     # attach time. An exact pin would block every SDK patch release.
-    "openhands-sdk>=1.44.1,<2",
+    # 1.63.0 is excluded because it imports a litellm module that its own
+    # litellm<1.110 requirement does not ship, so `import openhands.sdk` fails.
+    "openhands-sdk>=1.44.1,!=1.63.0,<2",
     # SandboxClient.create_sandbox(warmpool=...) claim path. The client is only
     # imported when the caller does not inject one (tests inject fakes). The
     # claim API (create_sandbox / get_pod_ip / terminate) is stable across the

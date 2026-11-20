@@ -37,8 +37,10 @@ EXCLUDED_DIFF_PATHSPECS = (
     ":!docs/*_reference.md",
 )
 
+MAX_DIFF_CHARS_PER_FILE = 6_000
 MAX_DIFF_CHARS_PER_COMMIT = 20_000
 MAX_TOTAL_DIFF_CHARS = 450_000
+MIN_TRUNCATED_FILE_DIFF_CHARS = 200
 
 
 def select_previous_release_tag(releases, current_tag):
@@ -103,14 +105,19 @@ def extract_pr_number(title):
 
 
 def get_commits(prev_tag, current_tag):
-    """Returns non-merge commits in range with sha, title, body, and PR number."""
+    """Returns first-parent commits in range with sha, title, body, and PR number.
+
+    Using `--first-parent` keeps one entry per merged PR on the main branch
+    (squash, merge, or rebase), preserving PR numbers carried on merge commit
+    titles instead of dropping them with `--no-merges`.
+    """
     range_str = f"{prev_tag}..{current_tag}" if prev_tag else current_tag
     try:
         raw_log = subprocess.run(
             [
                 "git",
                 "log",
-                "--no-merges",
+                "--first-parent",
                 range_str,
                 "--pretty=format:%x1e%H%n%s%n%b",
             ],
@@ -158,10 +165,10 @@ def get_pr_numbers(commits):
 
 
 def get_commit_files(sha):
-    """Returns the list of file paths changed in a commit."""
+    """Returns the list of file paths changed in a commit (against first parent)."""
     try:
         out = subprocess.run(
-            ["git", "show", "--name-only", "--format=", sha],
+            ["git", "show", "-m", "--first-parent", "--name-only", "--format=", sha],
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -172,10 +179,10 @@ def get_commit_files(sha):
 
 
 def get_commit_stat(sha):
-    """Returns the `git show --stat` summary for a commit."""
+    """Returns the `git show --stat` summary for a commit (against first parent)."""
     try:
         return subprocess.run(
-            ["git", "show", "--stat", "--format=", sha],
+            ["git", "show", "-m", "--first-parent", "--stat", "--format=", sha],
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -196,8 +203,100 @@ def truncate_text(text, max_chars):
     return f"{prefix}\n... [diff truncated, {omitted} chars omitted]"
 
 
+def split_diff_by_file(diff_text):
+    """Splits a unified git diff into (path, section_text) tuples."""
+    if not diff_text:
+        return []
+    chunks = re.split(r"(?m)^(?=diff --git )", diff_text)
+    sections = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        first_line = chunk.splitlines()[0]
+        match = re.match(
+            r'^diff --git (?:"a/(.+?)"|a/(\S+)) (?:"b/(.+?)"|b/(\S+))$',
+            first_line,
+        )
+        if match:
+            path = match.group(3) or match.group(4) or ""
+        else:
+            path = ""
+        sections.append((path, chunk))
+    return sections
+
+
+def diff_file_priority(path):
+    """Returns a sort key prioritizing API/schema/types and core code over examples/docs."""
+    base = os.path.basename(path)
+    if (
+        path.startswith("api/")
+        or path.startswith("extensions/api/")
+        or path.startswith("k8s/crds/")
+        or path.startswith("helm/crds/")
+        or path == "helm/Chart.yaml"
+        or path.startswith("packages/sandboxd/spec/")
+        or path.endswith(".proto")
+        or (
+            path.startswith("clients/")
+            and base in ("types.go", "options.go", "types.ts", "index.ts", "models.py")
+        )
+    ):
+        return (0, path)
+    if _is_doc_file(path) or path.startswith("site/"):
+        return (3, path)
+    if path.startswith("examples/"):
+        return (2, path)
+    return (1, path)
+
+
+def budget_commit_diff(
+    diff_text,
+    max_chars=MAX_DIFF_CHARS_PER_COMMIT,
+    max_file_chars=MAX_DIFF_CHARS_PER_FILE,
+):
+    """Orders file diffs by priority and applies per-file caps when over budget."""
+    if not diff_text or max_chars <= 0:
+        return ""
+
+    sections = split_diff_by_file(diff_text)
+    if not sections:
+        return truncate_text(diff_text, max_chars)
+
+    sections.sort(key=lambda item: diff_file_priority(item[0]))
+    full_joined = "\n".join(sec for _, sec in sections)
+    if len(full_joined) <= max_chars:
+        return full_joined
+
+    kept = []
+    omitted_paths = []
+    used = 0
+    for path, sec in sections:
+        separator = 1 if kept else 0
+        remaining = max_chars - used - separator
+        if len(sec) <= min(max_file_chars, remaining):
+            kept.append(sec)
+            used += separator + len(sec)
+            continue
+        if remaining < MIN_TRUNCATED_FILE_DIFF_CHARS:
+            omitted_paths.append(path or "(unknown)")
+            continue
+        cap = min(max_file_chars, remaining)
+        chunk = truncate_text(sec, cap)
+        kept.append(chunk)
+        used += separator + len(chunk)
+
+    if omitted_paths:
+        kept.append(
+            f"... [{len(omitted_paths)} file diff(s) omitted due to commit budget: "
+            + ", ".join(omitted_paths)
+            + "]"
+        )
+    return "\n".join(kept)
+
+
 def get_commit_diff(sha, max_chars=MAX_DIFF_CHARS_PER_COMMIT):
-    """Returns the filtered code diff for a commit, capped at max_chars."""
+    """Returns the prioritized, filtered code diff for a commit, capped at max_chars."""
     if max_chars <= 0:
         return ""
     try:
@@ -205,6 +304,8 @@ def get_commit_diff(sha, max_chars=MAX_DIFF_CHARS_PER_COMMIT):
             [
                 "git",
                 "show",
+                "-m",
+                "--first-parent",
                 "--no-color",
                 "--format=",
                 "--unified=3",
@@ -217,7 +318,7 @@ def get_commit_diff(sha, max_chars=MAX_DIFF_CHARS_PER_COMMIT):
             text=True,
             stdout=subprocess.PIPE,
         ).stdout.strip()
-        return truncate_text(diff, max_chars)
+        return budget_commit_diff(diff, max_chars=max_chars)
     except subprocess.CalledProcessError:
         return ""
 

@@ -142,6 +142,85 @@ class CommitClassificationAndSignalsTest(unittest.TestCase):
         truncated = generate_release_notes.truncate_text(text, 12)
         self.assertTrue(truncated.startswith("line1\nline2\n... [diff truncated,"))
 
+    def test_diff_file_priority_orders_api_code_examples_docs(self):
+        paths = [
+            "clients/go/README.md",
+            "examples/demo/main.py",
+            "clients/go/sandbox/sandbox.go",
+            "extensions/api/v1beta1/sandboxwarmpool_types.go",
+            "docs/api.md",
+            "packages/sandboxd/spec/filesystem/v1/filesystem.yaml",
+        ]
+        ordered = sorted(paths, key=generate_release_notes.diff_file_priority)
+        self.assertEqual(
+            ordered,
+            [
+                "extensions/api/v1beta1/sandboxwarmpool_types.go",
+                "packages/sandboxd/spec/filesystem/v1/filesystem.yaml",
+                "clients/go/sandbox/sandbox.go",
+                "examples/demo/main.py",
+                "clients/go/README.md",
+                "docs/api.md",
+            ],
+        )
+
+    def test_budget_commit_diff_prioritizes_api_and_caps_large_files(self):
+        readme_diff = (
+            "diff --git a/clients/go/README.md b/clients/go/README.md\n"
+            + "+doc line\n" * 60
+        )
+        big_helper_diff = (
+            "diff --git a/clients/go/sandbox/operatingmode.go b/clients/go/sandbox/operatingmode.go\n"
+            + "+helper line\n" * 200
+        )
+        api_diff = (
+            "diff --git a/clients/go/sandbox/sandbox.go b/clients/go/sandbox/sandbox.go\n"
+            "+func (s *Sandbox) Suspend(ctx context.Context) error\n"
+        )
+        combined = "\n".join([readme_diff, big_helper_diff, api_diff])
+        result = generate_release_notes.budget_commit_diff(
+            combined, max_chars=1500, max_file_chars=600
+        )
+        # sandbox.go is kept in full even though operatingmode.go was huge and
+        # README.md sorted alphabetically earlier.
+        self.assertIn("func (s *Sandbox) Suspend(ctx context.Context) error", result)
+        self.assertLess(
+            result.index("clients/go/sandbox/sandbox.go"),
+            result.index("clients/go/README.md"),
+        )
+        self.assertIn("[diff truncated,", result)
+
+    def test_budget_commit_diff_keeps_small_single_file_untruncated(self):
+        single = (
+            "diff --git a/clients/go/sandbox/sandbox.go b/clients/go/sandbox/sandbox.go\n"
+            + "+code\n" * 200
+        )
+        result = generate_release_notes.budget_commit_diff(
+            single, max_chars=5000, max_file_chars=400
+        )
+        # Fits inside max_chars, so it is not needlessly truncated by max_file_chars.
+        self.assertNotIn("[diff truncated,", result)
+        self.assertEqual(result, single.strip())
+
+    def test_get_commits_uses_first_parent(self):
+        fake_stdout = (
+            "\x1eaaaa1111\n"
+            "Merge pull request #2163 from aditya-shantanu/feat/test\n"
+            "body text\n"
+        )
+        with mock.patch.object(
+            generate_release_notes.subprocess,
+            "run",
+            return_value=mock.Mock(stdout=fake_stdout),
+        ) as mock_run:
+            commits = generate_release_notes.get_commits("v1.0.10", "v1.0.11")
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--first-parent", cmd)
+        self.assertNotIn("--no-merges", cmd)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(commits[0]["pr_number"], 2163)
+
     def test_get_pr_numbers_preserves_order(self):
         commits = [
             {"title": "feat: second (#20)", "pr_number": 20},

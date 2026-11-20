@@ -6315,6 +6315,80 @@ func TestReconcilePVCsRetentionConflictPreservesConcurrentOwnerReference(t *test
 	require.ElementsMatch(t, []metav1.OwnerReference{sandboxControllerRef(sandboxName), otherRef, concurrentRef}, livePVC.OwnerReferences)
 }
 
+// TestRetainedPVCReusedBySameNameSandbox pins what happens to a PVC that a
+// deleted Sandbox retained when a new Sandbox of the same name reconciles in
+// the same namespace. The new Sandbox mounts the retained PVC, and its own
+// policy decides whether it takes ownership of it.
+func TestRetainedPVCReusedBySameNameSandbox(t *testing.T) {
+	const (
+		sandboxName = "reused-name"
+		sandboxNs   = "reused-ns"
+		pvcName     = "data-reused-name"
+		markerKey   = "test/retained-data"
+	)
+	retain := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain
+	del := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete
+
+	newSandbox := func(uid types.UID, policy sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, UID: uid},
+			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						}},
+					},
+				}},
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: policy},
+			}},
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		policy    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
+		wantOwned bool
+	}{
+		{name: "a Retain Sandbox mounts the PVC and leaves it unowned", policy: retain},
+		{name: "a Delete Sandbox adopts the PVC, so it is deleted with that Sandbox", policy: del, wantOwned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := newSandbox("first-uid", retain)
+			c := newFakeClient(first)
+			r := SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: sandboxNs}
+
+			require.NoError(t, r.reconcilePVCs(t.Context(), first, NameHash(sandboxName)))
+			retained := &corev1.PersistentVolumeClaim{}
+			require.NoError(t, c.Get(t.Context(), pvcKey, retained))
+			require.Empty(t, retained.OwnerReferences, "a Retain Sandbox should create its PVC without an owner")
+
+			// Mark the PVC so the test can tell reuse from a delete and re-create.
+			retained.Annotations = map[string]string{markerKey: "true"}
+			require.NoError(t, c.Update(t.Context(), retained))
+			require.NoError(t, c.Delete(t.Context(), first))
+
+			second := newSandbox("second-uid", tc.policy)
+			require.NoError(t, c.Create(t.Context(), second))
+			require.NoError(t, r.reconcilePVCs(t.Context(), second, NameHash(sandboxName)))
+
+			reused := &corev1.PersistentVolumeClaim{}
+			require.NoError(t, c.Get(t.Context(), pvcKey, reused))
+			require.Equal(t, "true", reused.Annotations[markerKey], "the new Sandbox should reuse the retained PVC")
+			owner := metav1.GetControllerOf(reused)
+			if tc.wantOwned {
+				require.NotNil(t, owner, "a Delete Sandbox should adopt the retained PVC")
+				require.Equal(t, second.UID, owner.UID)
+			} else {
+				require.Empty(t, reused.OwnerReferences, "a Retain Sandbox should not adopt the retained PVC")
+			}
+		})
+	}
+}
+
 func TestSandboxExpiry(t *testing.T) {
 	now := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 

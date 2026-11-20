@@ -1559,8 +1559,8 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		// Force an exact match
 		adopted.Spec.PodTemplate.ObjectMeta = mergedMeta
 
-		// A member created before a template change still carries the old PVC
-		// retention policy, so apply the template's.
+		// A pool member carries no PVC retention policy. Apply the template's
+		// at handover, before the Sandbox holds a user's data.
 		adopted.Spec.PersistentVolumeClaimRetentionPolicy = template.Spec.PersistentVolumeClaimRetentionPolicy.DeepCopy()
 	} else {
 		// Fallback (just in case template is somehow missing)
@@ -1572,8 +1572,8 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 			return err
 		}
 
-		// Without the template, the member's policy may predate the template's
-		// last one, so fall back to Retain, which never loses data.
+		// Without the template, the policy it would apply is unknown, so
+		// fall back to Retain, which never loses data.
 		retainedWithoutTemplate = adopted.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() != v1beta1.PersistentVolumeClaimRetentionPolicyRetain
 		adopted.Spec.PersistentVolumeClaimRetentionPolicy = &v1beta1.PersistentVolumeClaimRetentionPolicy{
 			WhenDeleted: v1beta1.PersistentVolumeClaimRetentionPolicyRetain,

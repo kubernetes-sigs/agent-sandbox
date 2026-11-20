@@ -29,7 +29,16 @@ import (
 // existing Sandbox switches from Delete to Retain, the switch takes effect when the
 // controller next reconciles it; deleting the Sandbox before that, or while the
 // controller is unavailable, can leave the owner reference in place and allow
-// garbage collection to delete the PVC.
+// garbage collection to delete the PVC. A SandboxClaim that takes a Sandbox from
+// a warm pool whose SandboxTemplate sets Retain is such a switch.
+//
+// A retained PVC keeps its name. A new Sandbox with the same name in the same
+// namespace, and a volumeClaimTemplates entry of the same name, mounts the
+// retained PVC instead of creating one, and the new Sandbox's policy then
+// applies to it. Under Retain the PVC stays unowned.
+// Under Delete the new Sandbox takes ownership of the PVC, and the PVC is
+// deleted with that Sandbox. Delete a retained PVC before reusing its Sandbox's
+// name if the new Sandbox must not see the old data.
 type PersistentVolumeClaimRetentionPolicyApplyConfiguration struct {
 	// whenDeleted controls whether PVCs created from volumeClaimTemplates are
 	// deleted when the owning Sandbox is deleted. When set to Retain, PVCs are

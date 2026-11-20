@@ -841,6 +841,9 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 						},
 					},
 				},
+			},
+			PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
 			}},
 		},
 	}
@@ -877,6 +880,8 @@ func TestCreatePoolSandboxPropagatesVolumeClaimTemplates(t *testing.T) {
 	require.Len(t, sb.Spec.VolumeClaimTemplates, 2, "sandbox should have 2 volumeClaimTemplates")
 	require.Equal(t, "data", sb.Spec.VolumeClaimTemplates[0].Name)
 	require.Equal(t, "cache", sb.Spec.VolumeClaimTemplates[1].Name)
+	require.Nil(t, sb.Spec.PersistentVolumeClaimRetentionPolicy,
+		"an unclaimed pool member should not carry the template's Retain policy")
 	require.Equal(t, templateName, sb.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation],
 		"sandbox should have template ref annotation for metrics")
 }
@@ -2197,6 +2202,23 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 			expectRecreation: false,
 		},
 		{
+			name: "PVC retention policy change should NOT recreate",
+			updateBaseFn: func(bp *sandboxv1beta1.SandboxBlueprint) {
+				bp.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+					createVolumeClaimTemplate("data", "standard"),
+				}
+			},
+			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
+				tmpl.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			verifyFn: func(t *testing.T, sb sandboxv1beta1.Sandbox) {
+				require.Nil(t, sb.Spec.PersistentVolumeClaimRetentionPolicy)
+			},
+			expectRecreation: false,
+		},
+		{
 			name: "Image change should recreate",
 			updateFn: func(tmpl *extensionsv1beta1.SandboxTemplate) {
 				tmpl.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
@@ -2638,29 +2660,15 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			expectedResult: true,
 		},
 		{
-			name: "PVC retention policy omitted and explicit Delete should match",
+			name: "PVC retention policy should NOT be compared",
 			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: basePodTemplate,
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				},
 			},
 			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
 				PodTemplate: basePodTemplate,
-				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
-					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
-				},
-			},
-			expectedResult: true,
-		},
-		{
-			name: "PVC retention policy empty and explicit Delete should match",
-			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate:                          basePodTemplate,
-				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{},
-			},
-			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate: basePodTemplate,
-				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
-					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
-				},
 			},
 			expectedResult: true,
 		},
@@ -2674,22 +2682,6 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
 			},
 			expectedResult: true,
-		},
-		{
-			name: "PVC retention policy drift should NOT match",
-			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate: basePodTemplate,
-				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
-					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
-				},
-			},
-			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
-				PodTemplate: basePodTemplate,
-				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
-					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
-				},
-			},
-			expectedResult: false,
 		},
 	}
 
@@ -2711,6 +2703,8 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 // accounts for all fields in the SandboxBlueprint struct. A field missing from the
 // comparison logic is not tracked for drift, so a warm sandbox will not be detected
 // as stale when that field changes.
+// PersistentVolumeClaimRetentionPolicy is listed but deliberately not compared:
+// a pool member doesn't carry it, and the claim controller applies it at handover.
 func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
 	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "PersistentVolumeClaimRetentionPolicy", "Service", "FailedPodPolicy"}
 
@@ -2725,8 +2719,8 @@ func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
 
 	require.Equal(t, expectedFields, actualFields,
 		"SandboxBlueprint fields have changed. Update compareSandboxBlueprint() in "+
-			"sandboxwarmpool_controller.go to compare the new field for staleness detection, then update the "+
-			"expected field list in this test to include it.")
+			"sandboxwarmpool_controller.go to compare the new field for staleness detection (or document "+
+			"why it is skipped), then update the expected field list in this test to include it.")
 }
 
 // adoptSandboxByClaim simulates a SandboxClaim adopting a warm sandbox by

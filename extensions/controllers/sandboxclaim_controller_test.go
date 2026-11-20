@@ -2310,8 +2310,8 @@ func TestReconcileActiveKeepsClaimedSandboxPersistentVolumeClaimRetentionPolicy(
 }
 
 // TestSandboxClaimAdoptionPersistentVolumeClaimRetentionPolicy covers the
-// handover of a warm-pool member whose policy predates its template's (the
-// default OnReplenish strategy keeps such members until they are replaced).
+// handover of a warm-pool member. The pool creates members without a policy;
+// the cases that set one cover a member that carries a policy all the same.
 func TestSandboxClaimAdoptionPersistentVolumeClaimRetentionPolicy(t *testing.T) {
 	retain := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain
 	del := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete
@@ -2323,8 +2323,10 @@ func TestSandboxClaimAdoptionPersistentVolumeClaimRetentionPolicy(t *testing.T) 
 		want           sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
 		wantWarning    bool
 	}{
-		{name: "applies the template's policy", templateExists: true, templatePolicy: del, memberPolicy: retain, want: del},
-		{name: "falls back to Retain without the template", memberPolicy: del, want: retain, wantWarning: true},
+		{name: "applies the template's Retain to a member without a policy", templateExists: true, templatePolicy: retain, want: retain},
+		{name: "applies the template's Delete to a member without a policy", templateExists: true, templatePolicy: del, want: del},
+		{name: "replaces a policy the member carries with the template's", templateExists: true, templatePolicy: del, memberPolicy: retain, want: del},
+		{name: "falls back to Retain without the template", want: retain, wantWarning: true},
 		{name: "no warning when the member already retains", memberPolicy: retain, want: retain},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2368,7 +2370,6 @@ func TestSandboxClaimAdoptionPersistentVolumeClaimRetentionPolicy(t *testing.T) 
 					PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "app", Image: "app-image"}},
 					}},
-					PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: tc.memberPolicy},
 				}},
 				Status: sandboxv1beta1.SandboxStatus{
 					Conditions: []metav1.Condition{{
@@ -2378,6 +2379,10 @@ func TestSandboxClaimAdoptionPersistentVolumeClaimRetentionPolicy(t *testing.T) 
 					}},
 					PodIPs: []string{testNetworkedPodIP},
 				},
+			}
+
+			if tc.memberPolicy != "" {
+				member.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: tc.memberPolicy}
 			}
 
 			objects := []client.Object{claim, warmPool, member}
@@ -2902,6 +2907,31 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			},
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "prelabel-recreate",
+			expectNewSandboxCreated: false,
+		},
+		{
+			// A pool member doesn't carry the template's PVC retention policy. A
+			// policy-only template edit changes the blueprint hash but leaves the
+			// member current, so the claim must adopt it rather than cold-start.
+			name:             "adopts candidate under Recreate after a policy-only template edit",
+			warmPoolStrategy: recreateStrategy,
+			existingObjects: []client.Object{
+				func() client.Object {
+					edited := template.DeepCopy()
+					edited.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+						WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+					}
+					return edited
+				}(),
+				claim,
+				func() client.Object {
+					sb := withBlueprintHash(createWarmPoolSandbox("policy-edit-recreate", metav1.Now(), true), "pre-edit-hash")
+					ApplySandboxSecureDefaults(template, &sb.Spec.PodTemplate.Spec)
+					return sb
+				}(),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "policy-edit-recreate",
 			expectNewSandboxCreated: false,
 		},
 		{

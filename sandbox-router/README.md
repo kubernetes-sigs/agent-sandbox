@@ -465,7 +465,7 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_requests_total` | counter | `method`, `code`, `sandbox_namespace` |
 | `sandbox_router_request_duration_seconds` | histogram | `method`, `code`, `sandbox_namespace` |
 | `sandbox_router_inflight_requests` | gauge | — |
-| `sandbox_router_upstream_errors_total` | counter | `sandbox_namespace`, `reason` (`dial` / `timeout` / `tls` / `eof` / `other`) |
+| `sandbox_router_upstream_errors_total` | counter | `sandbox_namespace`, `reason` (`dial` / `timeout` / `tls` / `eof` / `client_canceled` / `other`) |
 | `sandbox_router_upstream_retries_total` | counter | `sandbox_namespace` |
 | `sandbox_router_cache_invalidations_total` | counter | `sandbox_namespace` (KEP-NNNN active invalidation: bumped when the proxy evicts a cached IP after a dial failure) |
 | `sandbox_router_authz_decisions_total` | counter | `sandbox_namespace`, `decision` (`allow` / `deny`) |

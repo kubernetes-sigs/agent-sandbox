@@ -345,6 +345,22 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	stop, err := r.initializeDefaultLifecycle(ctx, claim)
+	if err != nil {
+		if errors.Is(err, ErrWarmPoolNotFound) {
+			oldStatus := claim.Status.DeepCopy()
+			r.computeAndSetStatus(claim, nil, err, false)
+			if _, statusErr := r.updateStatus(ctx, oldStatus, claim); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if stop {
+		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+	}
+
 	originalClaimStatus := claim.Status.DeepCopy()
 
 	// Check Expiration
@@ -366,11 +382,12 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
 	// Continuing would try to update the status of a deleted object, causing a crash/error.
-	if claimExpired && claim.Spec.Lifecycle != nil &&
-		(claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDelete ||
-			claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDeleteForeground) {
+	effectiveLifecycle := claimLifecycle(claim)
+	if claimExpired && effectiveLifecycle != nil &&
+		(effectiveLifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDelete ||
+			effectiveLifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDeleteForeground) {
 
-		policy := claim.Spec.Lifecycle.ShutdownPolicy
+		policy := effectiveLifecycle.ShutdownPolicy
 		logger.Info("Deleting Claim because time has expired", "shutdownPolicy", policy, "claim", claim.Name)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1beta1.ClaimExpiredReason, "Deleting", fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
@@ -410,7 +427,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			"pendingCandidates", pendingWarmCandidates.pendingCandidates,
 			"retryAfter", pendingWarmCandidates.retryAfter,
 		)
-		return ctrl.Result{RequeueAfter: pendingWarmCandidates.retryAfter}, nil
+		delay := pendingWarmCandidates.retryAfter
+		_, remaining := r.checkExpiration(claim)
+		if remaining <= 0 && timeLeft > 0 {
+			delay = immediateRequeueDelay
+		} else if remaining > 0 && remaining < delay {
+			delay = remaining
+		}
+		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 
 	// Update Status & Events
@@ -566,14 +590,86 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 	return r.Patch(ctx, claim, patch)
 }
 
+// claimLifecycle gives explicit user intent precedence over the frozen pool default.
+func claimLifecycle(claim *extensionsv1beta1.SandboxClaim) *extensionsv1beta1.Lifecycle {
+	if claim.Spec.Lifecycle != nil {
+		return claim.Spec.Lifecycle
+	}
+	return claim.Status.DefaultLifecycle
+}
+
+// initializeDefaultLifecycle persists the decision before provisioning can allocate
+// resources. An empty snapshot prevents later pool edits from adding a deadline.
+// The result requests an immediate retry when this pass must not provision resources.
+func (r *SandboxClaimReconciler) initializeDefaultLifecycle(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (bool, error) {
+	if claim.Status.DefaultLifecycle != nil {
+		return false, nil
+	}
+	// Let the existing active reconciliation publish configuration errors.
+	if err := r.validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata); err != nil {
+		return false, nil
+	}
+	fresh := &extensionsv1beta1.SandboxClaim{}
+	if err := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(claim), fresh); err != nil {
+		if k8errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("read claim before resolving lifecycle defaults: %w", err)
+	}
+	if fresh.UID != claim.UID || !fresh.DeletionTimestamp.IsZero() {
+		return true, nil
+	}
+	adoptFreshClaim(claim, fresh)
+	if claim.Status.DefaultLifecycle != nil {
+		return false, nil
+	}
+	original := claim.DeepCopy()
+	resolved := &extensionsv1beta1.Lifecycle{}
+	assigned := claim.Status.SandboxStatus.Name != "" ||
+		claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] != "" ||
+		claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] != ""
+	// Cold creation can precede assignment persistence in older controllers.
+	if !assigned && claim.Spec.Lifecycle == nil {
+		existing := &v1beta1.Sandbox{}
+		err := r.authoritativeReader().Get(ctx, client.ObjectKeyFromObject(claim), existing)
+		if err != nil && !k8errors.IsNotFound(err) {
+			return false, fmt.Errorf("check existing sandbox before resolving defaults: %w", err)
+		}
+		assigned = err == nil && metav1.IsControlledBy(existing, claim)
+	}
+	if !assigned && claim.Spec.Lifecycle == nil {
+		pool := &extensionsv1beta1.SandboxWarmPool{}
+		if err := r.authoritativeReader().Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.WarmPoolRef.Name}, pool); err != nil {
+			if k8errors.IsNotFound(err) {
+				return false, ErrWarmPoolNotFound
+			}
+			return false, fmt.Errorf("resolve pool lifecycle defaults: %w", err)
+		}
+		if defaults := pool.Spec.ClaimDefaults; defaults != nil && defaults.TTLSecondsAfterCreated != nil {
+			if *defaults.TTLSecondsAfterCreated <= 0 || claim.CreationTimestamp.IsZero() {
+				return false, fmt.Errorf("cannot resolve claim lifecycle default without a positive TTL and creation time")
+			}
+			deadline := metav1.NewTime(claim.CreationTimestamp.Add(time.Duration(*defaults.TTLSecondsAfterCreated) * time.Second))
+			resolved.ShutdownTime = &deadline
+			resolved.ShutdownPolicy = extensionsv1beta1.ShutdownPolicyRetain
+		}
+	}
+	claim.Status.DefaultLifecycle = resolved
+	patch := client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		return false, fmt.Errorf("persist claim lifecycle default before provisioning: %w", err)
+	}
+	return false, nil
+}
+
 // checkExpiration calculates if the claim is expired and how much time is left.
 func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
-	if claim.Spec.Lifecycle == nil {
+	effective := claimLifecycle(claim)
+	if effective == nil {
 		return false, 0
 	}
-
 	finishedCondition := lifecycle.FinishedCondition(claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
-	return lifecycle.TimeLeft(time.Now(), claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
+	return lifecycle.TimeLeft(time.Now(), effective.ShutdownTime, effective.TTLSecondsAfterFinished, finishedCondition)
 }
 
 // reconcileActive handles the creation and updates of running sandboxes.
@@ -729,7 +825,7 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	// Sandbox exists, delete it.
 	if sandbox.DeletionTimestamp.IsZero() {
 		logger.Info("Deleting Sandbox because Claim expired (Policy=Retain)", "sandbox", sandbox.Name, "claim", claim.Name)
-		if err := r.Delete(ctx, sandbox); err != nil {
+		if err := r.Delete(ctx, sandbox, client.Preconditions{UID: &sandbox.UID}); err != nil {
 			return sandbox, fmt.Errorf("failed to delete expired sandbox: %w", err)
 		}
 	}

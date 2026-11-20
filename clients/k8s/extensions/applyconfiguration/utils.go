@@ -38,6 +38,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1beta1.NetworkPolicySpecApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxClaim"):
 		return &apiv1beta1.SandboxClaimApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("SandboxClaimDefaults"):
+		return &apiv1beta1.SandboxClaimDefaultsApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxClaimSpec"):
 		return &apiv1beta1.SandboxClaimSpecApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxClaimStatus"):

@@ -25,6 +25,11 @@ import (
 //
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatusApplyConfiguration struct {
+	// defaultLifecycle is the pool default frozen before provisioning.
+	// An empty object records that no default applied. An absent object means
+	// the controller has not resolved defaults yet. Explicit spec.lifecycle
+	// always takes precedence. Pool changes never modify this snapshot.
+	DefaultLifecycle *LifecycleApplyConfiguration `json:"defaultLifecycle,omitempty"`
 	// conditions represent the latest available observations of a Sandbox's current state.
 	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// sandbox defines the state of Sandbox
@@ -35,6 +40,14 @@ type SandboxClaimStatusApplyConfiguration struct {
 // apply.
 func SandboxClaimStatus() *SandboxClaimStatusApplyConfiguration {
 	return &SandboxClaimStatusApplyConfiguration{}
+}
+
+// WithDefaultLifecycle sets the DefaultLifecycle field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DefaultLifecycle field is set to the value of the last call.
+func (b *SandboxClaimStatusApplyConfiguration) WithDefaultLifecycle(value *LifecycleApplyConfiguration) *SandboxClaimStatusApplyConfiguration {
+	b.DefaultLifecycle = value
+	return b
 }
 
 // WithConditions adds the given value to the Conditions field in the declarative configuration

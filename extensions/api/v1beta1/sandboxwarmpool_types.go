@@ -36,8 +36,26 @@ type SandboxTemplateRef struct {
 	Name string `json:"name"`
 }
 
+// SandboxClaimDefaults defines lifecycle defaults for newly provisioned claims.
+type SandboxClaimDefaults struct {
+	// ttlSecondsAfterCreated limits claim lifetime from its creation time.
+	// The controller snapshots this default before provisioning a claim without
+	// an explicit lifecycle. Later pool changes do not affect that claim.
+	// Expiration retains only the claim record and deletes its backing resources,
+	// including Sandbox-owned persistent volume claims and their data where
+	// the storage reclaim policy deletes the volume.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
+}
+
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpec struct {
+	// claimDefaults applies only to claims without an explicit lifecycle.
+	// Existing assigned claims are not retroactively given a deadline.
+	// +optional
+	ClaimDefaults *SandboxClaimDefaults `json:"claimDefaults,omitempty"`
+
 	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
 	// +optional

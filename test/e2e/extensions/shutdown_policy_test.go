@@ -27,6 +27,7 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const holdDeleteFinalizer = "e2e.agent-sandbox.dev/hold-delete"
@@ -197,6 +198,76 @@ func TestSandboxClaimTTLDeleteForegroundAfterFinished(t *testing.T) {
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), svc))
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), sandbox))
 	require.NoError(t, tc.WaitForObjectNotFound(t.Context(), claim))
+}
+
+// TestSandboxClaimPoolDefaultRetain verifies that a pool default cleans up a
+// long-running sandbox without an SDK shutdown hook or an explicit claim lifecycle.
+func TestSandboxClaimPoolDefaultRetain(t *testing.T) {
+	tc := framework.NewTestContext(t)
+	ctx := t.Context()
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("claim-pool-ttl-%d", time.Now().UnixNano())}}
+	require.NoError(t, tc.CreateWithCleanup(ctx, ns))
+	template := createTemplate(t, tc, ns.Name, "pool-ttl-template", corev1.PodSpec{
+		Containers: []corev1.Container{{Name: "pause", Image: "registry.k8s.io/pause:3.10"}},
+	})
+	replicas, ttl := int32(1), int32(30)
+	pool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-ttl", Namespace: ns.Name},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:      &replicas,
+			TemplateRef:   extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			ClaimDefaults: &extensionsv1beta1.SandboxClaimDefaults{TTLSecondsAfterCreated: &ttl},
+		},
+	}
+	require.NoError(t, tc.CreateWithCleanup(ctx, pool))
+	// Prewarm before starting the claim's deadline so image pulls do not consume TTL.
+	waitForWarmPoolSandboxReady(t, tc, ns.Name, pool)
+	warm := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, tc.List(ctx, warm, client.InNamespace(ns.Name)))
+	warmUIDs := make(map[types.UID]bool)
+	for _, sb := range warm.Items {
+		if metav1.IsControlledBy(&sb, pool) && isSandboxReady(&sb) {
+			warmUIDs[sb.UID] = true
+		}
+	}
+	require.NotEmpty(t, warmUIDs)
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "default-retain", Namespace: ns.Name},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: pool.Name}},
+	}
+	require.NoError(t, tc.CreateWithCleanup(ctx, claim))
+	claimUID := claim.UID
+	waitForClaimReady(t, tc, claim)
+	require.Nil(t, claim.Spec.Lifecycle, "the controller must not mutate user intent")
+	require.NotNil(t, claim.Status.DefaultLifecycle)
+	require.NotNil(t, claim.Status.DefaultLifecycle.ShutdownTime)
+	deadline := claim.CreationTimestamp.Add(time.Duration(ttl) * time.Second)
+	require.True(t, deadline.Equal(claim.Status.DefaultLifecycle.ShutdownTime.Time))
+	require.Equal(t, extensionsv1beta1.ShutdownPolicyRetain, claim.Status.DefaultLifecycle.ShutdownPolicy)
+	sb := &sandboxv1beta1.Sandbox{}
+	key := types.NamespacedName{Namespace: ns.Name, Name: claim.Status.SandboxStatus.Name}
+	require.NoError(t, tc.Get(ctx, key, sb))
+	require.True(t, warmUIDs[sb.UID], "the claim must adopt the prewarmed Sandbox")
+	pod := &corev1.Pod{}
+	require.NoError(t, tc.Get(ctx, key, pod))
+	require.True(t, metav1.IsControlledBy(pod, sb))
+	// Observe actual running resources before expiry, not just a retained API record.
+	require.Greater(t, time.Until(deadline), 3*time.Second)
+	for until := time.Now().Add(2 * time.Second); time.Now().Before(until); {
+		require.NoError(t, tc.Get(ctx, key, sb))
+		require.True(t, sb.DeletionTimestamp.IsZero())
+		require.NoError(t, tc.Get(ctx, key, pod))
+		require.True(t, pod.DeletionTimestamp.IsZero())
+		time.Sleep(200 * time.Millisecond)
+	}
+	tc.MustWaitForObject(claim, predicates.ConditionReasonEquals(string(sandboxv1beta1.SandboxConditionReady), extensionsv1beta1.ClaimExpiredReason))
+	require.NoError(t, tc.WaitForObjectNotFound(ctx, sb))
+	require.NoError(t, tc.WaitForObjectNotFound(ctx, pod))
+	require.NoError(t, tc.Get(ctx, types.NamespacedName{Namespace: ns.Name, Name: claim.Name}, claim))
+	require.Equal(t, claimUID, claim.UID)
+	require.True(t, claim.DeletionTimestamp.IsZero(), "Retain preserves the Claim record")
+	require.Nil(t, claim.Spec.Lifecycle)
+	require.True(t, deadline.Equal(claim.Status.DefaultLifecycle.ShutdownTime.Time), "the deadline must remain frozen")
 }
 
 func createTemplate(t *testing.T, tc *framework.TestContext, namespace, name string, podSpec corev1.PodSpec) *extensionsv1beta1.SandboxTemplate {

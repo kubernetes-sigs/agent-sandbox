@@ -156,7 +156,8 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	sandboxOpts.K8sHelper = c.k8s
 
 	// Verify claim exists and resolve sandbox name before constructing handle.
-	if err := c.k8s.verifyClaimExists(ctx, claimName, namespace, c.tracer, c.svcName); err != nil {
+	claim, err := c.k8s.verifyClaimExists(ctx, claimName, namespace, c.tracer, c.svcName)
+	if err != nil {
 		return nil, fmt.Errorf("sandbox: claim %q not found in %q: %w", claimName, namespace, err)
 	}
 	sandboxName, err := c.k8s.resolveSandboxName(ctx, claimName, namespace, "", sandboxOpts.SandboxReadyTimeout, c.tracer, c.svcName)
@@ -170,8 +171,8 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	}
 
 	// Inject identity so Open() takes the reconnect path.
+	sb.setClaim(claim)
 	sb.mu.Lock()
-	sb.claimName = claimName
 	sb.sandboxName = sandboxName
 	sb.mu.Unlock()
 

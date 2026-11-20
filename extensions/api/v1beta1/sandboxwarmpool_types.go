@@ -110,6 +110,12 @@ type SandboxWarmPoolUpdateStrategy struct {
 
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool.
 type SandboxWarmPoolStatus struct {
+	// conditions reports whether the pool is making progress toward readiness.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
 	// replicas is the total number of sandboxes in the pool.
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`

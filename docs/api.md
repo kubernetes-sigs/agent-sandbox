@@ -567,6 +567,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions reports whether the pool is making progress toward readiness. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the total number of sandboxes in the pool. |  | Optional: \{\} <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the total number of sandboxes in the pool that are in a ready state. |  | Optional: \{\} <br /> |
 | `selector` _string_ | selector is the label selector used to find the pods in the pool. |  | Optional: \{\} <br /> |

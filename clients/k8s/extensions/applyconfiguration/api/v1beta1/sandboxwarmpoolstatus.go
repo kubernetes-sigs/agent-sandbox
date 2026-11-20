@@ -16,11 +16,17 @@
 
 package v1beta1
 
+import (
+	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+)
+
 // SandboxWarmPoolStatusApplyConfiguration represents a declarative configuration of the SandboxWarmPoolStatus type for use
 // with apply.
 //
 // SandboxWarmPoolStatus defines the observed state of SandboxWarmPool.
 type SandboxWarmPoolStatusApplyConfiguration struct {
+	// conditions reports whether the pool is making progress toward readiness.
+	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// replicas is the total number of sandboxes in the pool.
 	Replicas *int32 `json:"replicas,omitempty"`
 	// readyReplicas is the total number of sandboxes in the pool that are in a ready state.
@@ -39,6 +45,19 @@ type SandboxWarmPoolStatusApplyConfiguration struct {
 // apply.
 func SandboxWarmPoolStatus() *SandboxWarmPoolStatusApplyConfiguration {
 	return &SandboxWarmPoolStatusApplyConfiguration{}
+}
+
+// WithConditions adds the given value to the Conditions field in the declarative configuration
+// and returns the receiver, so that objects can be build by chaining "With" function invocations.
+// If called multiple times, values provided by each call will be appended to the Conditions field.
+func (b *SandboxWarmPoolStatusApplyConfiguration) WithConditions(values ...*v1.ConditionApplyConfiguration) *SandboxWarmPoolStatusApplyConfiguration {
+	for i := range values {
+		if values[i] == nil {
+			panic("nil value passed to WithConditions")
+		}
+		b.Conditions = append(b.Conditions, *values[i])
+	}
+	return b
 }
 
 // WithReplicas sets the Replicas field in the declarative configuration to the given value

@@ -259,6 +259,11 @@ function mapBodyStreamError(err: unknown, signal: AbortSignal): unknown {
  * Reads a Response body up to maxBytes, cancelling the stream and aborting
  * `controller` on overflow so the underlying socket does not keep streaming
  * data nobody wants. Returns an empty buffer for a null body (HEAD).
+ *
+ * `signal` is the caller's own signal. This function cancels the body when
+ * `signal` aborts and does not wait for fetch() to error the stream. After
+ * the response headers arrive, Node's fetch() can leave the body open when
+ * its signal aborts, and a pending read() then never settles.
  */
 async function readBoundedBody(
   response: Response,
@@ -272,9 +277,19 @@ async function readBoundedBody(
   }
   const chunks: Uint8Array[] = [];
   let total = 0;
+  const cancelBody = () => {
+    reader.cancel(signal.reason).catch(() => {});
+  };
+  signal.addEventListener("abort", cancelBody, { once: true });
   try {
     while (true) {
       const { done, value } = await reader.read();
+      // cancel() settles a pending read() as done, so only the signal tells
+      // a cancelled body from a complete one.
+      if (signal.aborted) {
+        cancelBody();
+        throw signal.reason;
+      }
       if (done) break;
       total += value.byteLength;
       if (total > maxBytes) {
@@ -289,6 +304,8 @@ async function readBoundedBody(
     }
   } catch (err) {
     throw mapBodyStreamError(err, signal);
+  } finally {
+    signal.removeEventListener("abort", cancelBody);
   }
   const out = new Uint8Array(total);
   let offset = 0;

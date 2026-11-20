@@ -14,6 +14,23 @@ helm install agent-sandbox ./helm/ \
   --set image.tag=<version>
 ```
 
+### Install from the staging OCI registry (development only)
+
+> **Note**: The staging OCI registry is for **development and testing only** until official chart promotion to `registry.k8s.io` is available. The postsubmit job runs on pushes across branches and tags (not only `main`), and staging chart tags are mutable (rebuilding a tagged commit overwrites the tag with a new digest).
+
+Postsubmit builds package this chart (stamping `version` and `appVersion` from
+the build's `_GIT_TAG`) and push it as an OCI artifact to the staging Artifact
+Registry. Install a staging chart version directly:
+
+```bash
+helm install agent-sandbox \
+  oci://us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/charts/agent-sandbox \
+  --version <version> \
+  --namespace agent-sandbox-system \
+  --create-namespace \
+  --set image.repository=us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/agent-sandbox-controller
+```
+
 ### Install with extensions enabled
 
 Extensions add support for `SandboxWarmPool`, `SandboxTemplate`, and `SandboxClaim` resources.
@@ -75,7 +92,7 @@ The following table lists the configurable parameters and their defaults. For fl
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.tag` | Controller image tag — **required** | `""` |
+| `image.tag` | Controller image tag (defaults to `.Chart.AppVersion` when packaged; **required** when installing from source) | `""` |
 | `image.repository` | Controller image repository | `registry.k8s.io/agent-sandbox/agent-sandbox-controller` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | List of image pull secrets (e.g. `[{name: my-secret}]`) to add to the Deployment | `[]` |

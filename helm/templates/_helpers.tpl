@@ -27,8 +27,9 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
 app.kubernetes.io/name: {{ include "agent-sandbox.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-{{- if .Values.image.tag }}
-app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+{{- $version := .Values.image.tag | default .Chart.AppVersion }}
+{{- if $version }}
+app.kubernetes.io/version: {{ $version | quote }}
 {{- end }}
 {{- end }}
 
@@ -44,6 +45,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 The controller image reference.
 */}}
 {{- define "agent-sandbox.image" -}}
-{{- $tag := required "image.tag is required" .Values.image.tag }}
+{{- $tag := required "image.tag is required" (.Values.image.tag | default .Chart.AppVersion) }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}

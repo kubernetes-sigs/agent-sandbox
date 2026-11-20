@@ -26,6 +26,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -54,16 +55,18 @@ func newProcessClient(t *testing.T, rootDir string) processv1.ProcessServiceClie
 	return connectProcessClient(t, grpcServer)
 }
 
-func connectProcessClient(t *testing.T, grpcServer *grpc.Server) processv1.ProcessServiceClient {
+func connectProcessClient(t *testing.T, grpcServer *grpc.Server, opts ...grpc.DialOption) processv1.ProcessServiceClient {
 	t.Helper()
 	lis := bufconn.Listen(1024 * 1024)
 	go func() { _ = grpcServer.Serve(lis) }()
 
-	conn, err := grpc.NewClient("passthrough:///bufnet",
+	opts = append([]grpc.DialOption{
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return lis.DialContext(ctx)
 		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	}, opts...)
+	conn, err := grpc.NewClient("passthrough:///bufnet", opts...)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -347,6 +350,113 @@ func TestStartClosesOutputPipes(t *testing.T) {
 	require.Equal(t, before, pipeCount(), "completed streams must close both output readers")
 }
 
+// TestStartDeliversOutputTailToASlowConsumer guards against Start discarding
+// the output still in the pipe when the client reads slowly. The child exits
+// while the stdout reader is blocked in stream.Send on flow control, and the
+// client stays idle for longer than pipeDrainGrace. Start must still deliver
+// every byte before the ExitEvent.
+func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	grpcServer := grpc.NewServer()
+	processv1.RegisterProcessServiceServer(grpcServer,
+		NewProcessServer(root, processmanager.NewProcessRegistry(), 0, logr.Discard()))
+	// A fixed 64 KiB receive window (the HTTP/2 default) turns off dynamic
+	// window sizing, so the output below overflows the window and the child
+	// still exits while the reader waits in Send.
+	const window = 64 * 1024
+	client := connectProcessClient(t, grpcServer,
+		grpc.WithInitialWindowSize(window), grpc.WithInitialConnWindowSize(window))
+
+	// About 132 KiB fits in the flow-control window, the stream's write
+	// quota and the chunk held by the blocked reader. The rest waits in the
+	// pipe, which holds 64 KiB, so the child still exits.
+	const total = 160 * 1024
+	stream, err := client.Start(testCtx(t), &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{
+			"sh", "-c", "head -c " + strconv.Itoa(total) + " /dev/zero; touch exited",
+		}},
+	})
+	require.NoError(t, err)
+	recvInit(t, stream)
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(root, "exited"))
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "child never finished writing")
+	time.Sleep(pipeDrainGrace + 2*time.Second)
+
+	res := drainStart(t, stream)
+	require.Equal(t, int32(0), res.exitCode)
+	require.Equal(t, total, res.stdout.Len(), "Start reported exit 0 with part of stdout missing")
+}
+
+// TestStartEndsWhenADetachedChildHoldsTheOutputPipe guards the reason
+// pipeDrainGrace exists: a background child that inherits stdout and keeps it
+// open past the command's exit must not hold the stream open, whether it is
+// silent or keeps writing to a client that reads more slowly than it writes.
+func TestStartEndsWhenADetachedChildHoldsTheOutputPipe(t *testing.T) {
+	tests := []struct {
+		name       string
+		background string
+		// readDelay paces the client after each message; 2 ms per 4 KiB
+		// chunk is about 2 MB/s, slower than yes writes.
+		readDelay  time.Duration
+		wantPrefix string
+	}{
+		{name: "silent", background: "sleep 30", wantPrefix: "before"},
+		{name: "writing to a slow client", background: "yes", readDelay: 2 * time.Millisecond, wantPrefix: "beforey\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			client := newProcessClient(t, root)
+			pidFile := filepath.Join(root, "child.pid")
+			t.Cleanup(func() {
+				data, err := os.ReadFile(pidFile)
+				if err != nil {
+					return
+				}
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+
+			// The deadline is well past the bound, so a stream the child
+			// keeps open fails here rather than at the test timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), pipeDrainGrace+15*time.Second)
+			defer cancel()
+			started := time.Now()
+			stream, err := client.Start(ctx, &processv1.StartRequest{
+				Config: &processv1.ProcessConfig{Command: []string{
+					"sh", "-c", "printf before; " + tc.background + " & echo $! > child.pid; exit 0",
+				}},
+			})
+			require.NoError(t, err)
+
+			var head bytes.Buffer
+			var exit *int32
+			for exit == nil {
+				msg, err := stream.Recv()
+				require.NoError(t, err, "stream still open after %v", time.Since(started))
+				if out := msg.GetStdout(); head.Len() < 64 {
+					head.Write(out)
+				}
+				if e := msg.GetExit(); e != nil {
+					code := e.GetExitCode()
+					exit = &code
+				}
+				time.Sleep(tc.readDelay)
+			}
+			require.Equal(t, int32(0), *exit)
+			require.True(t, strings.HasPrefix(head.String(), tc.wantPrefix), "stdout starts %q", head.String())
+			require.Less(t, time.Since(started), pipeDrainGrace+5*time.Second,
+				"the background child's open pipe must not hold the stream open")
+		})
+	}
+}
+
 func TestWriteStdinAndEOF(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 	ctx := testCtx(t)
@@ -536,6 +646,75 @@ func TestStartWithPTY_DeliversAllOutputOfShortLivedProcess(t *testing.T) {
 			require.Len(t, lines, 2000, "last line: %q", lines[len(lines)-1])
 		})
 	}
+}
+
+// gatedStartStream is a Start stream whose output events wait for release,
+// like a client that stops reading. Init and Exit events pass through.
+type gatedStartStream struct {
+	grpc.ServerStream
+	ctx     context.Context
+	release chan struct{}
+	stdout  bytes.Buffer
+	exit    *int32
+}
+
+func (s *gatedStartStream) Context() context.Context { return s.ctx }
+
+func (s *gatedStartStream) Send(resp *processv1.StartResponse) error {
+	if out := resp.GetStdout(); out != nil {
+		<-s.release
+		s.stdout.Write(out)
+	}
+	if exit := resp.GetExit(); exit != nil {
+		code := exit.GetExitCode()
+		s.exit = &code
+	}
+	return nil
+}
+
+// TestStartWithPTY_DeliversOutputTailToASlowConsumer is the PTY form of
+// TestStartDeliversOutputTailToASlowConsumer. The PTY reader takes one chunk
+// and blocks in Send, the rest of the output stays in the PTY, and the child
+// exits. The client stays idle for longer than pipeDrainGrace. Start must
+// still deliver every byte before the ExitEvent.
+func TestStartWithPTY_DeliversOutputTailToASlowConsumer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// The reader takes one 64-byte chunk and the rest of the 1 KiB output
+	// waits in the PTY, which holds that much on Linux and macOS.
+	const chunk, total = 64, 1024
+	srv := NewProcessServer(root, processmanager.NewProcessRegistry(), chunk, logr.Discard())
+	stream := &gatedStartStream{ctx: testCtx(t), release: make(chan struct{})}
+
+	finished := make(chan struct{})
+	var startErr error
+	go func() {
+		defer close(finished)
+		startErr = srv.Start(&processv1.StartRequest{
+			Config: &processv1.ProcessConfig{Command: []string{
+				"sh", "-c", "head -c " + strconv.Itoa(total) + " /dev/zero; touch exited",
+			}},
+			Pty: &processv1.PTY{Cols: 80, Rows: 24},
+		}, stream)
+	}()
+	release := sync.OnceFunc(func() { close(stream.release) })
+	t.Cleanup(func() {
+		release()
+		<-finished
+	})
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(root, "exited"))
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "child never finished writing")
+	time.Sleep(pipeDrainGrace + 2*time.Second)
+	release()
+	<-finished
+
+	require.NoError(t, startErr)
+	require.NotNil(t, stream.exit, "no ExitEvent")
+	require.Equal(t, int32(0), *stream.exit)
+	require.Equal(t, total, stream.stdout.Len(), "Start reported exit 0 with part of the PTY output missing")
 }
 
 // TestStartWithPTY_InitialSizeVisibleImmediately guards against the requested

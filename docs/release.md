@@ -66,9 +66,11 @@ The release process automatically generates release notes using the Gemini API. 
 
 Gemini uses the following information to generate release notes:
 
--   **Commit Titles and Messages**: All commits between the previous release and the current release.
--   **PR Descriptions**: The body/description of all merged Pull Requests associated with those commits (fetched via `gh pr view`).
--   **Breaking Changes**: Specifically, the body of PRs labeled with `release-note-action-required`.
+-   **Commits and Filtered Code Diffs**: Commit titles, messages, `git show --stat` changed-file lists, and filtered non-test/non-generated diffs between the previous release and the target release so the summary reflects the merged code even when a PR description is stale.
+-   **PR Metadata**: Pull Request descriptions, labels, and human author handles (fetched via `gh pr view`).
+-   **Deterministic Release Signals**: CRD schema changes (`k8s/crds/`, `helm/crds/`), `helm/Chart.yaml` version bumps, and per-commit scope tags (`docs-only`, `tests-only`, `ci-or-tooling-only`, `bot-dependency-update`).
+-   **Breaking Changes**: PRs labeled with `release-note-action-required`, plus any breaking or default changes detected directly in the diffs.
+-   **Release Footer**: The script fetches `New Contributors` and the `Full Changelog` link from GitHub's `generate-notes` API while omitting the raw `What's Changed` PR list.
 
 ### Guidance for PR Authors
 

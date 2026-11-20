@@ -123,6 +123,120 @@ class ClassifyRedRunTest(unittest.TestCase):
             ))
         self.assertEqual(cls, "infra")
 
+    def test_autogen_gate_failure_is_pretest_breakage(self):
+        # presubmit-test-autogen-up-to-date writes no junit, so a PR with
+        # stale generated files is a red column with a clean clone; the
+        # gate's error line in the build log marks it as the PR's breakage.
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                return ("Full diff:\n M docs/go_sdk_reference.md\n"
+                        "ERROR: Generated files out-of-date. Please run "
+                        "'dev/tools/fix-api-docs' and update your PR.\n")
+            return data(name)
+
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch),
+                         "pretest_failure")
+
+    def test_build_log_without_gate_marker_stays_infra(self):
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                return "Error: wait time exceeded during validation\n"
+            return data(name)
+
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch), "infra")
+
+    def test_unreachable_build_log_is_unknown_not_infra(self):
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                raise flake_report.FetchUnavailable("down")
+            return data(name)
+
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch), "unknown")
+
+    def _image_build_failure_fetch(self):
+        data = artifacts(
+            finished={"result": "FAILURE", "revision": "abc"},
+            clone_records=[{"refs": {"repo": "agent-sandbox"}}],
+        )
+
+        def fetch(name):
+            if name == "build-log.txt":
+                return ("--- Found Dockerfile at: ./examples/python-runtime-sandbox/Dockerfile\n"
+                        "--- Service Name: python-runtime-sandbox\n"
+                        "error: linker `cc` not found\n"
+                        "ERROR: failed to build 1 of 6 image(s): "
+                        "['python-runtime-sandbox']\n")
+            return data(name)
+        return fetch
+
+    def test_image_build_broken_by_the_pr_is_pretest_breakage(self):
+        # A dependency bump that breaks an image's own Dockerfile fails the
+        # e2e lane before junit exists; the PR touched that image's directory.
+        cls = flake_report.classify_red_run(
+            False, False, self._image_build_failure_fetch(),
+            changed_files=lambda: ["examples/python-runtime-sandbox/Dockerfile"])
+        self.assertEqual(cls, "pretest_failure")
+
+    def test_image_build_failure_in_an_untouched_image_stays_infra(self):
+        # A registry or module-proxy error breaks an image the PR never
+        # changed: that is infrastructure.
+        cls = flake_report.classify_red_run(
+            False, False, self._image_build_failure_fetch(),
+            changed_files=lambda: ["clients/go/sandbox/files.go"])
+        self.assertEqual(cls, "infra")
+
+    def test_image_build_failure_with_unknown_pr_files_stays_infra(self):
+        fetch = self._image_build_failure_fetch()
+        self.assertEqual(
+            flake_report.classify_red_run(False, False, fetch, changed_files=lambda: None),
+            "infra")
+        self.assertEqual(flake_report.classify_red_run(False, False, fetch), "infra")
+
+    def test_same_named_directory_elsewhere_is_not_the_image(self):
+        # Only files under the image's Dockerfile directory can break its
+        # build; docs that share the image's name cannot.
+        cls = flake_report.classify_red_run(
+            False, False, self._image_build_failure_fetch(),
+            changed_files=lambda: ["docs/python-runtime-sandbox/README.md"])
+        self.assertEqual(cls, "infra")
+
+    def test_every_failed_image_must_be_touched_by_the_pr(self):
+        log = ("--- Found Dockerfile at: ./sandbox-router/Dockerfile\n"
+               "--- Service Name: sandbox-router-go\n"
+               "--- Found Dockerfile at: ./examples/x/Dockerfile\n"
+               "--- Service Name: x\n"
+               "--- Found Dockerfile at: ./Dockerfile\n"
+               "--- Service Name: agent-sandbox-controller\n")
+        both = flake_report.failed_image_dirs(
+            log + "ERROR: failed to build 2 of 6 image(s): ['sandbox-router-go', 'x']")
+        self.assertEqual(both, ["sandbox-router", "examples/x"])
+        self.assertTrue(flake_report.pr_touches_images(
+            ["sandbox-router/main.go", "examples/x/req.txt"], both))
+        self.assertFalse(flake_report.pr_touches_images(["sandbox-router/main.go"], both))
+        # The root Dockerfile's directory holds every file, and an image the
+        # log does not locate has no directory: neither proves PR breakage.
+        unprovable = flake_report.failed_image_dirs(
+            log + "ERROR: failed to build 2 of 6 image(s): "
+                  "['agent-sandbox-controller', 'missing']")
+        self.assertEqual(unprovable, [".", None])
+        self.assertFalse(flake_report.pr_touches_images(["Dockerfile"], unprovable[:1]))
+        self.assertFalse(flake_report.pr_touches_images(["missing/a"], unprovable[1:]))
+
     def test_missing_artifacts_stay_infra(self):
         # When the run dir has no finished.json or clone-records.json we
         # cannot prove a benign cause; keep the conservative verdict.
@@ -413,6 +527,74 @@ class AnalyzeTabTest(unittest.TestCase):
             _, _, infra, _, _ = flake_report.analyze_tab("dash", "tab", 2)
         self.assertEqual(infra["pretest_failures"], 0)
         self.assertEqual(infra["infra_runs"], 0)
+
+    def test_tab_with_only_job_level_rows_is_not_classified(self):
+        # The real row shape of presubmit-test-autogen-up-to-date: the job
+        # writes no junit, so TestGrid serves only the Overall and Pod rows.
+        # Such a tab reports no infra entry and costs no artifact fetch.
+        table = {
+            "query": "kubernetes-ci-logs/pr-logs/directory/presubmit-test-autogen-up-to-date",
+            "changelists": ["g0", "g1"],
+            "column_ids": ["\ue000g0", "\ue000g1"],
+            "timestamps": [200, 100],
+            "tests": [
+                {"name": "presubmit-test-autogen-up-to-date.Overall",
+                 "statuses": rle([12, 1])},
+                {"name": "presubmit-test-autogen-up-to-date.Pod",
+                 "statuses": rle([1, 1])},
+            ],
+        }
+        fetched = []
+
+        def fake_fetcher(gcs_query, build_id):
+            return lambda name: fetched.append((build_id, name))
+
+        with mock.patch.object(flake_report, "fetch_json",
+                               return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher",
+                               fake_fetcher):
+            result = flake_report.analyze_tab("dash", "tab", 2)
+        self.assertEqual(result, ([], [], None, [], []))
+        self.assertEqual(fetched, [])
+
+    def test_gate_failure_on_a_tab_with_a_test_row_is_pretest_breakage(self):
+        # When TestGrid also serves a test row for the gate's tab, red runs
+        # are classified: the run whose build log ends with the gate's error
+        # is the PR's breakage, and the run with no such line stays infra.
+        table = {
+            "query": "kubernetes-ci-logs/pr-logs/directory/presubmit-test-autogen-up-to-date",
+            "changelists": ["g0", "g1", "g2"],
+            "column_ids": ["\ue000g0", "\ue000g1", "\ue000g2"],
+            "timestamps": [300, 200, 100],
+            "tests": [
+                {"name": "presubmit-test-autogen-up-to-date.Overall",
+                 "statuses": rle([12, 12, 1])},
+                {"name": "presubmit-test-autogen-up-to-date.Pod",
+                 "statuses": rle([1, 1, 1])},
+                {"name": "pkg.TestStray", "statuses": rle([0, 0, 1])},
+            ],
+        }
+        finished = {"result": "FAILURE", "revision": "abc"}
+        clone = [{"refs": {"repo": "agent-sandbox"}}]
+        art = {
+            "g0": {"finished.json": finished, "clone-records.json": clone,
+                   "build-log.txt": "ERROR: Generated files out-of-date. "
+                                    "Please run 'dev/tools/fix-api-docs'\n"},
+            "g1": {"finished.json": finished, "clone-records.json": clone,
+                   "build-log.txt": "signal: killed\n"},
+        }
+
+        def fake_fetcher(gcs_query, build_id):
+            return lambda name: art.get(build_id, {}).get(name)
+
+        with mock.patch.object(flake_report, "fetch_json",
+                               return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher",
+                               fake_fetcher):
+            _, _, infra, _, _ = flake_report.analyze_tab("dash", "tab", 3)
+        self.assertEqual(
+            (infra["red_runs"], infra["pretest_failures"], infra["infra_runs"]),
+            (2, 1, 1))
 
     def test_render_report_calls_out_benign_red_runs(self):
         flaky, consistent, infra = self.analyze()

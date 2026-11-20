@@ -179,6 +179,28 @@ def build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag)
     if args.kind_cluster_name:
         load_kind_image(args, args.kind_cluster_name, service_name, srcdir, image_tag)
 
+# One long `docker buildx build` reuses the registry credential it fetched at
+# start. Cloud Build credentials expire after about an hour, so an image whose
+# build spans that boundary fails its final push with "failed to fetch oauth
+# token: unauthorized" (issue #2192). A second invocation fetches a fresh
+# credential and finishes quickly from the layer cache.
+REGISTRY_PUSH_ATTEMPTS = 2
+
+
+def build_and_push_image_with_retry(args, service_name, srcdir, dockerfile_path, image_tag):
+    """Builds one image, retrying a failed registry push once."""
+    attempts = REGISTRY_PUSH_ATTEMPTS if args.docker_build_output_type == "registry" else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            build_and_push_image(args, service_name, srcdir, dockerfile_path, image_tag)
+            return
+        except subprocess.CalledProcessError as e:
+            if attempt == attempts:
+                raise
+            print(f"WARNING: building image {service_name} failed "
+                  f"(attempt {attempt}/{attempts}), retrying: {e}", file=sys.stderr)
+
+
 def main(args):
     """Builds and pushes all discovered Docker images."""
     if args.controller_only:
@@ -225,7 +247,7 @@ def main(args):
         try:
             create_buildx_builder_if_not_exists(args.container_engine)
             print(f"building image for {service_name}")
-            build_and_push_image(args, service_name, context_dir, dockerfile_path, image_tag)
+            build_and_push_image_with_retry(args, service_name, context_dir, dockerfile_path, image_tag)
         except subprocess.CalledProcessError as e:
             print(f"ERROR: building image {service_name} failed: {e}", file=sys.stderr)
             failed.append(service_name)

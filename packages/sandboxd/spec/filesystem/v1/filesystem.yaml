@@ -190,6 +190,19 @@ paths:
             as a directory, the request fails with 412 and writes nothing. Other values are rejected
             with 400, as is combining it with type=directory or extract=tar. With append=true the body is created,
             not appended.
+        - name: If-Unmodified-Since
+          in: header
+          required: false
+          schema:
+            type: string
+            format: http-date
+          description: >
+            Writes only if the file exists and was not modified after this date, like the
+            Last-Modified header of GET and HEAD, at one-second precision. A change in the same
+            second as the date is not detected. Otherwise the request fails with 412 and writes
+            nothing. The check and the rename are atomic against other overwriting PUT requests
+            only. An invalid date is rejected with 400, as is combining it with If-None-Match,
+            append=true, type=directory, or extract=tar.
       requestBody:
         required: false
         description: File content, or the archive with extract=tar. Required unless type=directory, which ignores it.
@@ -219,7 +232,9 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
         "412":
-          description: If-None-Match is "*" and the path already exists
+          description: >
+            If-None-Match is "*" and the path already exists, or If-Unmodified-Since is set and
+            the path is missing, is a directory, or was modified after that date
         "413":
           description: With extract=tar, the archive is over the entry or byte cap
           content:

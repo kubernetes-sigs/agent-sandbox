@@ -177,7 +177,7 @@ REMOTE_UPSTREAM ?= upstream
 REMOTE_FORK ?= origin
 
 # Gemini model for release notes generation
-GEMINI_MODEL ?= gemini-3.7-flash
+GEMINI_MODEL ?= gemini-4-neon
 
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
@@ -187,7 +187,7 @@ release-promote:
 	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK} $(if $(filter true,$(SKIP_TAGGING)),--skip-tagging) $(if $(filter true,$(ONLY_TAGGING)),--only-tagging)
 
 # Publish a draft release to GitHub
-# Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-3.7-flash
+# Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-4-neon
 .PHONY: release-publish
 release-publish: install-gen-tools
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-publish TAG=vX.Y.Z)"; exit 1; fi

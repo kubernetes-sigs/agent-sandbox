@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -137,7 +138,6 @@ func TestCheckRunAsCapabilities(t *testing.T) {
 	four := "00000000000000e1"
 	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, "000001ffffffffff", none, "0", "0")), "root")
 	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, four, none, "0", "0")), "root with only the four it needs")
-	require.NoError(t, checkRunAsCapabilities(fmt.Sprintf(procStatus, four, none, "65534", "1")), "file capabilities under no_new_privs")
 
 	err := checkRunAsCapabilities(fmt.Sprintf(procStatus, none, none, "0", "0"))
 	require.ErrorContains(t, err, "lacks CAP_SETUID, CAP_SETGID, CAP_KILL, CAP_CHOWN")
@@ -148,13 +148,17 @@ func TestCheckRunAsCapabilities(t *testing.T) {
 	require.ErrorContains(t, err, "lacks CAP_CHOWN")
 	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, four, four, "0", "0"))
 	require.ErrorContains(t, err, "ambient capabilities")
-	// The capabilities of a daemon that is not root come from its binary, so
-	// without no_new_privs a command gains them by executing that binary.
-	err = checkRunAsCapabilities(fmt.Sprintf(procStatus, four, none, "65534", "0"))
-	require.ErrorContains(t, err, "needs no_new_privs")
-	// A status without the two lines is not taken for root or for no_new_privs.
+	// A daemon that is not root holds the capabilities through its binary. Its
+	// child keeps them across the change of user and across executing that
+	// binary, so a request whose command is sandboxd would start a second
+	// daemon that has them. no_new_privs does not prevent that.
+	for _, noNewPrivs := range []string{"0", "1"} {
+		err = checkRunAsCapabilities(fmt.Sprintf(procStatus, four, none, "65534", noNewPrivs))
+		require.ErrorContains(t, err, "needs sandboxd to run as root")
+	}
+	// A status without the Uid line is not taken for root.
 	err = checkRunAsCapabilities("CapEff:\t" + four + "\nCapAmb:\t" + none + "\n")
-	require.ErrorContains(t, err, "needs no_new_privs")
+	require.ErrorContains(t, err, "needs sandboxd to run as root")
 }
 
 // TestNewRunAsNeedsAuthToken verifies that a policy is refused without client
@@ -237,8 +241,8 @@ func TestRunAsRefusesUserOutsidePolicy(t *testing.T) {
 }
 
 // requireRunAsPrivileges skips a test that really changes user unless the
-// test process could be a daemon with a RunAsPolicy: root on Linux, or the
-// four capabilities under no_new_privs.
+// test process could be a daemon with a RunAsPolicy: root on Linux with the
+// four capabilities.
 func requireRunAsPrivileges(t *testing.T) {
 	t.Helper()
 	if err := checkRunAsPrivileges(); err != nil {
@@ -316,20 +320,171 @@ func TestRunAsUserGroups(t *testing.T) {
 	}
 }
 
-// TestRunAsUserHoldsNoCapabilities guards against the command inheriting the
-// privilege the daemon used to start it, which would let it become root.
-func TestRunAsUserHoldsNoCapabilities(t *testing.T) {
+// TestRunAsUserHoldsNoPrivileges guards on every path against the command
+// inheriting the privilege the daemon used to start it, and against it gaining
+// privilege later: under no_new_privs a setuid program or a file with
+// capabilities gives it nothing.
+func TestRunAsUserHoldsNoPrivileges(t *testing.T) {
 	requireRunAsPrivileges(t)
-	client := newRunAsClient(t, runAsRootDir(t), testRunAsPolicy)
-	for _, tc := range runAsCases {
-		resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
-			Config: &processv1.ProcessConfig{
-				Command: []string{"grep", "-E", "^Cap(Prm|Eff|Amb):", "/proc/self/status"},
-				User:    tc.user,
-			},
+	for _, path := range runAsPaths {
+		for _, tc := range runAsCases {
+			t.Run(path.name+"/"+tc.name, func(t *testing.T) {
+				res, err := path.run(t, newRunAsClient(t, runAsRootDir(t), testRunAsPolicy), &processv1.ProcessConfig{
+					Command: []string{"grep", "-E", "^(Cap(Prm|Eff|Amb)|NoNewPrivs):", "/proc/self/status"},
+					User:    tc.user,
+				})
+				require.NoError(t, err)
+				require.Equal(t, "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\nNoNewPrivs:\t1\n", res.stdout)
+			})
+		}
+	}
+}
+
+// TestRunAsStartsHelperAsDaemon verifies that the process the daemon forks for
+// a command that runs as another user is sandboxd itself with no credential.
+// A forked child that changed user could be stopped by that user before it
+// executes, and the daemon waits in the fork until it does.
+func TestRunAsStartsHelperAsDaemon(t *testing.T) {
+	requireRunAsPrivileges(t)
+	root := runAsRootDir(t)
+	processServer := NewProcessServer(root, processmanager.NewProcessRegistry(), 0, logr.Discard())
+	processServer.runAs = testRunAsPolicy
+	cmd, err := processServer.buildCommand(testCtx(t), &processv1.ProcessConfig{Command: []string{"true"}, User: testRunAsUser})
+	require.NoError(t, err)
+	truePath := cmd.Path
+
+	helper, err := processServer.startCommand(cmd)
+	require.NoError(t, err)
+	require.NoError(t, helper.result("start"))
+	require.NoError(t, cmd.Wait())
+
+	require.Nil(t, cmd.SysProcAttr.Credential)
+	require.Equal(t, []string{}, cmd.Env)
+	require.Equal(t, "/proc/self/exe", cmd.Path)
+	require.Equal(t, []string{"sandboxd", RunAsHelperArg, "12345", "23456", "23457,23458", root, "", truePath, "true"}, cmd.Args)
+}
+
+// TestRunAsUserEnvironment verifies that the command gets the daemon's
+// environment and the request's, with PWD naming its working directory, and
+// that the run-as helper gets none of it. The helper starts as root, so a
+// variable from the request must not reach it. GODEBUG=inittrace=1 makes any
+// Go program that starts with it print to stderr, which the helper would do
+// and the shell does not.
+func TestRunAsUserEnvironment(t *testing.T) {
+	requireRunAsPrivileges(t)
+	t.Setenv("SANDBOXD_TEST_FROM_DAEMON", "daemon")
+	root := runAsRootDir(t)
+	want, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+	for _, path := range runAsPaths[:3] {
+		t.Run(path.name, func(t *testing.T) {
+			res, err := path.run(t, newRunAsClient(t, root, testRunAsPolicy), &processv1.ProcessConfig{
+				Command: []string{"sh", "-c", `echo "$SANDBOXD_TEST_FROM_DAEMON $FROM_REQUEST $GODEBUG $PWD"`},
+				EnvVars: map[string]string{"FROM_REQUEST": "request", "GODEBUG": "inittrace=1"},
+				User:    testRunAsUser,
+			})
+			require.NoError(t, err)
+			require.Equal(t, runAsResult{stdout: "daemon request inittrace=1 " + want + "\n"}, res)
 		})
-		require.NoError(t, err, tc.name)
-		require.Equal(t, "CapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapAmb:\t0000000000000000\n", string(resp.GetStdout()), tc.name)
+	}
+}
+
+// TestRunAsHelperServesOnlyRoot verifies that the run-as helper changes user
+// only for the daemon, which is root. Anyone can execute the binary with the
+// helper's arguments, and a binary with file capabilities would otherwise let
+// them become any user.
+func TestRunAsHelperServesOnlyRoot(t *testing.T) {
+	requireRunAsPrivileges(t)
+	statusRead, statusWrite, err := os.Pipe()
+	require.NoError(t, err)
+	defer func() { _ = statusRead.Close() }()
+	cmd := exec.Command("/proc/self/exe", RunAsHelperArg, "12345", "23456", "", "/", "", "/bin/true", "true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 10001, Gid: 20001}}
+	environment, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	defer func() { _ = environment.Close() }()
+	cmd.ExtraFiles = []*os.File{statusWrite, environment}
+	require.NoError(t, cmd.Start())
+	require.NoError(t, statusWrite.Close())
+
+	report, err := io.ReadAll(statusRead)
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("%s %d", helperStepUser, int(syscall.EPERM)), string(report))
+	require.Error(t, cmd.Wait())
+}
+
+// TestRunAsUserStartFailures verifies that a command that cannot start as its
+// user fails the request with the code a command of the daemon's own user
+// gets, although the run-as helper is what meets the failure.
+func TestRunAsUserStartFailures(t *testing.T) {
+	requireRunAsPrivileges(t)
+	root := runAsRootDir(t)
+	// Only root may enter the directory or execute the script.
+	require.NoError(t, os.Mkdir(filepath.Join(root, "roots-only"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "roots-only.sh"), []byte("#!/bin/sh\ntouch ran\n"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "file"), nil, 0o644))
+	require.NoError(t, os.Symlink("/", filepath.Join(root, "outside")))
+
+	for _, tc := range []struct {
+		name    string
+		command []string
+		cwd     string
+		code    codes.Code
+	}{
+		{"cwd the user cannot enter", []string{"touch", "ran"}, "roots-only", codes.PermissionDenied},
+		{"cwd that does not exist", []string{"touch", "ran"}, "missing", codes.NotFound},
+		{"cwd that is a file", []string{"touch", "ran"}, "file", codes.InvalidArgument},
+		{"cwd that leaves the root through a symlink", []string{"touch", "ran"}, "outside", codes.PermissionDenied},
+		{"command the user cannot execute", []string{filepath.Join(root, "roots-only.sh")}, "", codes.PermissionDenied},
+		{"command that does not exist", []string{filepath.Join(root, "missing")}, "", codes.NotFound},
+	} {
+		for _, path := range runAsPaths {
+			t.Run(tc.name+"/"+path.name, func(t *testing.T) {
+				config := &processv1.ProcessConfig{Command: tc.command, User: testRunAsUser}
+				if tc.cwd != "" {
+					config.Cwd = &tc.cwd
+				}
+				_, err := path.run(t, newRunAsClient(t, root, testRunAsPolicy), config)
+				require.Equal(t, tc.code, status.Code(err), "%v", err)
+				require.NoFileExists(t, filepath.Join(root, "ran"))
+			})
+		}
+	}
+}
+
+// TestRunAsUserCwdBelowPrivateDirectory verifies that a command can start
+// below a directory that only its user may enter. The daemon may be unable to
+// look inside one, which is why the run-as helper resolves the working
+// directory as the user.
+func TestRunAsUserCwdBelowPrivateDirectory(t *testing.T) {
+	requireRunAsPrivileges(t)
+	root := runAsRootDir(t)
+	private := filepath.Join(root, "private")
+	nested := filepath.Join(private, "nested")
+	require.NoError(t, os.MkdirAll(nested, 0o700))
+	want, err := filepath.EvalSymlinks(nested)
+	require.NoError(t, err)
+	// Give away the deeper directory first and take it back last. A test
+	// process without CAP_DAC_OVERRIDE cannot reach below a directory that
+	// belongs to the user, not even to remove it.
+	uid, gid := int(testRunAsUser.GetUid()), int(testRunAsUser.GetGid())
+	require.NoError(t, os.Chown(nested, uid, gid))
+	require.NoError(t, os.Chown(private, uid, gid))
+	t.Cleanup(func() {
+		_ = os.Chown(private, os.Getuid(), os.Getgid())
+		_ = os.Chown(nested, os.Getuid(), os.Getgid())
+	})
+	cwd := "private/nested"
+	for _, path := range runAsPaths {
+		t.Run(path.name, func(t *testing.T) {
+			res, err := path.run(t, newRunAsClient(t, root, testRunAsPolicy), &processv1.ProcessConfig{
+				Command: []string{"pwd", "-P"},
+				Cwd:     &cwd,
+				User:    testRunAsUser,
+			})
+			require.NoError(t, err)
+			require.Equal(t, want+"\n", res.stdout)
+		})
 	}
 }
 

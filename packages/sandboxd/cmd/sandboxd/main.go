@@ -48,7 +48,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
-	ctrl "sigs.k8s.io/controller-runtime"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"sigs.k8s.io/agent-sandbox/internal/version"
@@ -96,6 +96,12 @@ type config struct {
 }
 
 func main() {
+	// sandboxd starts itself again with this argument to run a command as
+	// another user. The helper never returns.
+	if len(os.Args) > 1 && os.Args[1] == server.RunAsHelperArg {
+		server.RunAsHelper(os.Args[2:])
+	}
+
 	var cfg config
 	zapOpts := zap.Options{Development: false}
 
@@ -132,7 +138,7 @@ func main() {
 	flag.StringVar(&cfg.authTokenFile, "auth-token-file", "",
 		"File holding a bearer token (e.g. a mounted Secret), required like --auth-token-sha256. Mutually exclusive with it.")
 	flag.StringVar(&cfg.runAsUIDRange, "run-as-uid-range", "",
-		"Inclusive range of user IDs, as <min>-<max>, that a request may run its command as. 0 is never allowed. Requires --run-as-gid-range, --run-as-default-user, an auth token, and a daemon that is root or holds CAP_SETUID, CAP_SETGID, CAP_KILL and CAP_CHOWN. Empty refuses every request that names a user.")
+		"Inclusive range of user IDs, as <min>-<max>, that a request may run its command as. 0 is never allowed. Requires --run-as-gid-range, --run-as-default-user, --auth-token-sha256, and a daemon that runs as root with CAP_SETUID, CAP_SETGID, CAP_KILL and CAP_CHOWN. Empty refuses every request that names a user.")
 	flag.StringVar(&cfg.runAsGIDRange, "run-as-gid-range", "",
 		"Inclusive range of group IDs, as <min>-<max>, that a request may give its command. 0 is never allowed. Requires --run-as-uid-range.")
 	flag.StringVar(&cfg.runAsDefaultUser, "run-as-default-user", "",
@@ -146,8 +152,8 @@ func main() {
 		return
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
-	log := ctrl.Log.WithName("sandboxd")
+	ctrllog.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
+	log := ctrllog.Log.WithName("sandboxd")
 
 	if err := run(&cfg, log); err != nil {
 		log.Error(err, "exited with error")
@@ -204,6 +210,12 @@ func runAsPolicy(cfg *config) (*server.RunAsPolicy, error) {
 	}
 	if cfg.runAsUIDRange == "" || cfg.runAsGIDRange == "" || cfg.runAsDefaultUser == "" {
 		return nil, errors.New("--run-as-uid-range, --run-as-gid-range and --run-as-default-user must be set together")
+	}
+	// The token is all that stops a command from calling the API as another
+	// user, and a mounted token file is often readable by every user in the
+	// sandbox. With --auth-token-sha256 the sandbox holds no token to read.
+	if cfg.authTokenFile != "" {
+		return nil, errors.New("--auth-token-file cannot be used with the run-as flags, because a command that can read the file can run commands as every allowed user; use --auth-token-sha256")
 	}
 	uids, err := server.ParseIDRange(cfg.runAsUIDRange)
 	if err != nil {

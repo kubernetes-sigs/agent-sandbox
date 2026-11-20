@@ -70,7 +70,9 @@ export type ProcessConfig = Message<"process.v1.ProcessConfig"> & {
   cwd?: string | undefined;
 
   /**
-   * Run the command as this user. Unset runs it as the runtime's own user.
+   * Run the command as this user. If unset, a runtime that allows named users
+   * runs the command as its deployment's default user (sandboxd's
+   * --run-as-default-user), and any other runtime runs it as its own user.
    * A runtime returns PERMISSION_DENIED unless its deployment allows the named
    * IDs. A runtime that predates this field ignores it and runs the command as
    * its own user, so set it only against a runtime known to support it.

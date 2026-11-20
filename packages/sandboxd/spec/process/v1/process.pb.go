@@ -201,7 +201,9 @@ type ProcessConfig struct {
 	Command []string          `protobuf:"bytes,1,rep,name=command,proto3" json:"command,omitempty"`
 	EnvVars map[string]string `protobuf:"bytes,2,rep,name=env_vars,json=envVars,proto3" json:"env_vars,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	Cwd     *string           `protobuf:"bytes,3,opt,name=cwd,proto3,oneof" json:"cwd,omitempty"`
-	// Run the command as this user. Unset runs it as the runtime's own user.
+	// Run the command as this user. If unset, a runtime that allows named users
+	// runs the command as its deployment's default user (sandboxd's
+	// --run-as-default-user), and any other runtime runs it as its own user.
 	// A runtime returns PERMISSION_DENIED unless its deployment allows the named
 	// IDs. A runtime that predates this field ignores it and runs the command as
 	// its own user, so set it only against a runtime known to support it.

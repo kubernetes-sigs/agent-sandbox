@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -500,6 +501,57 @@ func TestClient_GetSandbox_Reattach_WithoutClientWarmPoolName(t *testing.T) {
 	}
 }
 
+func TestClient_GetSandbox_CloseDeletesPinnedToClaimUID(t *testing.T) {
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
+	const claimName = "reattach-claim"
+
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace(), UID: testClaimUID(ga.GetName())},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: "reattach-sandbox"},
+			},
+		}, nil
+	})
+	agentsCS.PrependReactor("get", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, readySandbox("reattach-sandbox"), nil
+	})
+
+	opts := Options{
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		CleanupTimeout:      time.Second,
+		WaitForTermination:  true,
+		Quiet:               true,
+	}
+	opts.setDefaults()
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+	c, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := c.GetSandbox(context.Background(), claimName, "default")
+	if err != nil {
+		t.Fatalf("GetSandbox(): %v", err)
+	}
+
+	deletes := recordClaimDeletes(extensionsCS)
+	var gone atomic.Bool
+	gone.Store(true)
+	claimGoneAfter(extensionsCS, &gone)
+	if err := sb.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	requireForegroundDeletes(t, deletes())
+}
+
 func TestClient_GetSandbox_ReturnsCached(t *testing.T) {
 	c, _ := newTestClient(t)
 
@@ -909,7 +961,7 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 // claimNotReady returns a claim whose Ready condition is False for reason.
 func claimNotReady(name, reason string) *extv1beta1.SandboxClaim {
 	return &extv1beta1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: testClaimUID(name)},
 		Status: extv1beta1.SandboxClaimStatus{
 			Conditions: []metav1.Condition{{
 				Type:    string(sandboxv1beta1.SandboxConditionReady),

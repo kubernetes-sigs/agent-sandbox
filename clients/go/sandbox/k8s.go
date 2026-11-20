@@ -745,12 +745,12 @@ func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interfa
 	}
 }
 
-// verifyClaimExists checks that the SandboxClaim still exists.
-func (h *K8sHelper) verifyClaimExists(ctx context.Context, name, namespace string, tracer trace.Tracer, svcName string) error {
+// verifyClaimExists checks that the SandboxClaim still exists and returns it.
+func (h *K8sHelper) verifyClaimExists(ctx context.Context, name, namespace string, tracer trace.Tracer, svcName string) (*extv1beta1.SandboxClaim, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "verify_claim_exists")
 	defer span.End()
 
-	_, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		// Only NotFound means the claim is gone. Any other error, such as a
 		// refused connection or a 503, says nothing about the claim.
@@ -761,9 +761,9 @@ func (h *K8sHelper) verifyClaimExists(ctx context.Context, name, namespace strin
 			retErr = fmt.Errorf("get claim %s: %w", name, err)
 		}
 		recordError(span, retErr)
-		return retErr
+		return nil, retErr
 	}
-	return nil
+	return claim, nil
 }
 
 // verifySandboxAlive checks that the sandbox still exists and is ready,

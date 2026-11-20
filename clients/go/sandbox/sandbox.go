@@ -334,10 +334,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 		}
 	}
 	claimName := claim.Name
-	s.mu.Lock()
-	s.claimName = claimName
-	s.claimUID = claim.UID
-	s.mu.Unlock()
+	s.setClaim(claim)
 
 	// Resolve sandbox name (may differ from claim name with warm pool).
 	resolveStart := time.Now()
@@ -404,7 +401,7 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 	sandboxName := s.SandboxName()
 	s.log.Info("reconnecting transport", "claim", claimName, "sandbox", sandboxName)
 
-	if err := s.k8s.verifyClaimExists(reconnCtx, claimName, s.opts.Namespace, s.tracer, s.traceServiceName); err != nil {
+	if _, err := s.k8s.verifyClaimExists(reconnCtx, claimName, s.opts.Namespace, s.tracer, s.traceServiceName); err != nil {
 		s.mu.Lock()
 		if k8serrors.IsNotFound(err) {
 			s.claimName = ""
@@ -912,6 +909,13 @@ func (s *Sandbox) trackOp() func() {
 	wg.Add(1)
 	s.mu.Unlock()
 	return wg.Done
+}
+
+func (s *Sandbox) setClaim(claim *extv1beta1.SandboxClaim) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.claimName = claim.Name
+	s.claimUID = claim.UID
 }
 
 func (s *Sandbox) setState(state *sandboxState) {

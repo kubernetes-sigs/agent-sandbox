@@ -73,6 +73,9 @@ func validateAllOptions(o *Options) error {
 	return validateWarmPoolName(o.WarmPoolName)
 }
 
+// testClaimUID is the UID the fakes give the claim named name.
+func testClaimUID(name string) types.UID { return types.UID("uid-" + name) }
+
 func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
 	agentsCS := fakeagents.NewClientset()
 	extensionsCS := fakeextensions.NewClientset()
@@ -89,6 +92,7 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 		if claim.Name == "" && claim.GenerateName != "" {
 			claim.Name = claim.GenerateName + "test12345"
 		}
+		claim.UID = testClaimUID(claim.Name)
 		return false, nil, nil // fall through to default handler
 	})
 
@@ -96,7 +100,7 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ga := action.(ktesting.GetAction)
 		return true, &extv1beta1.SandboxClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace(), UID: testClaimUID(ga.GetName())},
 			Status: extv1beta1.SandboxClaimStatus{
 				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
 			},
@@ -965,8 +969,8 @@ func TestOpen_RollbackDeletesClaim(t *testing.T) {
 func TestOpen_TerminalClaimFailsFastAndRollsBack(t *testing.T) {
 	opts := defaultTestOpts()
 	c, _, extensionsCS := newTestSandbox(opts)
-	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
-		return true, claimNotReady("test-claim", "WarmPoolNotFound"), nil
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(a ktesting.Action) (bool, runtime.Object, error) {
+		return true, claimNotReady(a.(ktesting.GetAction).GetName(), "WarmPoolNotFound"), nil
 	})
 
 	err := c.Open(context.Background())
@@ -3543,6 +3547,76 @@ func claimGoneAfter(extensionsCS *fakeextensions.Clientset, gone *atomic.Bool) {
 	})
 }
 
+type claimDelete struct {
+	name string
+	opts metav1.DeleteOptions
+}
+
+// recordClaimDeletes records every SandboxClaim delete the fake receives and
+// returns a func that reads them.
+func recordClaimDeletes(extensionsCS *fakeextensions.Clientset) func() []claimDelete {
+	var mu sync.Mutex
+	var deletes []claimDelete
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		da := action.(ktesting.DeleteActionImpl)
+		mu.Lock()
+		deletes = append(deletes, claimDelete{da.GetName(), da.DeleteOptions})
+		mu.Unlock()
+		return false, nil, nil
+	})
+	return func() []claimDelete {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]claimDelete(nil), deletes...)
+	}
+}
+
+// requireForegroundDeletes fails unless there was a delete and every delete
+// used foreground propagation pinned to the UID the fakes give that claim.
+func requireForegroundDeletes(t *testing.T, deletes []claimDelete) {
+	t.Helper()
+	if len(deletes) == 0 {
+		t.Fatal("expected the claim delete to be sent")
+	}
+	for _, d := range deletes {
+		if p := d.opts.PropagationPolicy; p == nil || *p != metav1.DeletePropagationForeground {
+			t.Errorf("delete of %s: propagation = %v, want Foreground", d.name, p)
+		}
+		if pre := d.opts.Preconditions; pre == nil || pre.UID == nil || *pre.UID != testClaimUID(d.name) {
+			t.Errorf("delete of %s: preconditions = %v, want UID %s", d.name, pre, testClaimUID(d.name))
+		}
+	}
+}
+
+func TestClose_WaitForTermination_DeletesInForeground(t *testing.T) {
+	c, agentsCS, extensionsCS := newWaitingSandbox()
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("sb"))
+	deletes := recordClaimDeletes(extensionsCS)
+	if err := c.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	var gone atomic.Bool
+	gone.Store(true)
+	claimGoneAfter(extensionsCS, &gone)
+
+	if err := c.Close(context.Background()); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	requireForegroundDeletes(t, deletes())
+}
+
+func TestOpen_WaitForTermination_RollbackDeletesInForeground(t *testing.T) {
+	c, agentsCS, extensionsCS := newWaitingSandbox()
+	c.opts.SandboxReadyTimeout = 200 * time.Millisecond
+	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(watch.NewFake(), nil))
+	deletes := recordClaimDeletes(extensionsCS)
+
+	if err := c.Open(context.Background()); err == nil {
+		t.Fatal("expected timeout error from Open")
+	}
+	requireForegroundDeletes(t, deletes())
+}
+
 func TestClose_WaitForTermination_RetryKeepsWaiting(t *testing.T) {
 	c, agentsCS, extensionsCS := newWaitingSandbox()
 	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("sb"))
@@ -3597,6 +3671,7 @@ func TestClose_WaitForTermination_DuringOpen(t *testing.T) {
 	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(watch.NewFake(), nil))
 	var gone atomic.Bool
 	claimGoneAfter(extensionsCS, &gone)
+	deletes := recordClaimDeletes(extensionsCS)
 	openErr := make(chan error, 1)
 	go func() { openErr <- c.Open(context.Background()) }()
 
@@ -3619,6 +3694,7 @@ func TestClose_WaitForTermination_DuringOpen(t *testing.T) {
 	if err := <-openErr; err == nil {
 		t.Error("expected the interrupted Open to fail")
 	}
+	requireForegroundDeletes(t, deletes())
 }
 
 func TestTrackOp_WhenDraining(t *testing.T) {

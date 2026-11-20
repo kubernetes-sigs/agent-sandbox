@@ -31,7 +31,10 @@ Postsubmit and periodic jobs that write no junit (the image push job, the
 kops benchmark periodics) have no per-test rows, so their health only shows
 in the job-level Overall cell. When every recent run of such a job failed,
 the report lists the job as consistently failing and, with --update-issues,
-files a `kind/failing-test` issue that names the first failing commit. When
+files a `kind/failing-test` issue that names the first failing commit. A
+presubmit tab whose pre-test gates fail on at least three distinct PRs with no
+passing run in between is listed the same way, because that is a broken main or
+dependency, not one PR's own breakage. When
 such a job fails intermittently, the report lists it as flaky and files a
 `kind/flake` issue, because a flaky publish job can skip images a release
 promotes. The report skips junit-less presubmit tabs (lint, autogen): a red
@@ -75,6 +78,10 @@ RECENT_RUNS = 3
 # Inside a breakage window failures outnumber passes at least this many to
 # one. The few passes are PRs that carry the fix while main is still broken.
 BREAKAGE_FAIL_RATIO = 3
+
+# Pre-test failures on this many distinct PRs, with no run passing between
+# them, point at a broken main or dependency, not at one PR's own gate.
+PRETEST_OUTAGE_PRS = 3
 
 # Rows like "<job>.Overall" and "<job>.Pod" describe the prow job itself, not
 # an individual test.
@@ -428,6 +435,28 @@ def is_recovered_breakage(fail_cols, pass_cols, recent):
     passes_inside = sum(1 for i in pass_cols if first < i < last)
     dense = len(fail_cols) >= BREAKAGE_FAIL_RATIO * passes_inside
     return dense and bool(recent) and recent[0] in PASS_STATUSES
+
+
+def find_pretest_outage(cols, passed, col_class, pr_of):
+    """Returns (cols, prs, cleared) for the newest pre-test outage, or None.
+
+    cols are run columns, newest first, and passed(i) says whether run i
+    passed. An outage is a stretch of pre-test failures with no passing run
+    between them that spans at least PRETEST_OUTAGE_PRS distinct PRs. It has
+    cleared when a newer run passed.
+    """
+    group, cleared = [], False
+    for i in [*cols, None]:
+        if i is not None and not passed(i):
+            if col_class.get(i) == "pretest_failure":
+                group.append(i)
+            continue
+        prs = {pr_of(c) for c in group} - {None}
+        if len(prs) >= PRETEST_OUTAGE_PRS:
+            return group, prs, cleared
+        group = []
+        cleared = cleared or i is not None
+    return None
 
 
 def is_presubmit_tab(gcs_query, tab):
@@ -817,6 +846,30 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
             "job_history": job_history,
         }
 
+    # Pre-test failures on one PR are that PR's own breakage. The same
+    # failure on several PRs with no pass in between is a broken main or
+    # dependency, so it is reported like a broken job.
+    outage = find_pretest_outage(
+        range(ncols), lambda i: cell(overall, i) in PASS_STATUSES,
+        col_class, pr_of) if col_class else None
+    if outage:
+        group, prs, cleared = outage
+        first, last = group[-1], group[0]
+        finding = {
+            "job": "recovered" if cleared else "breakage",
+            "tab": tab,
+            "test": f"{tab}.Overall",
+            "short": tab,
+            "fails": len(group),
+            "pretest_prs": len(prs),
+            "distinct_changelists": len(prs),
+            "first_failure_ts": timestamps[first] if first < len(timestamps) else 0,
+            "first_failing_commit": "",
+            "last_failure_ts": timestamps[last] if last < len(timestamps) else 0,
+            "job_history": job_history,
+        }
+        (recovered if cleared else consistent).append(finding)
+
     # A junit-less postsubmit or periodic job has no test rows for the
     # per-test rules above to see, so the Overall row decides whether it is
     # broken or flaky. Presubmit tabs stay out: a red lint or autogen run is
@@ -868,7 +921,13 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
     lines += ["", "## Consistently failing (not flakes — investigate as breakage)"]
     if consistent:
         for f in consistent:
-            if f.get("job"):
+            if f.get("pretest_prs"):
+                lines.append(
+                    f"- `{f['tab']}` (job): {f['fails']} pre-test failure(s) "
+                    f"across {f['pretest_prs']} PRs since "
+                    f"{fmt_ts(f['first_failure_ts'])}, no run passed in "
+                    f"between — see {f['job_history']}")
+            elif f.get("job"):
                 lines.append(
                     f"- `{f['tab']}` (job): every run since "
                     f"{fmt_ts(f['first_failure_ts'])} failed ({f['fails']} run(s), "
@@ -1069,10 +1128,25 @@ or triage manually per [docs/testing.md](https://github.com/kubernetes-sigs/agen
 
 
 def issue_body_for_job(b, marker, repo):
-    """Issue text for a junit-less job whose recent runs all failed."""
-    sha = b["first_failing_commit"]
-    commit = (f"[`{sha[:12]}`](https://github.com/{repo}/commit/{sha})"
-              if sha else "unknown")
+    """Issue text for a job that is broken on every recent run, or whose
+    pre-test gates failed on several unrelated PRs in a row."""
+    if b.get("pretest_prs"):
+        first = f"{fmt_ts(b['first_failure_ts'])} ({b['pretest_prs']} distinct PRs)"
+        why = f"""Pre-test failures (compile, vet, mypy, or collection) hit {b['pretest_prs']}
+unrelated PRs with no passing run in between, so `main` or a dependency is
+broken, not one PR. Read a failed run's build log in the job history for the
+cause."""
+    else:
+        sha = b["first_failing_commit"]
+        commit = (f"[`{sha[:12]}`](https://github.com/{repo}/commit/{sha})"
+                  if sha else "unknown")
+        first = f"{fmt_ts(b['first_failure_ts'])} at commit {commit}"
+        why = """This job writes no per-test results, so every recent run failing means the
+job itself is broken, not one test. For a build or publish job that means
+`main` is broken for what it produces; start from the first failing commit.
+For the kops benchmark periodics it can also be cluster bring-up or GCP
+quota, so read the newest failed run's build log in the job history before
+bisecting."""
     return f"""{marker}
 **Job failing on every recent run, detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
 
@@ -1080,16 +1154,11 @@ def issue_body_for_job(b, marker, repo):
 |---|---|
 | Job | `{b['tab']}` |
 | Consecutive failing runs | {b['fails']} |
-| First failing run | {fmt_ts(b['first_failure_ts'])} at commit {commit} |
+| First failing run | {first} |
 | Last failure | {fmt_ts(b['last_failure_ts'])} |
 | Job history | {b['job_history']} |
 
-This job writes no per-test results, so every recent run failing means the
-job itself is broken, not one test. For a build or publish job that means
-`main` is broken for what it produces; start from the first failing commit.
-For the kops benchmark periodics it can also be cluster bring-up or GCP
-quota, so read the newest failed run's build log in the job history before
-bisecting.
+{why}
 
 Close this issue once the job is green again. The report does not close it.
 

@@ -965,6 +965,73 @@ class FalsePositiveFilterTest(unittest.TestCase):
         self.assertEqual(recovered, [])
 
 
+class PretestOutageTest(unittest.TestCase):
+    """Pre-test failures on several unrelated PRs are a broken main."""
+
+    QUERY = "kubernetes-ci-logs/pr-logs/directory/job"
+
+    def analyze(self, statuses, prs):
+        ids = [f"b{i}" for i in range(len(statuses))]
+        table = {
+            "query": self.QUERY,
+            "changelists": ids,
+            "column_ids": ids,
+            "timestamps": [100 * (len(ids) - i) for i in range(len(ids))],
+            "tests": [
+                {"name": "job.Overall", "statuses": rle(statuses)},
+                {"name": "pkg.TestA", "statuses": rle([1] * len(ids))},
+            ],
+        }
+
+        def fake_fetcher(gcs_query, build_id):
+            def fetch(name):
+                return {"finished.json": {"result": "FAILURE"}}.get(name)
+            fetch.resolved_dir = lambda: (
+                f"gs://b/pr-logs/pull/o_r/{prs[ids.index(build_id)]}/job/{build_id}/")
+            return fetch
+
+        with mock.patch.object(flake_report, "fetch_json", return_value=table), \
+             mock.patch.object(flake_report, "make_artifact_fetcher", fake_fetcher):
+            return flake_report.analyze_tab("dash", "job", len(ids))
+
+    def test_three_prs_without_a_pass_are_consistently_failing(self):
+        _, consistent, _, _, recovered = self.analyze(
+            [12, 12, 12, 12, 1], [5, 6, 7, 5, 8])
+        (finding,) = consistent
+        self.assertEqual(finding["fails"], 4)
+        self.assertEqual(finding["pretest_prs"], 3)
+        self.assertEqual(finding["last_failure_ts"], 500)
+        self.assertEqual(finding["first_failure_ts"], 200)
+        self.assertEqual(recovered, [])
+
+    def test_two_prs_stay_author_actionable(self):
+        _, consistent, _, _, recovered = self.analyze(
+            [12, 12, 12, 1], [5, 6, 5, 8])
+        self.assertEqual(consistent, [])
+        self.assertEqual(recovered, [])
+
+    def test_a_pass_between_failures_splits_the_outage(self):
+        _, consistent, _, _, recovered = self.analyze(
+            [12, 12, 1, 12, 12, 1], [5, 6, 7, 8, 9, 10])
+        self.assertEqual(consistent, [])
+        self.assertEqual(recovered, [])
+
+    def test_cleared_outage_is_recovered(self):
+        _, consistent, _, _, recovered = self.analyze(
+            [1, 12, 12, 12, 1], [5, 6, 7, 8, 9])
+        self.assertEqual(consistent, [])
+        (finding,) = recovered
+        self.assertEqual(finding["distinct_changelists"], 3)
+
+    def test_outage_issue_names_the_prs_not_a_commit(self):
+        _, (finding,), _, _, _ = self.analyze([12, 12, 12, 1], [5, 6, 7, 8])
+        body = flake_report.issue_body_for_job(finding, "<!-- m -->", "o/r")
+        self.assertIn("3 distinct PRs", body)
+        self.assertNotIn("writes no per-test results", body)
+        report = flake_report.render_report("dash", [], [finding], [], 4)
+        self.assertIn("across 3 PRs", report)
+
+
 class JobBreakageTest(unittest.TestCase):
     """Junit-less postsubmit and periodic tabs: a job whose newest completed
     runs all failed is reported on its Overall row alone."""

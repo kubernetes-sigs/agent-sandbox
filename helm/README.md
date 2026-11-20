@@ -84,6 +84,9 @@ The following table lists the configurable parameters and their defaults. For fl
 | `namespace.name` | Namespace to deploy into | `agent-sandbox-system` |
 | `controller.leaderElect` | Enable leader election | `true` |
 | `controller.leaderElectionNamespace` | Namespace for the leader election resource (auto-detected if empty) | `""` |
+| `controller.leaderElectLeaseDuration` | How long other candidates wait after the last Lease renewal before taking over leadership | unset (controller default `15s`) |
+| `controller.leaderElectRenewDeadline` | How long the leader retries a Lease renewal before it gives up leadership and exits | unset (controller default `10s`) |
+| `controller.leaderElectRetryPeriod` | How long leader-election clients wait between attempts to acquire or renew the Lease | unset (controller default `2s`) |
 | `controller.clusterDomain` | Kubernetes cluster domain for service FQDN generation | `"cluster.local"` |
 | `controller.kubeApiQps` | Client-side QPS limit for the Kubernetes API client (`-1` = unlimited) | `-1.0` |
 | `controller.kubeApiBurst` | Burst limit for the Kubernetes API client | `10` |

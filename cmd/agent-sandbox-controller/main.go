@@ -59,6 +59,7 @@ func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var leaderElectionNamespace string
+	var leaderElection leaderElectionTiming
 	var probeAddr string
 	var extensions bool
 	var clusterDomain string
@@ -102,6 +103,12 @@ func main() {
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "", "The namespace in which the leader election resource will be created.")
+	flag.DurationVar(&leaderElection.LeaseDuration, "leader-elect-lease-duration", defaultLeaderElectionLeaseDuration,
+		"How long non-leader candidates wait after the last observed Lease renewal before they try to take over leadership.")
+	flag.DurationVar(&leaderElection.RenewDeadline, "leader-elect-renew-deadline", defaultLeaderElectionRenewDeadline,
+		"How long the leader keeps retrying a Lease renewal before it gives up leadership and exits. Must be less than --leader-elect-lease-duration.")
+	flag.DurationVar(&leaderElection.RetryPeriod, "leader-elect-retry-period", defaultLeaderElectionRetryPeriod,
+		"How long leader-election clients wait between attempts to acquire or renew the Lease.")
 	flag.BoolVar(&extensions, "extensions", false, "Enable extensions controllers.")
 	flag.BoolVar(&enableTracing, "enable-tracing", false, "Enable OpenTelemetry tracing via OTLP.")
 	flag.BoolVar(&enablePprof, "enable-pprof", false,
@@ -297,6 +304,11 @@ func main() {
 		)
 	}
 
+	if err := leaderElection.validate(); err != nil {
+		setupLog.Error(err, "invalid leader-election timing")
+		os.Exit(1)
+	}
+
 	if enableLeaderElection && leaderElectionNamespace == "" {
 		setupLog.V(1).Info("leader election is enabled (--leader-elect=true), but --leader-election-namespace is empty; attempting auto-detection")
 	}
@@ -453,7 +465,7 @@ func main() {
 			"connections", apiConnections)
 	}
 
-	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace)
+	mgrOpts := buildManagerOptions(scheme, metricsOpts, probeAddr, enableLeaderElection, leaderElectionNamespace, leaderElection)
 	// managedFields stripping, the Pod spec diet, and (optionally) the
 	// tracking-label scoping; see buildCacheOptions for the rationale.
 	cacheOpts, err := buildCacheOptions(cacheLabelSelectors)

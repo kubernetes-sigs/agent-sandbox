@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
@@ -38,6 +39,7 @@ type ProcessHandle struct {
 	prefix string
 	span   trace.Span
 
+	writeMu   sync.Mutex // serializes stdin writes so chunks never interleave
 	mu        sync.Mutex
 	receiving bool
 	exitSeen  bool
@@ -66,23 +68,72 @@ func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) er
 	default:
 		return fmt.Errorf("%s: send signal: %w", h.prefix, status.Errorf(codes.InvalidArgument, "unsupported signal %q", signal))
 	}
+	if err := h.checkLive(); err != nil {
+		return fmt.Errorf("%s: send signal: %w", h.prefix, err)
+	}
+	if _, err := h.client.SendSignal(ctx, &processv1.SendSignalRequest{ProcessId: h.pid, Signal: wireSignal}); err != nil {
+		return fmt.Errorf("%s: send signal: %w", h.prefix, err)
+	}
+	return nil
+}
+
+// stdinChunkBytes caps one WriteStdin request.
+const stdinChunkBytes = 1 << 20
+
+// WriteStdin sends data to the process's standard input in chunks of at most
+// 1 MiB. Calls on one handle are serialized. It is not retried: if it fails
+// partway, an unknown prefix of data has already been delivered. The context
+// controls only these RPCs and does not cancel Start.
+func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	if err := h.checkLive(); err != nil {
+		return fmt.Errorf("%s: write stdin: %w", h.prefix, err)
+	}
+	for len(data) > 0 {
+		n := min(len(data), stdinChunkBytes)
+		req := &processv1.WriteStdinRequest{
+			ProcessId: h.pid,
+			Payload:   &processv1.WriteStdinRequest_Input{Input: data[:n]},
+		}
+		if _, err := h.client.WriteStdin(ctx, req); err != nil {
+			return fmt.Errorf("%s: write stdin: %w", h.prefix, err)
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+// CloseStdin sends EOF on the process's standard input. The daemon rejects it
+// with FailedPrecondition for a PTY process.
+func (h *ProcessHandle) CloseStdin(ctx context.Context) error {
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	if err := h.checkLive(); err != nil {
+		return fmt.Errorf("%s: close stdin: %w", h.prefix, err)
+	}
+	req := &processv1.WriteStdinRequest{
+		ProcessId: h.pid,
+		Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+	}
+	if _, err := h.client.WriteStdin(ctx, req); err != nil {
+		return fmt.Errorf("%s: close stdin: %w", h.prefix, err)
+	}
+	return nil
+}
+
+// checkLive returns an error when the process can no longer take a request:
+// the stream failed, the process exited, or the handle's context is done.
+func (h *ProcessHandle) checkLive() error {
 	h.mu.Lock()
-	var err error
+	defer h.mu.Unlock()
 	switch {
 	case h.terminal != nil && h.terminal != io.EOF:
-		err = h.terminal
+		return h.terminal
 	case h.exitSeen:
-		err = status.Error(codes.NotFound, "process already exited")
+		return status.Error(codes.NotFound, "process already exited")
 	case h.ctx.Err() != nil:
-		err = status.FromContextError(h.ctx.Err()).Err()
-	}
-	h.mu.Unlock()
-	if err != nil {
-		return fmt.Errorf("%s: send signal: %w", h.prefix, err)
-	}
-	_, err = h.client.SendSignal(ctx, &processv1.SendSignalRequest{ProcessId: h.pid, Signal: wireSignal})
-	if err != nil {
-		return fmt.Errorf("%s: send signal: %w", h.prefix, err)
+		return status.FromContextError(h.ctx.Err()).Err()
 	}
 	return nil
 }

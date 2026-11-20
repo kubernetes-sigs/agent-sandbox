@@ -15,6 +15,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sync/atomic"
@@ -38,6 +39,7 @@ type streamingProcessService struct {
 	processv1.UnimplementedProcessServiceServer
 	start  func(*processv1.StartRequest, processv1.ProcessService_StartServer) error
 	signal func(context.Context, *processv1.SendSignalRequest) (*processv1.SendSignalResponse, error)
+	stdin  func(context.Context, *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error)
 }
 
 func (s *streamingProcessService) Start(req *processv1.StartRequest, stream processv1.ProcessService_StartServer) error {
@@ -46,6 +48,10 @@ func (s *streamingProcessService) Start(req *processv1.StartRequest, stream proc
 
 func (s *streamingProcessService) SendSignal(ctx context.Context, req *processv1.SendSignalRequest) (*processv1.SendSignalResponse, error) {
 	return s.signal(ctx, req)
+}
+
+func (s *streamingProcessService) WriteStdin(ctx context.Context, req *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+	return s.stdin(ctx, req)
 }
 
 func processTestContext(t *testing.T) context.Context {
@@ -539,6 +545,86 @@ func TestProcessHandle_SignalAfterExitOrCloseDoesNotSend(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.Equal(t, want, status.Code(handle.SendSignal(ctx, SignalSIGKILL)))
+			require.Zero(t, calls.Load())
+		})
+	}
+}
+
+func TestProcessHandle_WriteStdinChunksAndCloseStdin(t *testing.T) {
+	requests := make(chan *processv1.WriteStdinRequest, 8)
+	svc := blockingProcessService()
+	svc.stdin = func(_ context.Context, req *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+		requests <- req
+		return &processv1.WriteStdinResponse{}, nil
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "example")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+
+	data := bytes.Repeat([]byte("x"), 2*stdinChunkBytes+5)
+	require.NoError(t, handle.WriteStdin(ctx, data))
+	require.NoError(t, handle.WriteStdin(ctx, nil))
+	for _, want := range []int{stdinChunkBytes, stdinChunkBytes, 5} {
+		req := <-requests
+		require.Equal(t, int32(42), req.GetProcessId())
+		require.Len(t, req.GetInput(), want)
+	}
+	require.NoError(t, handle.CloseStdin(ctx))
+	req := <-requests
+	require.NotNil(t, req.GetEof())
+	require.Empty(t, requests, "an empty write must not send a request")
+}
+
+func TestProcessHandle_WriteStdinFailureKeepsStreamOpen(t *testing.T) {
+	var calls atomic.Int32
+	svc := blockingProcessService()
+	svc.stdin = func(_ context.Context, _ *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+		calls.Add(1)
+		return nil, status.Error(codes.FailedPrecondition, "stdin closed")
+	}
+	svc.signal = func(_ context.Context, _ *processv1.SendSignalRequest) (*processv1.SendSignalResponse, error) {
+		return &processv1.SendSignalResponse{}, nil
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "example")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+	require.Equal(t, codes.FailedPrecondition, status.Code(handle.WriteStdin(ctx, []byte("a"))))
+	require.Equal(t, codes.FailedPrecondition, status.Code(handle.CloseStdin(ctx)))
+	require.Equal(t, int32(2), calls.Load())
+	require.NoError(t, handle.SendSignal(ctx, SignalSIGTERM), "a failed write must not end the session")
+}
+
+func TestProcessHandle_StdinAfterExitOrCloseDoesNotSend(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "exit", true: "close"}[closed], func(t *testing.T) {
+			var calls atomic.Int32
+			svc := blockingProcessService()
+			if !closed {
+				svc = scriptedProcessService([]*processv1.StartResponse{processInit(), processExit(0)}, nil)
+			}
+			svc.stdin = func(_ context.Context, _ *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+				calls.Add(1)
+				return &processv1.WriteStdinResponse{}, nil
+			}
+			sb := newStreamingSandbox(t, svc)
+			ctx := processTestContext(t)
+			handle, err := sb.Commands().Start(ctx, "example")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, handle.Close()) })
+			want := codes.NotFound
+			if closed {
+				require.NoError(t, handle.Close())
+				want = codes.Canceled
+			} else {
+				_, err = handle.Recv()
+				require.NoError(t, err)
+			}
+			require.Equal(t, want, status.Code(handle.WriteStdin(ctx, []byte("a"))))
+			require.Equal(t, want, status.Code(handle.CloseStdin(ctx)))
 			require.Zero(t, calls.Load())
 		})
 	}

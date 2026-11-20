@@ -83,9 +83,11 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type ProcessEventType](<#ProcessEventType>)
 - [type ProcessHandle](<#ProcessHandle>)
   - [func \(h \*ProcessHandle\) Close\(\) error](<#ProcessHandle.Close>)
+  - [func \(h \*ProcessHandle\) CloseStdin\(ctx context.Context\) error](<#ProcessHandle.CloseStdin>)
   - [func \(h \*ProcessHandle\) ProcessID\(\) int32](<#ProcessHandle.ProcessID>)
   - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
   - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
+  - [func \(h \*ProcessHandle\) WriteStdin\(ctx context.Context, data \[\]byte\) error](<#ProcessHandle.WriteStdin>)
 - [type ProcessSignal](<#ProcessSignal>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
@@ -1285,6 +1287,15 @@ func (h *ProcessHandle) Close() error
 
 Close cancels only this session and is idempotent. A nil error acknowledges local cleanup, not synchronous remote process termination. For graceful shutdown, send a signal before cancelling the stream instead.
 
+<a name="ProcessHandle.CloseStdin"></a>
+#### func \(\*ProcessHandle\) [CloseStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) CloseStdin(ctx context.Context) error
+```
+
+CloseStdin sends EOF on the process's standard input. The daemon rejects it with FailedPrecondition for a PTY process.
+
 <a name="ProcessHandle.ProcessID"></a>
 #### func \(\*ProcessHandle\) [ProcessID](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
 
@@ -1311,6 +1322,15 @@ func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) er
 ```
 
 SendSignal sends SIGINT, SIGTERM or SIGKILL to this process group using its original connection. Success means the signal was sent, not that the process exited. Its context controls only this RPC; failure does not cancel Start. Keep receiving events to observe the exit and the final RPC status.
+
+<a name="ProcessHandle.WriteStdin"></a>
+#### func \(\*ProcessHandle\) [WriteStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error
+```
+
+WriteStdin sends data to the process's standard input in chunks of at most 1 MiB. Calls on one handle are serialized. It is not retried: if it fails partway, an unknown prefix of data has already been delivered. The context controls only these RPCs and does not cancel Start.
 
 <a name="ProcessSignal"></a>
 ### type [ProcessSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)

@@ -90,6 +90,15 @@ const (
 	// graceRequeueSlack pads the self-scheduled post-grace requeue so the
 	// re-evaluation lands strictly after the deadline despite clock jitter.
 	graceRequeueSlack = 2 * time.Second
+
+	// finishedBackoffBase and finishedBackoffMax bound the exponential
+	// backoff between replacement creates when pool members exit, so a
+	// SandboxTemplate whose Pod keeps exiting is replaced at a bounded rate.
+	finishedBackoffBase = 5 * time.Second
+	finishedBackoffMax  = 5 * time.Minute
+	// finishedBackoffResetAfter is how long a pool must go without deleting a
+	// finished member before the controller clears its finished-member backoff.
+	finishedBackoffResetAfter = 2 * finishedBackoffMax
 )
 
 // graceRequeueJitterFactor spreads the self-scheduled post-grace requeues of
@@ -119,7 +128,8 @@ type SandboxWarmPoolReconciler struct {
 	// ReadinessGracePeriod is how long a pool sandbox may stay non-Ready,
 	// counted from when its Pod is scheduled (or from creation if it has not
 	// been), before it is considered stuck (delete-and-replace, or held if its
-	// pod is unschedulable or scheduling-gated). Zero means
+	// pod is unschedulable or scheduling-gated). Finished members (whose Pod
+	// has exited) are replaced without waiting for the grace period. Zero means
 	// DefaultWarmPoolReadinessGracePeriod.
 	ReadinessGracePeriod time.Duration
 	// UnschedulableRecheckInterval is the requeue interval while a pool holds
@@ -199,8 +209,8 @@ type SandboxWarmPoolReconciler struct {
 	// RTT and the scheduler, not batch width).
 	MaxRefillRate float64
 
-	// replenishMu guards replenishState and refillState. Distinct pools may
-	// reconcile concurrently when MaxConcurrentReconciles > 1.
+	// replenishMu guards replenishState, refillState, and finishedBackoff.
+	// Distinct pools may reconcile concurrently when MaxConcurrentReconciles > 1.
 	replenishMu sync.Mutex
 	// replenishState tracks, per pool, the last observed member count and any
 	// active replenish hold. Only used when ReplenishDelay > 0.
@@ -208,6 +218,21 @@ type SandboxWarmPoolReconciler struct {
 	// refillState tracks, per pool, the token bucket that paces replacement
 	// creates. Only used when MaxRefillRate > 0.
 	refillState map[types.NamespacedName]*refillBucket
+	// finishedBackoff tracks per-pool exponential backoff after the
+	// controller deletes finished members.
+	finishedBackoff map[types.NamespacedName]*finishedBackoffState
+}
+
+// finishedBackoffState holds the per-pool backoff state behind
+// observeFinishedBackoff.
+type finishedBackoffState struct {
+	failures    int
+	lastFailure time.Time
+	holds       []time.Time
+	// nextBump is when the current delay ends. Finished members deleted
+	// before it share that delay, so members that exit out of phase still
+	// grow the backoff once per delay.
+	nextBump time.Time
 }
 
 // refillBucket is the per-pool token bucket behind MaxRefillRate. Tokens
@@ -294,13 +319,96 @@ func (r *SandboxWarmPoolReconciler) noteReplenishCreates(key types.NamespacedNam
 	}
 }
 
-// forgetReplenishState drops the per-pool replenish and refill bookkeeping
-// for a deleted pool.
+// forgetReplenishState drops the per-pool replenish, refill, and finished
+// backoff bookkeeping for a deleted pool.
 func (r *SandboxWarmPoolReconciler) forgetReplenishState(key types.NamespacedName) {
 	r.replenishMu.Lock()
 	defer r.replenishMu.Unlock()
 	delete(r.replenishState, key)
 	delete(r.refillState, key)
+	delete(r.finishedBackoff, key)
+}
+
+// observeFinishedBackoff updates the pool's finished-member backoff state and
+// returns how many replacement slots to hold back, the time until the next
+// held slot releases, and (when backoff starts or grows) the new delay and
+// failure count.
+func (r *SandboxWarmPoolReconciler) observeFinishedBackoff(key types.NamespacedName, deletedFinished, currentReplicas, desiredReplicas int32, now time.Time) (int32, time.Duration, time.Duration, int) {
+	r.replenishMu.Lock()
+	defer r.replenishMu.Unlock()
+
+	if desiredReplicas <= 0 {
+		delete(r.finishedBackoff, key)
+		return 0, 0, 0, 0
+	}
+
+	maxHolds := max(0, int(desiredReplicas-currentReplicas))
+	st, ok := r.finishedBackoff[key]
+	if !ok && (deletedFinished <= 0 || maxHolds == 0) {
+		return 0, 0, 0, 0
+	}
+	if !ok {
+		if r.finishedBackoff == nil {
+			r.finishedBackoff = make(map[types.NamespacedName]*finishedBackoffState)
+		}
+		st = &finishedBackoffState{}
+		r.finishedBackoff[key] = st
+	}
+
+	st.holds = slices.DeleteFunc(st.holds, func(releaseAt time.Time) bool {
+		return !releaseAt.After(now)
+	})
+
+	if !st.lastFailure.IsZero() && now.Sub(st.lastFailure) >= finishedBackoffResetAfter {
+		if deletedFinished <= 0 && len(st.holds) == 0 {
+			delete(r.finishedBackoff, key)
+			return 0, 0, 0, 0
+		}
+		st.failures = 0
+	}
+
+	var bumpedDelay time.Duration
+	var bumpedFailures int
+	if deletedFinished > 0 && maxHolds > 0 {
+		if !now.Before(st.nextBump) {
+			st.failures++
+			bumpedDelay = finishedDelayForFailures(st.failures)
+			bumpedFailures = st.failures
+			st.nextBump = now.Add(bumpedDelay)
+		}
+		delay := finishedDelayForFailures(st.failures)
+		st.lastFailure = now
+		releaseAt := now.Add(delay)
+		for range deletedFinished {
+			st.holds = append(st.holds, releaseAt)
+		}
+	}
+
+	if len(st.holds) > maxHolds {
+		st.holds = slices.Delete(st.holds, 0, len(st.holds)-maxHolds)
+	}
+	if st.failures == 0 && len(st.holds) == 0 {
+		delete(r.finishedBackoff, key)
+		return 0, 0, 0, 0
+	}
+	if len(st.holds) == 0 {
+		return 0, 0, bumpedDelay, bumpedFailures
+	}
+
+	// Members deleted in this pass already count toward inactiveReplicas.
+	held := max(int32(0), int32(len(st.holds))-deletedFinished)
+	return held, st.holds[0].Sub(now), bumpedDelay, bumpedFailures
+}
+
+func finishedDelayForFailures(failures int) time.Duration {
+	delay := finishedBackoffBase
+	for i := 1; i < failures; i++ {
+		if delay >= finishedBackoffMax/2 {
+			return finishedBackoffMax
+		}
+		delay *= 2
+	}
+	return min(delay, finishedBackoffMax)
 }
 
 // takeRefillTokens grants up to want replacement creates from the pool's
@@ -533,6 +641,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	var healthySandboxes []sandboxv1beta1.Sandbox
 	unschedulableReplicas := int32(0)
 	gatedReplicas := int32(0)
+	deletedFinished := int32(0)
 	// nextGraceDeadline is the time remaining until the earliest readiness
 	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
 	var nextGraceDeadline time.Duration
@@ -540,7 +649,8 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(readinessGraceStart(&sb))
-			if age <= graceWindow {
+			finished := isSandboxFinished(&sb)
+			if !finished && age <= graceWindow {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -587,6 +697,9 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// create path cannot overshoot spec.replicas.
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
+			}
+			if finished {
+				deletedFinished++
 			}
 			// Successfully deleted: it now occupies capacity as terminating
 			// until the deletion is observed; the replacement is created on a
@@ -640,6 +753,17 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// should yield to a recent member drop (claim adoption burst). No-op when
 	// ReplenishDelay is zero.
 	replenishHold := r.observeMembersForReplenish(poolKey, currentReplicas, desiredReplicas, now)
+	heldFinished, finishedWait, bumpedDelay, finishedFailures := r.observeFinishedBackoff(poolKey, deletedFinished, currentReplicas, desiredReplicas, now)
+	if bumpedDelay > 0 {
+		logger.Info("Backing off replacement of finished warm pool sandboxes",
+			"poolName", warmPool.Name,
+			"failures", finishedFailures,
+			"delay", bumpedDelay)
+	}
+	if finishedWait > 0 && tmplErr == nil {
+		requeueAfter = minNonZeroDuration(requeueAfter, finishedWait)
+	}
+	createTarget := desiredReplicas - heldFinished
 
 	// Create new sandboxes if we need more.
 	// Hard invariant: never create while the existing population (active,
@@ -651,7 +775,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// as terminating members must keep the hold's wake-up armed, so that once
 	// the deletions are observed the remaining hold window (not a watch-event
 	// race) decides when refill starts.
-	if replenishHold > 0 && currentReplicas < desiredReplicas && tmplErr == nil {
+	if replenishHold > 0 && currentReplicas < createTarget && tmplErr == nil {
 		// Members recently dropped out of the pool (e.g. adopted by a burst
 		// of claims). Defer replacement creation so the burst gets the API
 		// server budget first; status above still reflects actual counts.
@@ -663,11 +787,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		// adoption during a claim burst) — routine pacing, not a
 		// lifecycle event.
 		logger.V(4).Info("Deferring pool replenishment after recent member drop",
-			"deficit", desiredReplicas-currentReplicas,
+			"deficit", createTarget-currentReplicas,
 			"requeueAfter", replenishHold)
 		requeueAfter = minNonZeroDuration(requeueAfter, replenishHold)
-	} else if totalReplicas < desiredReplicas && tmplErr == nil {
-		deficit := min(desiredReplicas-totalReplicas, maxBatchSize)
+	} else if totalReplicas < createTarget && tmplErr == nil {
+		deficit := min(createTarget-totalReplicas, maxBatchSize)
 		// Shape first, then gate: the token bucket decides how many creates
 		// this pass may issue, and the expectations gate below decides
 		// whether issuing them against the current cache is safe.
@@ -964,6 +1088,12 @@ func podNotScheduledReason(sb *sandboxv1beta1.Sandbox) string {
 		return ""
 	}
 	return cond.Reason
+}
+
+// isSandboxFinished reports whether a pool member's Pod has exited, so it can
+// never become Ready.
+func isSandboxFinished(sb *sandboxv1beta1.Sandbox) bool {
+	return meta.IsStatusConditionTrue(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished))
 }
 
 // resolveUpdateStrategy returns the effective update strategy for the warm pool,

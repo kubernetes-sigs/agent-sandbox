@@ -53,6 +53,10 @@ func mapCommandError(err error, msg string) error {
 	return status.Errorf(codes.Internal, "%s: %v", msg, err)
 }
 
+// defaultPipeCapacity is the Linux pipe capacity. It bounds the output still
+// delivered after the child exits when the queued byte count is unavailable.
+const defaultPipeCapacity = 64 * 1024
+
 // defaultStreamChunkSize is the default read buffer size for stdout/stderr
 // streaming, overridable via the --stream-chunk-size daemon flag. Timing
 // constants (pipeDrainGrace, ...) are collected in one block in server.go.
@@ -251,13 +255,13 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	var sendMu sync.Mutex
 	sends := newSendTracker()
 
-	// streamOutput copies reader into stdout/stderr stream events until the
-	// reader is exhausted (EOF on pipes, EIO/ErrClosed on a PTY).
-	streamOutput := func(reader io.Reader, isStderr bool) {
+	// streamOutput copies out.file into stdout/stderr stream events until the
+	// file is exhausted (EOF on pipes, EIO/ErrClosed on a PTY).
+	streamOutput := func(out *trackedOutput, isStderr bool) {
 		defer streamWg.Done()
 		buf := make([]byte, s.streamChunkSize)
 		for {
-			n, rErr := reader.Read(buf)
+			n, rErr := out.file.Read(buf)
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
@@ -267,11 +271,11 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 				} else {
 					event = &processv1.StartResponse{Event: &processv1.StartResponse_Stdout{Stdout: chunk}}
 				}
-				sends.add(1)
+				counted := sends.begin(out, n)
 				sendMu.Lock()
 				sErr := stream.Send(event)
 				sendMu.Unlock()
-				sends.add(-1)
+				sends.end(counted)
 				if sErr != nil {
 					return
 				}
@@ -285,7 +289,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	var waitErr error
 	if usePTY {
 		streamWg.Add(1)
-		go streamOutput(ptyFile, false)
+		go streamOutput(sends.track(ptyFile), false)
 		// For a PTY the reader unblocks with EIO once the child exits and
 		// the kernel's buffered output is drained. Closing the master right
 		// after Wait would discard that buffer, dropping the output of a
@@ -293,14 +297,16 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// Closing the PTY only on timeout unblocks a straggling read (e.g. a
 		// grandchild still holds the slave side).
 		waitErr = cmd.Wait()
+		sends.childExited(s.streamChunkSize)
 		waitForReaders(&streamWg, sends, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
 	} else {
 		streamWg.Add(2)
-		go streamOutput(stdoutR, false)
-		go streamOutput(stderrR, true)
+		go streamOutput(sends.track(stdoutR), false)
+		go streamOutput(sends.track(stderrR), true)
 
 		waitErr = cmd.Wait()
+		sends.childExited(s.streamChunkSize)
 		waitForReaders(&streamWg, sends, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
 	}
@@ -832,31 +838,88 @@ func readProcChildren(ctx context.Context, pid int) []int {
 	return children
 }
 
-// sendTracker records how many output readers are delivering a chunk to the
-// client, including waiting for their turn on the stream. A reader in this
-// state is not waiting for the process, so waitForReaders does not count the
-// time against pipeDrainGrace.
+// sendTracker records how many output readers are delivering output that was
+// written before the child exited, including waiting for their turn on the
+// stream. waitForReaders does not count that time against pipeDrainGrace.
+// Output written after the exit, by a descendant that still holds the pipe,
+// does not pause the grace, so such a descendant cannot keep the stream open
+// by writing to a slow client.
 type sendTracker struct {
 	mu      sync.Mutex
 	active  int
 	changed chan struct{}
+	outputs []*trackedOutput
+}
+
+// trackedOutput is one output reader's position in its pipe or PTY. read and
+// limit are guarded by sendTracker.mu.
+type trackedOutput struct {
+	file *os.File
+	// read counts the bytes read from file so far.
+	read int64
+	// limit is the read offset past which output was written after the
+	// child exited, or -1 while the child runs.
+	limit int64
 }
 
 func newSendTracker() *sendTracker {
 	return &sendTracker{changed: make(chan struct{})}
 }
 
-// add changes the number of readers that are sending and wakes waitForReaders.
-func (t *sendTracker) add(delta int) {
+// track registers an output reader. Call it before the reader starts.
+func (t *sendTracker) track(file *os.File) *trackedOutput {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.active += delta
+	out := &trackedOutput{file: file, limit: -1}
+	t.outputs = append(t.outputs, out)
+	return out
+}
+
+// childExited sets each reader's limit to the output it has read plus what
+// is still queued in its pipe or PTY. A read in progress has already taken
+// its bytes from the queue but not yet counted them, so the limit allows one
+// extra chunk.
+func (t *sendTracker) childExited(chunk int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, out := range t.outputs {
+		out.limit = out.read + queuedOutputBytes(out.file) + int64(chunk)
+	}
+}
+
+// begin records that out read n bytes and is about to send them. It reports
+// whether the send pauses the grace, which callers pass to end.
+func (t *sendTracker) begin(out *trackedOutput, n int) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	start := out.read
+	out.read += int64(n)
+	if out.limit >= 0 && start >= out.limit {
+		return false
+	}
+	t.active++
+	t.notifyLocked()
+	return true
+}
+
+// end records that a send started by begin finished.
+func (t *sendTracker) end(counted bool) {
+	if !counted {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.active--
+	t.notifyLocked()
+}
+
+func (t *sendTracker) notifyLocked() {
 	close(t.changed)
 	t.changed = make(chan struct{})
 }
 
-// state reports whether any reader is sending, and returns a channel that is
-// closed at the next change.
+// state reports whether any reader is sending output written before the
+// child exited, and returns a channel that is closed at the next change.
 func (t *sendTracker) state() (bool, <-chan struct{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -868,11 +931,14 @@ func (t *sendTracker) state() (bool, <-chan struct{}) {
 // to unblock any that are stuck (a grandchild may still hold the write side),
 // and waitForReaders waits for them to return.
 //
-// The grace only runs while no reader is sending to the client. A slow client
-// blocks the readers in stream.Send while the pipe still holds output, and
-// closing the pipe then would discard that output. A reader that is sending
-// cannot be stopped by forceClose anyway, so pausing the grace does not let a
-// stalled client hold the stream open any longer than it already could.
+// The grace only runs while no reader is sending output that was written
+// before the child exited. A slow client blocks the readers in stream.Send
+// while the pipe still holds that output, and closing the pipe then would
+// discard it. Output written after the exit does not pause the grace, so a
+// descendant that keeps writing ends the stream as before. A reader that is
+// sending cannot be stopped by forceClose anyway, so pausing the grace does
+// not let a stalled client hold the stream open any longer than it already
+// could.
 func waitForReaders(wg *sync.WaitGroup, sends *sendTracker, forceClose func()) {
 	done := make(chan struct{})
 	go func() {

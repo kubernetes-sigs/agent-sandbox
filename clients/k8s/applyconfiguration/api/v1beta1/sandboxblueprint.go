@@ -47,15 +47,25 @@ type SandboxBlueprintApplyConfiguration struct {
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// When creating a sandbox, PVCs will be created from these templates.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
-	// Each PVC is named after the template and the Sandbox, joined by a hyphen, and is owned
-	// by the Sandbox. It is kept while the Sandbox is suspended or retained after expiry, so a
-	// resumed Pod reattaches it with its data. It is garbage collected when the Sandbox
-	// object is deleted.
+	// Each PVC is named after the template and the Sandbox, joined by a hyphen. It is kept
+	// while the Sandbox is suspended or retained after expiry, so a resumed Pod reattaches it
+	// with its data. Under the default whenDeleted: Delete, the Sandbox owns each PVC and it is
+	// garbage collected when the Sandbox object is deleted; under whenDeleted: Retain it is not
+	// owned and outlives the Sandbox (see persistentVolumeClaimRetentionPolicy).
 	// On a Sandbox this list is immutable after creation.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
 	// Each entry must have a unique, non-empty metadata.name.
 	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
 	VolumeClaimTemplates []PersistentVolumeClaimTemplateApplyConfiguration `json:"volumeClaimTemplates,omitempty"`
+	// persistentVolumeClaimRetentionPolicy controls lifecycle of PVCs created
+	// from volumeClaimTemplates.
+	// Defaults to Delete for backward compatibility.
+	// A SandboxWarmPool creates its Sandboxes without this policy, so the PVCs of a
+	// Sandbox that the pool removes before any SandboxClaim takes it are deleted.
+	// A Sandbox that a SandboxClaim takes from a warm pool gets its SandboxTemplate's
+	// policy at handover, or Retain if the template cannot be read then (with a
+	// warning event on the claim); later template edits don't change a claimed Sandbox.
+	PersistentVolumeClaimRetentionPolicy *PersistentVolumeClaimRetentionPolicyApplyConfiguration `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
 	// service controls whether the controller should automatically create a
 	// headless Service for the Sandbox workload.
 	// When unset, the controller preserves existing Services for backward
@@ -99,6 +109,14 @@ func (b *SandboxBlueprintApplyConfiguration) WithVolumeClaimTemplates(values ...
 		}
 		b.VolumeClaimTemplates = append(b.VolumeClaimTemplates, *values[i])
 	}
+	return b
+}
+
+// WithPersistentVolumeClaimRetentionPolicy sets the PersistentVolumeClaimRetentionPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PersistentVolumeClaimRetentionPolicy field is set to the value of the last call.
+func (b *SandboxBlueprintApplyConfiguration) WithPersistentVolumeClaimRetentionPolicy(value *PersistentVolumeClaimRetentionPolicyApplyConfiguration) *SandboxBlueprintApplyConfiguration {
+	b.PersistentVolumeClaimRetentionPolicy = value
 	return b
 }
 

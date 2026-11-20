@@ -1191,6 +1191,11 @@ func (r *SandboxWarmPoolReconciler) buildSandboxCR(
 		},
 	}
 
+	// A pool member holds no user data until a SandboxClaim takes it, so it
+	// keeps the default Delete policy and its PVCs go with it when the pool
+	// removes it. The claim controller applies the template's policy at handover.
+	sandbox.Spec.PersistentVolumeClaimRetentionPolicy = nil
+
 	// Propagate pool and template labels to pod template for consistency and targeting
 	if sandbox.Spec.PodTemplate.ObjectMeta.Labels == nil {
 		sandbox.Spec.PodTemplate.ObjectMeta.Labels = make(map[string]string)
@@ -1366,6 +1371,8 @@ func compareVolumeClaimTemplates(template *extensionsv1beta1.SandboxTemplate, ac
 
 // compareSandboxBlueprint checks if the sandbox blueprint in the sandbox is semantically equal to the template,
 // ignoring metadata differences and only comparing the fields that are relevant for staleness detection.
+// It skips persistentVolumeClaimRetentionPolicy: a pool member doesn't carry the template's
+// policy, and the claim controller applies it at handover.
 func compareSandboxBlueprint(template *extensionsv1beta1.SandboxTemplate, actualSandboxSpec *sandboxv1beta1.SandboxBlueprint) bool {
 	return comparePodSpecs(template, &actualSandboxSpec.PodTemplate.Spec) &&
 		compareVolumeClaimTemplates(template, actualSandboxSpec.VolumeClaimTemplates) &&

@@ -5996,14 +5996,28 @@ func TestReconcilePVCs(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name        string
-		initialObjs []runtime.Object
-		expectErr   bool
-		errContains string
+		name                         string
+		sandboxMutator               func(*sandboxv1beta1.Sandbox)
+		initialObjs                  []runtime.Object
+		expectErr                    bool
+		errContains                  string
+		expectOwner                  bool
+		expectNonControllerOwnerRefs []metav1.OwnerReference
 	}{
 		{
-			name:      "creates new PVC when none exists",
-			expectErr: false,
+			name:        "creates new PVC when none exists",
+			expectErr:   false,
+			expectOwner: true,
+		},
+		{
+			name: "creates new PVC without owner when retention policy is Retain",
+			sandboxMutator: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			expectErr:   false,
+			expectOwner: false,
 		},
 		{
 			name: "uses existing PVC owned by this sandbox",
@@ -6025,7 +6039,87 @@ func TestReconcilePVCs(t *testing.T) {
 					},
 				},
 			},
-			expectErr: false,
+			expectErr:   false,
+			expectOwner: true,
+		},
+		{
+			name: "removes current sandbox owner from existing PVC when retention policy is Retain",
+			sandboxMutator: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion:         "agents.x-k8s.io/v1beta1",
+								Kind:               "Sandbox",
+								Name:               sandboxName,
+								UID:                sandboxUID,
+								Controller:         new(true),
+								BlockOwnerDeletion: new(true),
+							},
+							{
+								APIVersion: "v1",
+								Kind:       "ConfigMap",
+								Name:       "audit-marker",
+								UID:        "audit-marker-uid",
+							},
+						},
+					},
+				},
+			},
+			expectErr:   false,
+			expectOwner: false,
+			expectNonControllerOwnerRefs: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       "audit-marker",
+				UID:        "audit-marker-uid",
+			}},
+		},
+		{
+			name: "drops a non-controller sandbox owner reference when retention policy is Retain",
+			sandboxMutator: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						Labels:    map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: sandboxv1beta1.GroupVersion.String(),
+								Kind:       sandboxv1beta1.SandboxKind,
+								Name:       sandboxName,
+								UID:        sandboxUID,
+							},
+							{
+								APIVersion: "v1",
+								Kind:       "ConfigMap",
+								Name:       "unrelated",
+								UID:        "unrelated-uid",
+							},
+						},
+					},
+				},
+			},
+			expectErr:   false,
+			expectOwner: false,
+			expectNonControllerOwnerRefs: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       "unrelated",
+				UID:        "unrelated-uid",
+			}},
 		},
 		{
 			name: "refuses PVC owned by a different controller",
@@ -6063,7 +6157,29 @@ func TestReconcilePVCs(t *testing.T) {
 					},
 				},
 			},
-			expectErr: false,
+			expectErr:   false,
+			expectOwner: true,
+		},
+		{
+			name: "uses unowned PVC without adopting when retention policy is Retain",
+			sandboxMutator: func(sb *sandboxv1beta1.Sandbox) {
+				sb.Spec.PersistentVolumeClaimRetentionPolicy = &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+					WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+				}
+			},
+			initialObjs: []runtime.Object{
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      pvcName,
+						Namespace: sandboxNs,
+						Labels: map[string]string{
+							sandboxv1beta1.SandboxAdoptableLabel: "true",
+						},
+					},
+				},
+			},
+			expectErr:   false,
+			expectOwner: false,
 		},
 		{
 			name: "adopts unowned PVC carrying legacy tracking label when adoptable label is absent",
@@ -6078,7 +6194,8 @@ func TestReconcilePVCs(t *testing.T) {
 					},
 				},
 			},
-			expectErr: false,
+			expectErr:   false,
+			expectOwner: true,
 		},
 		{
 			name: "refuses to adopt unowned PVC that lacks pool authorization label",
@@ -6096,6 +6213,10 @@ func TestReconcilePVCs(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			sandbox := sandbox.DeepCopy()
+			if tc.sandboxMutator != nil {
+				tc.sandboxMutator(sandbox)
+			}
 			r := SandboxReconciler{
 				Client: newFakeClient(append(tc.initialObjs, sandbox)...),
 				Scheme: Scheme,
@@ -6129,8 +6250,21 @@ func TestReconcilePVCs(t *testing.T) {
 			err = r.Get(t.Context(), types.NamespacedName{Name: pvcName, Namespace: sandboxNs}, livePVC)
 			require.NoError(t, err)
 			ownerRef := metav1.GetControllerOf(livePVC)
-			require.NotNil(t, ownerRef, "PVC should have a controller owner reference")
-			require.Equal(t, sandboxUID, ownerRef.UID, "PVC controller reference UID should match sandbox UID")
+			if tc.expectOwner {
+				require.NotNil(t, ownerRef, "PVC should have a controller owner reference")
+				require.Equal(t, sandboxUID, ownerRef.UID, "PVC controller reference UID should match sandbox UID")
+			} else {
+				require.Nil(t, ownerRef, "PVC should not have a controller owner reference")
+			}
+			if tc.expectNonControllerOwnerRefs != nil {
+				nonControllerOwnerRefs := make([]metav1.OwnerReference, 0, len(livePVC.OwnerReferences))
+				for _, ownerRef := range livePVC.OwnerReferences {
+					if ownerRef.Controller == nil || !*ownerRef.Controller {
+						nonControllerOwnerRefs = append(nonControllerOwnerRefs, ownerRef)
+					}
+				}
+				require.ElementsMatch(t, tc.expectNonControllerOwnerRefs, nonControllerOwnerRefs)
+			}
 		})
 	}
 }
@@ -6261,6 +6395,136 @@ func TestReconcilePVCsReturnsErrorWhenSandboxReadFails(t *testing.T) {
 	livePVC := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, r.Get(t.Context(), types.NamespacedName{Name: pvcName, Namespace: sandboxNs}, livePVC))
 	assert.Empty(t, livePVC.OwnerReferences)
+}
+
+func TestReconcilePVCsRetentionConflictPreservesConcurrentOwnerReference(t *testing.T) {
+	const (
+		sandboxName = "retention-conflict-sandbox"
+		sandboxNs   = "retention-conflict-ns"
+		pvcName     = "data-retention-conflict-sandbox"
+	)
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+				EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+						corev1.ResourceStorage: resource.MustParse("1Gi"),
+					}},
+				},
+			}},
+			PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+			},
+		}},
+	}
+	otherRef := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "audit-marker", UID: types.UID("audit-marker-uid")}
+	concurrentRef := metav1.OwnerReference{APIVersion: "v1", Kind: "Secret", Name: "concurrent-marker", UID: types.UID("concurrent-marker-uid")}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: pvcName, Namespace: sandboxNs,
+		OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName), otherRef},
+	}}
+
+	rawClient := newFakeClient(sandbox, pvc)
+	injected := false
+	fakeClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*corev1.PersistentVolumeClaim); ok && !injected {
+				injected = true
+				livePVC := &corev1.PersistentVolumeClaim{}
+				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(pvc), livePVC))
+				livePVC.OwnerReferences = append(livePVC.OwnerReferences, concurrentRef)
+				require.NoError(t, c.Update(ctx, livePVC))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	r := SandboxReconciler{Client: fakeClient, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	err := r.reconcilePVCs(t.Context(), sandbox, NameHash(sandboxName))
+	require.Error(t, err)
+	require.True(t, k8serrors.IsConflict(err), "expected owner-ref removal to use an optimistic-lock patch")
+
+	livePVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, rawClient.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+	require.ElementsMatch(t, []metav1.OwnerReference{sandboxControllerRef(sandboxName), otherRef, concurrentRef}, livePVC.OwnerReferences)
+}
+
+// TestRetainedPVCReusedBySameNameSandbox pins what happens to a PVC that a
+// deleted Sandbox retained when a new Sandbox of the same name reconciles in
+// the same namespace. The new Sandbox mounts the retained PVC, and its own
+// policy decides whether it takes ownership of it.
+func TestRetainedPVCReusedBySameNameSandbox(t *testing.T) {
+	const (
+		sandboxName = "reused-name"
+		sandboxNs   = "reused-ns"
+		pvcName     = "data-reused-name"
+		markerKey   = "test/retained-data"
+	)
+	retain := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain
+	del := sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete
+
+	newSandbox := func(uid types.UID, policy sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: sandboxNs, UID: uid},
+			Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+					EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+							corev1.ResourceStorage: resource.MustParse("1Gi"),
+						}},
+					},
+				}},
+				PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: policy},
+			}},
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		policy    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
+		wantOwned bool
+	}{
+		{name: "a Retain Sandbox mounts the PVC and leaves it unowned", policy: retain},
+		{name: "a Delete Sandbox adopts the PVC, so it is deleted with that Sandbox", policy: del, wantOwned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := newSandbox("first-uid", retain)
+			c := newFakeClient(first)
+			r := SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			pvcKey := types.NamespacedName{Name: pvcName, Namespace: sandboxNs}
+
+			require.NoError(t, r.reconcilePVCs(t.Context(), first, NameHash(sandboxName)))
+			retained := &corev1.PersistentVolumeClaim{}
+			require.NoError(t, c.Get(t.Context(), pvcKey, retained))
+			require.Empty(t, retained.OwnerReferences, "a Retain Sandbox should create its PVC without an owner")
+
+			// Mark the PVC so the test can tell reuse from a delete and re-create.
+			retained.Annotations = map[string]string{markerKey: "true"}
+			require.NoError(t, c.Update(t.Context(), retained))
+			require.NoError(t, c.Delete(t.Context(), first))
+
+			second := newSandbox("second-uid", tc.policy)
+			require.NoError(t, c.Create(t.Context(), second))
+			require.NoError(t, r.reconcilePVCs(t.Context(), second, NameHash(sandboxName)))
+
+			reused := &corev1.PersistentVolumeClaim{}
+			require.NoError(t, c.Get(t.Context(), pvcKey, reused))
+			require.Equal(t, "true", reused.Annotations[markerKey], "the new Sandbox should reuse the retained PVC")
+			owner := metav1.GetControllerOf(reused)
+			if tc.wantOwned {
+				require.NotNil(t, owner, "a Delete Sandbox should adopt the retained PVC")
+				require.Equal(t, second.UID, owner.UID)
+			} else {
+				require.Empty(t, reused.OwnerReferences, "a Retain Sandbox should not adopt the retained PVC")
+			}
+		})
+	}
 }
 
 func TestSandboxExpiry(t *testing.T) {
@@ -8458,4 +8722,94 @@ func TestSandboxStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T) {
 	require.Equal(t, 3, statusPatchAttempts)
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "requested")), 0.001)
 	require.InDelta(t, 1.0, testutil.ToFloat64(asmetrics.SandboxSuspendTotal.WithLabelValues("default", "unknown", "None", "pod_terminated")), 0.001)
+}
+
+func TestExpiredSandboxAppliesPVCRetention(t *testing.T) {
+	testCases := []struct {
+		name           string
+		shutdownPolicy sandboxv1beta1.ShutdownPolicy
+		whenDeleted    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyType
+		wantOwned      bool
+		wantSandbox    bool
+	}{
+		{
+			name:           "retained sandbox releases its PVC under Retain",
+			shutdownPolicy: sandboxv1beta1.ShutdownPolicyRetain,
+			whenDeleted:    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+			wantOwned:      false,
+			wantSandbox:    true,
+		},
+		{
+			name:           "deleted sandbox releases its PVC before it goes under Retain",
+			shutdownPolicy: sandboxv1beta1.ShutdownPolicyDelete,
+			whenDeleted:    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+			wantOwned:      false,
+			wantSandbox:    false,
+		},
+		{
+			name:           "retained sandbox keeps owning its PVC under Delete",
+			shutdownPolicy: sandboxv1beta1.ShutdownPolicyRetain,
+			whenDeleted:    sandboxv1beta1.PersistentVolumeClaimRetentionPolicyDelete,
+			wantOwned:      true,
+			wantSandbox:    true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			const sandboxName = "expired-retention"
+			shutdownTime := metav1.NewTime(time.Now().Add(-time.Hour))
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: "default", UID: sandboxUID, Generation: 1},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container"}}}},
+						VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{
+							EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+								Resources: corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{
+									corev1.ResourceStorage: resource.MustParse("1Gi"),
+								}},
+							},
+						}},
+						PersistentVolumeClaimRetentionPolicy: &sandboxv1beta1.PersistentVolumeClaimRetentionPolicy{WhenDeleted: tc.whenDeleted},
+					},
+					Lifecycle: sandboxv1beta1.Lifecycle{ShutdownTime: &shutdownTime, ShutdownPolicy: new(tc.shutdownPolicy)},
+				},
+			}
+			pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name: "data-" + sandboxName, Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(sandboxName)},
+			}}
+			r := &SandboxReconciler{Client: newFakeClient(sandbox, pvc), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandboxName, Namespace: "default"}}
+
+			for range 3 {
+				_, err := r.Reconcile(t.Context(), req)
+				require.NoError(t, err)
+			}
+
+			livePVC := &corev1.PersistentVolumeClaim{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pvc), livePVC))
+			owned := false
+			for _, ref := range livePVC.OwnerReferences {
+				if ref.UID == sandboxUID {
+					owned = true
+				}
+			}
+			require.Equal(t, tc.wantOwned, owned, "PVC owner references: %+v", livePVC.OwnerReferences)
+
+			pvcs := &corev1.PersistentVolumeClaimList{}
+			require.NoError(t, r.List(t.Context(), pvcs, client.InNamespace("default")))
+			require.Len(t, pvcs.Items, 1, "expiry must not create PVCs")
+
+			err := r.Get(t.Context(), req.NamespacedName, &sandboxv1beta1.Sandbox{})
+			if tc.wantSandbox {
+				require.NoError(t, err)
+			} else {
+				require.True(t, k8serrors.IsNotFound(err), "expected the sandbox to be deleted, got %v", err)
+			}
+		})
+	}
 }

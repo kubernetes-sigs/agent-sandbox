@@ -321,8 +321,6 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		closeAll(stdoutR, stderrR)
 	}
 
-	stopKeepAlive()
-
 	exitCode := int32(0)
 	if waitErr != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
@@ -335,6 +333,10 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	proc.SetExitCode(exitCode)
 	closeAll(stdinW) // close stdin pipe; safe no-op if nil (PTY path)
 	close(proc.Done)
+
+	// Stopping waits for an in-flight keep-alive send, which can block on a
+	// client that stopped reading, so only do it once the process is marked done.
+	stopKeepAlive()
 
 	if err := stream.Send(&processv1.StartResponse{
 		Event: &processv1.StartResponse_Exit{

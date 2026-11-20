@@ -35,6 +35,7 @@ import httpx
 
 from .async_k8s_helper import AsyncK8sHelper
 from .exceptions import (
+    SandboxClosedError,
     SandboxNoServiceError,
     SandboxNotReadyError,
     SandboxPortForwardError,
@@ -571,7 +572,7 @@ class AsyncSandboxConnector:
     def _ensure_open(self) -> None:
         """Raise when an operation is attempted after connection teardown."""
         if self._closed:
-            raise RuntimeError("sandbox connector is closed")
+            raise SandboxClosedError("sandbox connector is closed")
 
     def _close_for_atexit(self) -> None:
         """Release loop-independent local resources during interpreter shutdown.

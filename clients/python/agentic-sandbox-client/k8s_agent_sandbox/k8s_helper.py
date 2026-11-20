@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from typing import Any, List, cast
 from kubernetes import client, config, watch
 import urllib3.exceptions
-from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
+from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxTimeoutError, SandboxWarmPoolNotFoundError
 from .models import AdditionalPodMetadata
 from .utils import (
     construct_sandbox_claim_env_spec,
@@ -216,7 +216,7 @@ class K8sHelper:
             # timeoutSeconds is integral; preserve a positive fractional budget.
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(
+                raise SandboxTimeoutError(
                     f"Could not resolve {wait_target} from claim "
                     f"'{claim_name}' within {timeout} seconds.")
             w = watch.Watch()
@@ -334,7 +334,7 @@ class K8sHelper:
         while True:
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Sandbox {name} did not become {description} within {timeout} seconds.")
+                raise SandboxTimeoutError(f"Sandbox {name} did not become {description} within {timeout} seconds.")
             w = watch.Watch()
             try:
                 for event in w.stream(
@@ -501,7 +501,7 @@ class K8sHelper:
         while True:
             remaining = math.ceil(deadline - time.monotonic())
             if remaining <= 0:
-                raise TimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
+                raise SandboxTimeoutError(f"Gateway '{gateway_name}' did not get an IP.")
             w = watch.Watch()
             for event in w.stream(
                 func=self.custom_objects_api.list_namespaced_custom_object,

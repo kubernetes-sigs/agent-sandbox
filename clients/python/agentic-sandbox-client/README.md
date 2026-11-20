@@ -875,6 +875,63 @@ seconds, 180 by default. `AsyncSandbox` provides the same methods with `await`.
 For snapshot-backed suspension on GKE, use the
 [GKE snapshot extension](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md).
 
+## Errors
+
+The SDK's own exception classes derive from `SandboxError`, which is itself a
+`RuntimeError`. Catch `SandboxError` to handle any of them, or a specific class
+to react to one condition.
+
+Failures from the sandboxd gRPC ProcessService and FileWatcherService are
+classified by status:
+
+| gRPC status | Exception | Discriminant |
+| --- | --- | --- |
+| `DEADLINE_EXCEEDED` | `SandboxTimeoutError` | — |
+| `UNAVAILABLE` | `SandboxConnectionError` | `kind == "unavailable"` |
+| `CANCELLED` | `SandboxConnectionError` | `kind == "socket"` |
+| `PERMISSION_DENIED` | `SandboxdPermissionError` | `code == "permission_denied"` |
+| `NOT_FOUND` (addressing a process) | `SandboxdProcessNotFoundError` | `code == "not_found"` |
+| anything else | `SandboxdRpcError` | `code`, e.g. `"resource_exhausted"` |
+
+`SandboxdRpcError.code` is the gRPC status name in lowercase snake_case, or
+`"unknown"` for a status this version does not recognize. A stream that
+violates the ProcessService contract raises `SandboxConnectionError` with
+`kind == "protocol"`.
+
+Both `SandboxConnectionError` and `SandboxdRpcError` carry a `detail`
+attribute: a truncated preview of the server's message, capped at 512 bytes.
+The untruncated text is never attached, and neither is the raw response
+object.
+
+Exception *messages* carry only the operation and the status, never the
+server's text, because a message ends up in logs, tracebacks and span status
+while `detail` is read only where it is asked for. `SandboxTimeoutError` has
+no `detail`; the originating error is chained, so `err.__cause__` reaches it.
+
+```python
+from k8s_agent_sandbox import SandboxdRpcError, SandboxTimeoutError
+
+try:
+    result = sandbox.commands.run("./missing-binary")
+except SandboxTimeoutError:
+    ...                      # the call exceeded its deadline
+except SandboxdRpcError as e:
+    if e.code == "not_found":
+        ...                  # no such executable
+    raise
+```
+
+Operations on a sandbox whose connection was closed raise
+`SandboxClosedError`, including through a `commands` / `files` / `watcher`
+reference kept from before `close_connection()`.
+
+Several of these classes also derive from the builtin exception the SDK raised
+before the class existed, so existing `except` clauses keep working:
+`SandboxTimeoutError` is a `TimeoutError`, `SandboxdPermissionError` is a
+`PermissionError`, and `SandboxdProcessNotFoundError` is a `LookupError`. Note
+that `TimeoutError` and `PermissionError` are `OSError` subclasses, so a broad
+`except OSError` will catch those two.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

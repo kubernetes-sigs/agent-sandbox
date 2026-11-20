@@ -27,6 +27,7 @@ import time
 from typing import Any, Callable, Literal, ParamSpec, TypeVar, cast
 
 from .constants import SANDBOX_NAME_HASH_LABEL
+from .exceptions import SandboxClosedError
 from .models import (
     SandboxClaimEnvVar,
     SandboxConnectionConfig,
@@ -399,3 +400,26 @@ async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator
             break
     with _temporary_kubeconfig(api_client, authorization) as args:
         yield args
+
+
+class ClosableClient:
+    """Closed-state guard shared by the Sandbox's command, file and watch clients.
+
+    ``Sandbox.close_connection()`` marks each sub-client closed before it drops
+    its reference to them. A caller that kept a reference from before the close
+    then gets a ``SandboxClosedError`` naming the cause, rather than an error
+    from a half-torn-down connector.
+    """
+
+    # A class attribute so every sub-client inherits the open state without
+    # having to thread it through its own constructor.
+    _closed = False
+
+    def _mark_closed(self) -> None:
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise SandboxClosedError(
+                "the sandbox connection is closed; this handle cannot be reused"
+            )

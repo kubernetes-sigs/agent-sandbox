@@ -1315,6 +1315,20 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			continue
 		}
 
+		// Never hand out a member whose Pod is ending, not even as the unready
+		// fallback, because the claim would bind to a Pod that is going away.
+		// Such a member can still have cached PodIPs, or none if its Pod failed
+		// before it got one. Check it before the checks below, which would count
+		// a member without PodIPs as a pending-network candidate and make the
+		// claim wait out the warm-candidate grace period for a Pod that is not
+		// coming up. Keep the member queued instead of dropping it, because a
+		// recreated Pod can make it usable again.
+		if reason, ending := sandboxPodEndingReason(adopted); ending {
+			logger.V(4).Info("Skipping candidate whose Pod is ending", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", reason)
+			skipped = append(skipped, adoptedKey)
+			continue
+		}
+
 		// Enforce blueprint version consistency only under the Recreate strategy (issue #764).
 		recreate, expectedHash, expectedTemplate, err := resolveRecreate()
 		if err != nil {
@@ -1356,16 +1370,6 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 				adoptedKey.NodeName = adopted.Status.NodeName
 			}
 			pendingNetworkCandidates++
-			skipped = append(skipped, adoptedKey)
-			continue
-		}
-
-		// A member whose Pod is terminating or has ended keeps its cached PodIPs
-		// for a while. Never hand it out, not even as the unready fallback: the
-		// claim would bind to a Pod that is going away. Keep it queued, since a
-		// Pod that is recreated makes the member usable again.
-		if reason, ending := sandboxPodEndingReason(adopted); ending {
-			logger.V(4).Info("Skipping candidate whose Pod is ending", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name, "reason", reason)
 			skipped = append(skipped, adoptedKey)
 			continue
 		}
@@ -1781,14 +1785,16 @@ func (r *SandboxClaimReconciler) removeAssignedSandboxReference(ctx context.Cont
 }
 
 // sandboxPodEndingReason returns the Ready reason when the Sandbox's Ready
-// condition says its Pod is terminating or has ended.
+// condition says its Pod is terminating or has ended, or that the Sandbox has
+// expired, which makes the controller tear its Pod down.
 func sandboxPodEndingReason(sb *v1beta1.Sandbox) (string, bool) {
 	ready := meta.FindStatusCondition(sb.Status.Conditions, string(v1beta1.SandboxConditionReady))
 	if ready == nil || ready.Status == metav1.ConditionTrue {
 		return "", false
 	}
 	switch ready.Reason {
-	case v1beta1.SandboxReasonPodTerminating, v1beta1.SandboxReasonPodSucceeded, v1beta1.SandboxReasonPodFailed:
+	case v1beta1.SandboxReasonPodTerminating, v1beta1.SandboxReasonPodSucceeded, v1beta1.SandboxReasonPodFailed,
+		v1beta1.SandboxReasonExpired:
 		return ready.Reason, true
 	}
 	return "", false

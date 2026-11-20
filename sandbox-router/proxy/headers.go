@@ -170,13 +170,27 @@ func validDNSLabel(s string) bool {
 	return true
 }
 
+// metadataEndpointIPs are cloud instance-metadata service addresses that do
+// NOT live in link-local space, so the address-class check below does not
+// cover them: 100.100.100.200 (Alibaba) and 192.0.0.192 (Oracle). Reaching
+// either through the pod-IP fast path would return instance credentials to
+// the caller, so they are rejected like their link-local sibling
+// 169.254.169.254. Only these exact addresses are denied, not the surrounding
+// CGNAT range, because 100.64.0.0/10 is legitimate Pod-CIDR space in some
+// CNIs.
+var metadataEndpointIPs = []net.IP{
+	net.ParseIP("100.100.100.200"),
+	net.ParseIP("192.0.0.192"),
+}
+
 // validPodIP reports whether s is a syntactically valid IP literal AND
 // belongs to a routable address class. We reject the IP classes the
 // Python router rejects — loopback, link-local (unicast and multicast,
 // covers IPv6 fe80::/10 as well as IPv4 169.254.0.0/16, which
 // importantly blocks cloud metadata endpoints like 169.254.169.254),
-// multicast, and the unspecified address. These are not valid Pod IPs
-// and accepting them as X-Sandbox-Pod-IP would turn the router into
+// multicast, and the unspecified address — plus the non-link-local
+// metadata endpoints listed above. These are not valid Pod IPs and
+// accepting them as X-Sandbox-Pod-IP would turn the router into
 // an SSRF gadget — letting a caller dial cluster-internal admin
 // endpoints, the loopback of the router pod itself, or cloud
 // instance-metadata services.
@@ -188,9 +202,9 @@ func validDNSLabel(s string) bool {
 // allowLoopback exists for the sidecar deployment shape (sandbox in
 // the same Pod as the router) and for integration tests using a
 // localhost httptest backend. Even with allowLoopback=true the other
-// IP classes (link-local, multicast, unspecified) stay rejected —
-// nothing legitimate would use those as a Pod IP regardless of the
-// deployment shape.
+// IP classes (link-local, multicast, unspecified, metadata endpoints)
+// stay rejected — nothing legitimate would use those as a Pod IP
+// regardless of the deployment shape.
 func validPodIP(s string, allowLoopback bool) bool {
 	ip := net.ParseIP(s)
 	if ip == nil {
@@ -200,6 +214,11 @@ func validPodIP(s string, allowLoopback bool) bool {
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() {
 		return false
+	}
+	for _, metadata := range metadataEndpointIPs {
+		if ip.Equal(metadata) {
+			return false
+		}
 	}
 	if ip.IsLoopback() && !allowLoopback {
 		return false

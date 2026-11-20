@@ -293,6 +293,11 @@ func TestValidPodIP(t *testing.T) {
 		"224.0.0.1":       {false, false}, // ipv4 multicast (224.0.0.0/4)
 		"239.255.255.250": {false, false}, // SSDP / mDNS-ish
 		"ff02::1":         {false, false}, // ipv6 multicast
+		// non-link-local cloud metadata endpoints — same verdict
+		// regardless of flag; the class check alone does not cover
+		// these addresses
+		"100.100.100.200": {false, false}, // Alibaba IMDS
+		"192.0.0.192":     {false, false}, // Oracle IMDS
 
 		// rejected — not a valid IP literal
 		"":            {false, false},

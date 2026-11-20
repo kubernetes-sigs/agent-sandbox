@@ -36,6 +36,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -2363,6 +2364,80 @@ func TestReconcilePool_TemplateUpdateRecreate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcilePool_PriorityClassName(t *testing.T) {
+	ctx := context.Background()
+	replicas := int32(1)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				PriorityClassName: "template-class",
+				Priority:          new(int32(10)),
+				PreemptionPolicy:  ptr.To(corev1.PreemptNever),
+				Containers:        []corev1.Container{{Name: "app", Image: "image-v1"}},
+			},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default", UID: "warmpool-uid-priority"},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:          &replicas,
+			TemplateRef:       extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			PriorityClassName: "warm-low",
+			UpdateStrategy: &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+				Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+			},
+		},
+	}
+	scheme := newTestScheme()
+	r := SandboxWarmPoolReconciler{
+		Client:       newFakeClient(scheme, template, warmPool),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	listSandboxes := func() []sandboxv1beta1.Sandbox {
+		list := &sandboxv1beta1.SandboxList{}
+		require.NoError(t, r.List(ctx, list, client.InNamespace("default")))
+		return list.Items
+	}
+	reconcile := func() {
+		_, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		syncPoolExpectations(&r, warmPool)
+	}
+
+	reconcile()
+	items := listSandboxes()
+	require.Len(t, items, 1)
+	require.Equal(t, "warm-low", items[0].Spec.PodTemplate.Spec.PriorityClassName, "pool class replaces the template's")
+	require.Nil(t, items[0].Spec.PodTemplate.Spec.Priority, "admission resolves priority from the pool class")
+	require.Nil(t, items[0].Spec.PodTemplate.Spec.PreemptionPolicy, "admission resolves preemption policy from the pool class")
+	name := items[0].Name
+
+	// A metadata-only template edit changes the hash but is not drift.
+	updated := template.DeepCopy()
+	updated.Spec.PodTemplate.ObjectMeta.Labels = map[string]string{"new-label": "value"}
+	require.NoError(t, r.Update(ctx, updated))
+	reconcile()
+	reconcile()
+	items = listSandboxes()
+	require.Len(t, items, 1)
+	require.Equal(t, name, items[0].Name, "the pool class must not make the sandbox stale")
+
+	// Changing the pool class does replace it.
+	pool := &extensionsv1beta1.SandboxWarmPool{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(warmPool), pool))
+	pool.Spec.PriorityClassName = "warm-lower"
+	require.NoError(t, r.Update(ctx, pool))
+	warmPool = pool
+	reconcile()
+	reconcile()
+	items = listSandboxes()
+	require.Len(t, items, 1)
+	require.NotEqual(t, name, items[0].Name)
+	require.Equal(t, "warm-lower", items[0].Spec.PodTemplate.Spec.PriorityClassName)
 }
 
 func TestComputeSandboxBlueprintHash(t *testing.T) {

@@ -227,6 +227,66 @@ class FooterAndAssemblyTest(unittest.TestCase):
         self.assertIn("### New Contributors\n* @alice", result)
         self.assertEqual(result.count("**Full Changelog**:"), 1)
 
+    def test_extract_github_whats_changed(self):
+        generated = (
+            "## What's Changed\n"
+            "* feat: something by @alice in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "## New Contributors\n"
+            "* @alice made their first contribution in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12\n"
+        )
+        section = generate_release_notes.extract_github_whats_changed(generated)
+        self.assertEqual(
+            section,
+            "## What's Changed\n"
+            "* feat: something by @alice in https://github.com/kubernetes-sigs/agent-sandbox/pull/1",
+        )
+        self.assertEqual(generate_release_notes.extract_github_whats_changed(""), "")
+
+    def test_format_commit_fallback_changes(self):
+        commits = [
+            {"title": "feat: one (#1)"},
+            {"title": "fix: two (#2)"},
+        ]
+        self.assertEqual(
+            generate_release_notes.format_commit_fallback_changes(commits),
+            "## What's Changed\n* feat: one (#1)\n* fix: two (#2)",
+        )
+        self.assertEqual(generate_release_notes.format_commit_fallback_changes([]), "")
+
+    def test_assemble_release_notes_uses_fallback_changes_when_gemini_fails(self):
+        fallback = "## What's Changed\n* feat: one (#1)"
+        footer = (
+            "### New Contributors\n"
+            "* @alice made their first contribution in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12"
+        )
+        result = generate_release_notes.assemble_release_notes(
+            tag="v1.0.12",
+            gemini_notes=None,
+            installation_notes="### Installation\ninstall cmds",
+            contributors=["@alice"],
+            footer=footer,
+            fallback_changes=fallback,
+        )
+        self.assertIn("## What's Changed\n* feat: one (#1)", result)
+        self.assertIn("### Installation\ninstall cmds", result)
+        self.assertIn("### Contributors\nWe extend our sincere thanks", result)
+        self.assertIn("### New Contributors\n* @alice", result)
+        self.assertLess(result.index("## What's Changed"), result.index("### Installation"))
+
+    def test_assemble_release_notes_omits_fallback_changes_when_gemini_succeeds(self):
+        result = generate_release_notes.assemble_release_notes(
+            tag="v1.0.12",
+            gemini_notes="Curated summary.\n\n### Installation\ninstall cmds\n\n### Contributors\n@alice",
+            installation_notes="### Installation\ninstall cmds",
+            contributors=["@alice"],
+            footer="**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12",
+            fallback_changes="## What's Changed\n* feat: one (#1)",
+        )
+        self.assertNotIn("What's Changed", result)
+        self.assertIn("Curated summary.", result)
+
     def test_enrich_commits_skips_diff_for_tests_and_bots(self):
         commits = [
             {"sha": "aaa11111", "title": "cleanup: tests (#1)", "body": "", "pr_number": 1},

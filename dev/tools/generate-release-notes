@@ -433,6 +433,29 @@ def get_pr_descriptions(prs_data):
     return pr_descriptions
 
 
+def extract_github_whats_changed(generated_notes):
+    """Extracts the What's Changed section from GitHub's generated notes."""
+    if not generated_notes:
+        return ""
+    match = re.search(
+        r"(?ms)^##\s+What's Changed\s*\n(.*?)(?=\n##\s+|\n\*\*Full Changelog\*\*:|\Z)",
+        generated_notes,
+    )
+    if not match:
+        return ""
+    body = match.group(1).strip()
+    return f"## What's Changed\n{body}" if body else ""
+
+
+def format_commit_fallback_changes(commits):
+    """Formats commit titles as a deterministic fallback What's Changed list."""
+    titles = [c["title"].strip() for c in commits if c.get("title", "").strip()]
+    if not titles:
+        return ""
+    bullets = "\n".join(f"* {title}" for title in titles)
+    return f"## What's Changed\n{bullets}"
+
+
 def extract_github_footer(generated_notes, prev_tag, current_tag):
     """Extracts New Contributors and Full Changelog, dropping What's Changed."""
     sections = []
@@ -464,8 +487,8 @@ def extract_github_footer(generated_notes, prev_tag, current_tag):
     return "\n\n".join(sections)
 
 
-def fetch_github_release_footer(prev_tag, current_tag):
-    """Fetches GitHub's New Contributors and Full Changelog footer via gh api."""
+def fetch_github_generated_notes(prev_tag, current_tag):
+    """Fetches GitHub's auto-generated release notes markdown via gh api."""
     cmd = [
         "gh",
         "api",
@@ -479,16 +502,15 @@ def fetch_github_release_footer(prev_tag, current_tag):
         cmd.extend(["-f", f"previous_tag_name={prev_tag}"])
 
     try:
-        generated = subprocess.run(
+        return subprocess.run(
             cmd,
             check=True,
             text=True,
             stdout=subprocess.PIPE,
         ).stdout
-        return extract_github_footer(generated, prev_tag, current_tag)
     except subprocess.CalledProcessError as e:
-        print(f"⚠️ Warning: Failed to fetch GitHub release footer: {e}")
-        return extract_github_footer("", prev_tag, current_tag)
+        print(f"⚠️ Warning: Failed to fetch GitHub generated notes: {e}")
+        return ""
 
 
 def strip_markdown_fences(text):
@@ -692,8 +714,20 @@ def generate_release_notes(
         return None
 
 
-def assemble_release_notes(tag, gemini_notes, installation_notes, contributors, footer):
-    """Assembles the final markdown document with deterministic header and footer."""
+def assemble_release_notes(
+    tag,
+    gemini_notes,
+    installation_notes,
+    contributors,
+    footer,
+    fallback_changes="",
+):
+    """Assembles the final markdown document with deterministic header and footer.
+
+    When Gemini generation fails, fallback_changes is included before the
+    Installation block so the draft still contains a change summary even though
+    `dev/tools/release` omits `--generate-notes`.
+    """
     parts = [f"# 🚀 Announcing Agent Sandbox {tag}!"]
 
     if gemini_notes:
@@ -719,6 +753,9 @@ def assemble_release_notes(tag, gemini_notes, installation_notes, contributors, 
             )
         parts.append(body)
     else:
+        if fallback_changes and fallback_changes.strip():
+            parts.append(fallback_changes.strip())
+            parts.append("---")
         parts.append(installation_notes.strip())
         if contributors:
             parts.append(
@@ -765,7 +802,11 @@ def main():
     breaking_changes = get_breaking_changes(prs_data)
     enriched_commits = enrich_commits(commits, prs_data)
     release_signals = collect_release_signals(prev_tag, tag, enriched_commits)
-    footer = fetch_github_release_footer(prev_tag, tag)
+    github_generated_notes = fetch_github_generated_notes(prev_tag, tag)
+    footer = extract_github_footer(github_generated_notes, prev_tag, tag)
+    fallback_changes = extract_github_whats_changed(
+        github_generated_notes
+    ) or format_commit_fallback_changes(commits)
 
     installation_notes = f"""### Installation
 
@@ -815,6 +856,7 @@ pip install k8s-agent-sandbox=={tag.lstrip('v')}
         installation_notes=installation_notes,
         contributors=contributors,
         footer=footer,
+        fallback_changes=fallback_changes,
     )
 
     print(f"INFO: Saving release notes to {args.output}...")

@@ -77,6 +77,9 @@ func TestRunAsPolicy(t *testing.T) {
 		{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999", runAsDefaultUser: "1000:3000"},
 		{runAsUIDRange: "0-1999", runAsGIDRange: "0-2999", runAsDefaultUser: "0:2000"},
 		{runAsUIDRange: "0-1999", runAsGIDRange: "0-2999", runAsDefaultUser: "1000:0"},
+		// A mounted token file is often readable by every user in the sandbox,
+		// and whoever reads it can run commands as every allowed user.
+		{runAsUIDRange: "1000-1999", runAsGIDRange: "2000-2999", runAsDefaultUser: "1000:2000", authTokenFile: "/etc/sandboxd/token"},
 	} {
 		_, err = runAsPolicy(&cfg)
 		require.Error(t, err, cfg)

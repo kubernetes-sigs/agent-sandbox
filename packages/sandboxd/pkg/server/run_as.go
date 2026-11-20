@@ -15,8 +15,10 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -143,9 +145,8 @@ const (
 
 // checkRunAsPrivileges reports whether sandboxd holds what a RunAsPolicy needs,
 // so a daemon that lacks it fails at startup instead of on the first request.
-// It reads the effective set instead of checking for uid 0, because a root
-// daemon can have capabilities dropped and a non-root daemon can hold them
-// through file capabilities on its binary.
+// Being root is not enough, because a root daemon can have capabilities
+// dropped, so it also reads the effective set.
 func checkRunAsPrivileges() error {
 	procStatus, err := os.ReadFile("/proc/self/status")
 	if err != nil {
@@ -158,7 +159,7 @@ func checkRunAsPrivileges() error {
 // /proc/self/status.
 func checkRunAsCapabilities(procStatus string) error {
 	sets := map[string]uint64{}
-	var effectiveUID, noNewPrivs string
+	var effectiveUID string
 	for line := range strings.Lines(procStatus) {
 		name, value, ok := strings.Cut(line, ":")
 		if !ok {
@@ -177,9 +178,15 @@ func checkRunAsCapabilities(procStatus string) error {
 			if ids := strings.Fields(value); len(ids) > 1 {
 				effectiveUID = ids[1]
 			}
-		case name == "NoNewPrivs":
-			noNewPrivs = value
 		}
+	}
+	// Only root loses its capabilities when it changes user. A daemon that is
+	// not root would hold them through file capabilities on its binary. Its
+	// child keeps them when it changes user, and keeps them again when it
+	// executes that binary, so a request whose command is sandboxd would start
+	// a second daemon that has them.
+	if effectiveUID != "0" {
+		return errors.New("running commands as another user needs sandboxd to run as root (uid 0), with at least the capabilities CAP_SETUID, CAP_SETGID, CAP_KILL and CAP_CHOWN")
 	}
 	var missing []string
 	for _, c := range []struct {
@@ -201,14 +208,163 @@ func checkRunAsCapabilities(procStatus string) error {
 	// A command would inherit ambient capabilities, CAP_SETUID among them, and
 	// could use them to become root.
 	if sets["CapAmb"] != 0 {
-		return errors.New("running commands as another user is unsafe while sandboxd holds ambient capabilities, because every command would inherit them; run sandboxd as root, or grant its binary file capabilities and set no_new_privs")
-	}
-	// A non-root daemon holds the capabilities through file capabilities on its
-	// binary, and those go to whoever executes the binary. Without no_new_privs
-	// a command could start a second sandboxd with its own ranges and no token.
-	// With it, executing the binary gives a command nothing.
-	if effectiveUID != "0" && noNewPrivs != "1" {
-		return errors.New("running commands as another user from a sandboxd that is not root needs no_new_privs (allowPrivilegeEscalation: false in Kubernetes); without it any command can execute the sandboxd binary, gain its file capabilities and run commands as every other user")
+		return errors.New("running commands as another user is unsafe while sandboxd holds ambient capabilities, because every command would inherit them; start sandboxd without ambient capabilities")
 	}
 	return nil
+}
+
+// RunAsHelperArg is the first argument of sandboxd when it runs as the run-as
+// helper (see RunAsHelper) instead of as the daemon.
+const RunAsHelperArg = "run-as-helper"
+
+// The steps the run-as helper reports a failure of.
+const (
+	helperStepEnvironment = "environment"
+	helperStepUser        = "user"
+	helperStepCwdEscapes  = "cwd-escapes"
+	helperStepCwdResolve  = "cwd-resolve"
+	helperStepCwdEnter    = "cwd-enter"
+	helperStepExec        = "exec"
+)
+
+// helperStart is a command that runs as another user, from the moment sandboxd
+// started the run-as helper for it.
+type helperStart struct {
+	status *os.File
+	// command is the path of the command the helper executes.
+	command string
+}
+
+// startCommand starts cmd. A command that runs as the daemon's own user starts
+// directly, and the returned helperStart is nil.
+//
+// A command that runs as another user does not start with that user's
+// credential. sandboxd starts itself again as the run-as helper, still as
+// root, and the helper becomes the user and executes the command. A user can
+// signal a process as soon as it has that user's ID, and Go's fork blocks the
+// daemon until the child executes. A child that changed user itself could be
+// stopped at that point by the named user, which stalls the daemon. The
+// daemon's child now executes as root, where only root can signal it.
+func (s *ProcessServer) startCommand(cmd *exec.Cmd) (*helperStart, error) {
+	credential := cmd.SysProcAttr.Credential
+	if credential == nil {
+		return nil, cmd.Start()
+	}
+	statusRead, statusWrite, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	command := cmd.Path
+	groups := make([]string, len(credential.Groups))
+	for i, gid := range credential.Groups {
+		groups[i] = strconv.FormatUint(uint64(gid), 10)
+	}
+	// buildCommand left the requested working directory in cmd.Dir for the
+	// helper, which enters it as the user.
+	cmd.Args = append([]string{
+		"sandboxd", RunAsHelperArg,
+		strconv.FormatUint(uint64(credential.Uid), 10),
+		strconv.FormatUint(uint64(credential.Gid), 10),
+		strings.Join(groups, ","),
+		s.rootDir, cmd.Dir, command,
+	}, cmd.Args...)
+	// Execute the running binary itself, not a path that could now name
+	// another file.
+	cmd.Path = "/proc/self/exe"
+	cmd.Dir = ""
+	cmd.SysProcAttr.Credential = nil
+	// The helper starts as root, so it must not start in the command's
+	// environment: a variable such as LD_PRELOAD from the request would run
+	// the caller's code as root. The helper starts with no environment and
+	// reads the command's from a pipe, which no other user can read.
+	environment := cmd.Environ()
+	cmd.Env = []string{}
+	environmentRead, environmentWrite, err := os.Pipe()
+	if err != nil {
+		closeAll(statusRead, statusWrite)
+		return nil, err
+	}
+	// The extra files are descriptors 3 and 4 in the helper: where it reports
+	// why it could not run the command, and where it reads the environment.
+	cmd.ExtraFiles = []*os.File{statusWrite, environmentRead}
+	err = cmd.Start()
+	// The helper holds its own copies. A read of the status ends only once
+	// the helper's copy of the write end closes too.
+	closeAll(statusWrite, environmentRead)
+	if err != nil {
+		closeAll(statusRead, environmentWrite)
+		return nil, err
+	}
+	go func() {
+		// A helper that exits early leaves this write to fail, and its status
+		// already says why.
+		_, _ = environmentWrite.WriteString(strings.Join(environment, "\x00"))
+		_ = environmentWrite.Close()
+	}()
+	return &helperStart{status: statusRead, command: command}, nil
+}
+
+// result waits until the helper has executed the command or has exited, and
+// returns the gRPC error for a failure the helper reported. msg describes the
+// request in that error. A nil helperStart has nothing to wait for.
+func (h *helperStart) result(msg string) error {
+	if h == nil {
+		return nil
+	}
+	defer h.close()
+	report, _ := io.ReadAll(io.LimitReader(h.status, 64))
+	if len(report) == 0 {
+		// The pipe closed with nothing written: the helper executed the
+		// command, or a signal killed it first, as it could kill the command.
+		return nil
+	}
+	step, code, _ := strings.Cut(string(report), " ")
+	number, _ := strconv.Atoi(code)
+	errno := syscall.Errno(number)
+	switch step {
+	case helperStepCwdEscapes:
+		return status.Errorf(codes.PermissionDenied, "cwd: access denied: path escapes sandbox root")
+	case helperStepCwdResolve, helperStepCwdEnter:
+		switch {
+		case errno == syscall.ENOENT, errno == syscall.ENOTDIR && step == helperStepCwdResolve:
+			return status.Errorf(codes.NotFound, "cwd: path does not exist: %v", errno)
+		case errno == syscall.ENOTDIR:
+			return status.Errorf(codes.InvalidArgument, "cwd is not a directory")
+		case errno == syscall.EACCES:
+			return status.Errorf(codes.PermissionDenied, "cwd: the command's user cannot enter it: %v", errno)
+		}
+		return status.Errorf(codes.Internal, "cwd: %v", errno)
+	case helperStepExec:
+		return mapCommandError(&os.PathError{Op: "exec", Path: h.command, Err: errno}, msg)
+	}
+	return status.Errorf(codes.Internal, "%s: cannot run the command as its user (%s): %v", msg, step, errno)
+}
+
+func (h *helperStart) close() {
+	if h != nil {
+		_ = h.status.Close()
+	}
+}
+
+// startCommandAndWait starts cmd and returns once the command itself runs. For
+// a command that runs as another user, that is once the run-as helper has
+// executed it. The returned error is a gRPC status.
+func (s *ProcessServer) startCommandAndWait(ctx context.Context, cmd *exec.Cmd, msg string) error {
+	helper, err := s.startCommand(cmd)
+	if err != nil {
+		return mapCommandError(err, msg)
+	}
+	if helper == nil {
+		return nil
+	}
+	// The helper has the named user's ID before it executes the command, so
+	// that user can stop it there. Do not wait for it longer than the caller
+	// waits for the request.
+	stop := context.AfterFunc(ctx, func() { s.killProcessTree(context.Background(), cmd) })
+	err = helper.result(msg)
+	stop()
+	if err != nil {
+		_ = cmd.Wait()
+	}
+	return err
 }

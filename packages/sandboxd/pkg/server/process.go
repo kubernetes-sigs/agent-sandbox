@@ -97,7 +97,8 @@ func NewProcessServer(rootDir string, registry *processmanager.ProcessRegistry, 
 // buildCommand translates a ProcessConfig into an exec.Cmd with env merged
 // over the daemon environment and cwd confined to rootDir. It always sets
 // cmd.SysProcAttr, with the credential of the user the request names, so
-// callers add their own attributes to it instead of replacing it.
+// callers add their own attributes to it instead of replacing it. Callers
+// start the command with startCommand, which reads that credential.
 //
 // Unlike exec.CommandContext, this does NOT install Go's default context
 // cancellation handler (which only sends SIGKILL to the child PID). Callers
@@ -128,7 +129,11 @@ func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.Proces
 		}
 	}
 
-	if config.GetCwd() != "" {
+	if credential != nil {
+		// The run-as helper confines and enters the working directory as the
+		// command's user. See RunAsHelper.
+		cmd.Dir = config.GetCwd()
+	} else if config.GetCwd() != "" {
 		// Security check: confine the requested working directory to the
 		// sandbox root with the same symlink-aware sanitization the
 		// filesystem API uses; escaping paths get PERMISSION_DENIED.
@@ -189,12 +194,12 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 			}
 		}
 		if cmd.SysProcAttr.Credential != nil {
-			ptyFile, err = startPTYAsUser(cmd, size)
-		} else {
-			ptyFile, err = pty.StartWithSize(cmd, size)
+			ptyFile, err = s.startPTYAsUser(stream.Context(), cmd, size)
+		} else if ptyFile, err = pty.StartWithSize(cmd, size); err != nil {
+			err = mapCommandError(err, "failed to start command with PTY")
 		}
 		if err != nil {
-			return mapCommandError(err, "failed to start command with PTY")
+			return err
 		}
 		proc.PTY = ptyFile
 		proc.Stdin = ptyFile
@@ -231,9 +236,9 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 			return status.FromContextError(err).Err()
 		}
 
-		if err := cmd.Start(); err != nil {
+		if err := s.startCommandAndWait(stream.Context(), cmd, "failed to start command"); err != nil {
 			closeAll(stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW)
-			return mapCommandError(err, "failed to start command")
+			return err
 		}
 		// Process owns its write end copies; close ours so readers get EOF.
 		closeAll(stdoutW, stderrW, stdinR)
@@ -504,9 +509,11 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 		defer timer.Stop()
 		timeExpired = timer.C
 	}
-	if err := cmd.Start(); err != nil {
+	helper, err := s.startCommand(cmd)
+	if err != nil {
 		return nil, mapCommandError(err, "failed to execute command")
 	}
+	defer helper.close()
 	stdoutBuf.collect()
 	stderrBuf.collect()
 	defer func() {
@@ -523,6 +530,11 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
+	}
+	// The command has exited, so this does not wait. A command that ran as
+	// another user and never started reports why here.
+	if err := helper.result("failed to execute command"); err != nil {
+		return nil, err
 	}
 	reason := processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_EXITED
 	if outcome.timeLimitExceeded {
@@ -739,26 +751,28 @@ func (s *ProcessServer) ResizeTTY(_ context.Context, req *processv1.ResizeTTYReq
 
 // startPTYAsUser does what pty.StartWithSize does for a command that runs as
 // another user. pty.StartWithSize opens the terminal itself, which leaves no
-// point before the command starts at which chownStdio could reach it.
-func startPTYAsUser(cmd *exec.Cmd, size *pty.Winsize) (*os.File, error) {
+// point before the command starts at which chownStdio could reach it. The
+// returned error is a gRPC status.
+func (s *ProcessServer) startPTYAsUser(ctx context.Context, cmd *exec.Cmd, size *pty.Winsize) (*os.File, error) {
+	const msg = "failed to start command with PTY"
 	ptmx, tty, err := pty.Open()
 	if err != nil {
-		return nil, err
+		return nil, mapCommandError(err, msg)
 	}
 	defer func() { _ = tty.Close() }()
 	if err := chownStdio(cmd, tty); err != nil {
 		_ = ptmx.Close()
-		return nil, err
+		return nil, mapCommandError(err, msg)
 	}
 	if size != nil {
 		if err := pty.Setsize(ptmx, size); err != nil {
 			_ = ptmx.Close()
-			return nil, err
+			return nil, mapCommandError(err, msg)
 		}
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
 	cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty = true, true
-	if err := cmd.Start(); err != nil {
+	if err := s.startCommandAndWait(ctx, cmd, msg); err != nil {
 		_ = ptmx.Close()
 		return nil, err
 	}

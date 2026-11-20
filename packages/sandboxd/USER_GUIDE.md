@@ -333,8 +333,8 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 | `--execute-default-stderr-limit-bytes` | `0` | Default stderr capture limit per unary execution. |
 | `--execute-max-stderr-limit-bytes` | `0` | Maximum stderr capture limit per unary execution. |
 | `--auth-token-sha256` | (none) | Hex SHA-256 digest of the bearer token clients must send. See [Client authentication](#client-authentication). |
-| `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. |
-| `--run-as-uid-range` | (none) | Inclusive range of user IDs, as `<min>-<max>`, that a request may run its command as. Set it together with `--run-as-gid-range`, `--run-as-default-user` and an auth token. See [Running a command as another user](#running-a-command-as-another-user). |
+| `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. Refused together with the run-as flags. |
+| `--run-as-uid-range` | (none) | Inclusive range of user IDs, as `<min>-<max>`, that a request may run its command as. Set it together with `--run-as-gid-range`, `--run-as-default-user` and `--auth-token-sha256`. See [Running a command as another user](#running-a-command-as-another-user). |
 | `--run-as-gid-range` | (none) | Inclusive range of group IDs, as `<min>-<max>`, that a request may give its command. |
 | `--run-as-default-user` | (none) | User and group, as `<uid>:<gid>`, of a command whose request names no user. Both must be inside the ranges. Without the three flags, every request that names a user is refused. |
 | `--version` | | Print version info and exit. |
@@ -569,8 +569,8 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
   `--run-as-default-user`. The caller is then trusted to name the user, as it
   is already trusted to name the command, so whoever can call the API can run
   a command as any user in the range. Code inside the sandbox must not be able
-  to make that call, so `sandboxd` refuses to start with these flags and no
-  auth token. Keep the token out of the sandbox. See
+  to make that call, so `sandboxd` starts with these flags only when it has
+  `--auth-token-sha256`, which keeps the token out of the sandbox. See
   [Running a command as another user](#running-a-command-as-another-user).
 
 ## Client authentication
@@ -625,7 +625,8 @@ DIGEST=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
 Where a token must reach the daemon itself, mount it from a Secret and pass
 `--auth-token-file=<path>` instead; whitespace around the token is ignored,
 and a missing or empty file is a startup error. Set at most one of the two
-flags.
+flags. `sandboxd` refuses `--auth-token-file` together with the run-as flags
+(see [Running a command as another user](#running-a-command-as-another-user)).
 
 The token authenticates the client that drives the sandbox. It is defense in
 depth beside NetworkPolicy, not a replacement for it: it covers traffic a
@@ -664,31 +665,36 @@ says what is missing.
 - Pass `--run-as-uid-range=<min>-<max>`, `--run-as-gid-range=<min>-<max>` and
   `--run-as-default-user=<uid>:<gid>`. Both ranges are inclusive. Set all three
   flags or none.
-- Require a token from clients (see
+- Pass `--auth-token-sha256` (see
   [Client authentication](#client-authentication)). The caller names the user,
   so without a token any command in the sandbox could call the API on
-  localhost and run as every other user. Use `--auth-token-sha256`: the daemon
-  then holds only the digest. If you use `--auth-token-file` instead, no user
-  in the range may be able to read the file. A Kubernetes Secret volume is
-  mode `0644` unless you set `defaultMode`, so every user can read it.
-- Run `sandboxd` as root, or give it the capabilities `CAP_SETUID`,
-  `CAP_SETGID`, `CAP_KILL` and `CAP_CHOWN`. `CAP_SETUID` and `CAP_SETGID`
-  change the user and groups, `CAP_KILL` lets the daemon signal the command
-  afterwards, and `CAP_CHOWN` lets it give the command its pipes or terminal.
-  The published image runs as user `1000`, which holds none of them. A
-  container that runs as a non-root user does not hold the capabilities its
-  security context adds, so in Kubernetes set `runAsUser: 0` on the container
-  and keep the four capabilities.
+  localhost and run as every other user. `sandboxd` refuses
+  `--auth-token-file` with these flags: a mounted token file is often readable
+  by every user in the sandbox, and a Kubernetes Secret volume is mode `0644`
+  unless you set `defaultMode`. Every user can read the digest in the daemon's
+  command line, so use a long random token, as in the example in that section.
+- Run `sandboxd` as root, with the capabilities `CAP_SETUID`, `CAP_SETGID`,
+  `CAP_KILL` and `CAP_CHOWN`. `CAP_SETUID` and `CAP_SETGID` change the user and
+  groups, `CAP_KILL` lets the daemon signal the command afterwards, and
+  `CAP_CHOWN` lets it give the command its pipes or terminal. The published
+  image runs as user `1000`, so set the user in the security context.
 
-A daemon that is not root can hold the four capabilities only through file
-capabilities on its binary, and file capabilities go to whoever executes the
-binary. A command could then start a second `sandboxd` with its own ranges and
-no token. `sandboxd` therefore refuses to start with the flags set as a
-non-root user unless `no_new_privs` is set, which is
-`allowPrivilegeEscalation: false` in Kubernetes. With it, the daemon still
-gets the capabilities, as long as the container keeps the four in its security
-context, and a command that executes the binary gets none. `no_new_privs` also
-stops setuid programs such as `sudo` from gaining privileges in every command.
+Drop every other capability:
+
+```yaml
+containers:
+- name: runtime
+  securityContext:
+    runAsUser: 0
+    capabilities:
+      drop: ["ALL"]
+      add: ["SETUID", "SETGID", "KILL", "CHOWN"]
+```
+
+`sandboxd` does not run commands as another user when it is not root itself. A
+daemon that is not root would need file capabilities on its binary. Its child
+would keep them across the change of user, and a request whose command is the
+`sandboxd` binary would start a second daemon that has them.
 
 `sandboxd` applies these rules to every request:
 
@@ -702,21 +708,42 @@ stops setuid programs such as `sudo` from gaining privileges in every command.
   names a user fails that way.
 - The command gets exactly the named groups. It does not keep the daemon's
   supplementary groups, and an empty `supplementary_gids` leaves it with none.
-- The command holds no capabilities. To keep it that way, `sandboxd` refuses
-  to start with the flags set while it holds ambient capabilities, because
-  every command would inherit them.
+- The command holds no capabilities and cannot gain any. `sandboxd` sets
+  `no_new_privs` on every command, so a setuid program such as `sudo`, or a
+  file with capabilities, gives the command and its children nothing.
+  `sandboxd` also refuses to start with the flags set while it holds ambient
+  capabilities, because every command would inherit them.
 - `sandboxd` does not look the IDs up in `/etc/passwd`, so they need no entry
   there. The environment is the same as without a user: the daemon's own
-  environment plus `env_vars`. Set `HOME`, `USER` and similar variables in
-  `env_vars`.
-- `cwd` is confined to `--root-dir` as before. The named user must also be able
-  to enter the working directory, which is `--root-dir` when `cwd` is unset.
-  Otherwise the command fails to start with `PERMISSION_DENIED`.
+  environment plus `env_vars`, with `PWD` set to the working directory. Set
+  `HOME`, `USER` and similar variables in `env_vars`, and keep out of the
+  daemon's environment anything that a user must not read.
+- `cwd` is confined to `--root-dir` as before. `sandboxd` resolves and enters
+  it as the command's user, so that user must be able to enter the working
+  directory, which is `--root-dir` when `cwd` is unset. Otherwise the command
+  fails to start with `PERMISSION_DENIED`.
 - The named user owns the command's pipes or terminal, so the command can open
   `/dev/stdout`, `/dev/stderr` and its terminal by path.
 
-The REST file API does not take a user. It still reads and writes as the
-daemon's own user, whatever the flags.
+A process that leaves its process group, for example with `setsid`, outlives
+its request, as it does without a user. To end everything that a user still
+runs, run `kill -9 -1` as that user.
+
+The REST file API does not take a user. It reads and writes as the daemon's
+own user, which is root with these flags, and it follows symbolic links that
+stay inside `--root-dir`.
+
+- With only the four capabilities, file modes apply to it as they do to any
+  other user. It cannot read a file that only its owner may read, and it
+  cannot write into a directory that only its owner may write to. A file it
+  creates belongs to root.
+- With `CAP_DAC_OVERRIDE`, which a container holds unless it drops it, the
+  file API ignores file modes. A user can then point a symbolic link at
+  another user's file, and a file API call on the link reads or replaces that
+  file.
+
+Until the file API takes a user, read and write a user's files with a command
+that runs as that user, for example `cat` or `tee`.
 
 A runtime that predates `ProcessConfig.user` ignores the field and runs the
 command as its own user. Before relying on the field, confirm that the runtime

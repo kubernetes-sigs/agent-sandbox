@@ -1,0 +1,81 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# SandboxTemplate for the oma-runner-pool warm pool. Each pod runs the
+# managed-agents runner daemon on :8080; the controller claims one sandbox
+# per Agents API session and starts the session's executor (codex
+# exec-server) in it over a port-forward. The executor connects outbound to
+# the platform, so sandbox pods need egress to api.openai.com and
+# wss://codex-cloud-environments.chatgpt.com.
+#
+# The oai-env-key Secret is required: the executor authenticates with the
+# restricted environment key (CODEX_API_KEY). The application-side API key
+# stays in the controller process and must never be injected here —
+# agent-generated code inside the sandbox can read its environment.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: oma-runner-template
+spec:
+  podTemplate:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: "OnFailure"
+      # Makes the PVC-backed workspace group-writable for UID 1000.
+      securityContext:
+        fsGroup: 1000
+      containers:
+      - name: runner
+        image: oma-runner:v1
+        # kind-local image; for real clusters push to a registry (see README).
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 10
+        env:
+        - name: CODEX_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: oai-env-key
+              key: CODEX_API_KEY
+        - name: RUNNER_EXEC_BIN
+          value: codex
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+            ephemeral-storage: "2Gi"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  # The workspace PVC is retained across suspend/resume, so a session's
+  # files survive suspension even though the pod does not.
+  volumeClaimTemplatesPolicy: Overrides
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 5Gi

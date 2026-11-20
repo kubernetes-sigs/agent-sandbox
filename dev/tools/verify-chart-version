@@ -38,8 +38,8 @@ CHART_PATH = "helm/Chart.yaml"
 # directives that target helm/.
 GENERATED_CHART_PATHS = [
     "helm/crds/",
-    "helm/templates/rbac.generated.yaml",
-    "helm/templates/extensions-rbac.generated.yaml",
+    "helm/files/rbac.generated.yaml",
+    "helm/files/extensions-rbac.generated.yaml",
 ]
 
 VERSION_RE = re.compile(r"^version:\s*[\"']?(\d+)\.(\d+)\.(\d+)[\"']?\s*$", re.MULTILINE)

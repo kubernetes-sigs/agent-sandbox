@@ -77,7 +77,7 @@ class ChartVersionTestCase(unittest.TestCase):
         self.git("config", "commit.gpgsign", "false")
 
         self.write_chart("0.1.0")
-        self.write("helm/templates/rbac.generated.yaml", "kind: ClusterRole\n")
+        self.write("helm/files/rbac.generated.yaml", "kind: ClusterRole\n")
         self.git("add", "-A")
         self.git("commit", "-m", "base")
 
@@ -107,7 +107,7 @@ class ChartVersionTestCase(unittest.TestCase):
 
     def change_generated_content(self):
         self.write(
-            "helm/templates/rbac.generated.yaml",
+            "helm/files/rbac.generated.yaml",
             "kind: ClusterRole\n# a newly generated rule\n",
         )
 
@@ -210,7 +210,7 @@ class TestPullBaseSha(ChartVersionTestCase):
     def land_on_main(self, version, generated):
         """Commit on main after feature forked; returns the new tip."""
         self.git("checkout", "-q", "main")
-        self.write("helm/templates/rbac.generated.yaml", generated)
+        self.write("helm/files/rbac.generated.yaml", generated)
         self.write_chart(version)
         self.git("add", "-A")
         self.git("commit", "-m", "concurrent change on main")

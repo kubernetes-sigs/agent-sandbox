@@ -1,4 +1,4 @@
-{{- if .Values.controller.extensions }}
+{{- if and .Values.controller.extensions (not .Values.controller.watchNamespace) }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

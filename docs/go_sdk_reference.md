@@ -1312,7 +1312,7 @@ ProcessID returns the daemon\-local virtual ID, not an OS PID. It cannot identif
 func (h *ProcessHandle) Recv() (*ProcessEvent, error)
 ```
 
-Recv returns the next stdout, stderr or exit event. An exit event must be followed by io.EOF to confirm that the RPC also completed successfully. Nonzero exit codes are results; RPC and protocol failures remain errors. Only one Recv may be active; a second returns ErrConcurrentRecv without ending the stream. SendSignal and Close may run concurrently with Recv.
+Recv returns the next stdout, stderr or exit event, skipping keep\-alives. An exit event must be followed by io.EOF to confirm that the RPC also completed successfully. Nonzero exit codes are results; RPC and protocol failures remain errors. Only one Recv may be active; a second returns ErrConcurrentRecv without ending the stream. SendSignal and Close may run concurrently with Recv.
 
 <a name="ProcessHandle.SendSignal"></a>
 #### func \(\*ProcessHandle\) [SendSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)

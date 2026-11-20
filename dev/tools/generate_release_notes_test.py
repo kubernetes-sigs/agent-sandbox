@@ -138,9 +138,10 @@ class CommitClassificationAndSignalsTest(unittest.TestCase):
         )
 
     def test_truncate_text_on_newline(self):
-        text = "line1\nline2\nline3\nline4"
-        truncated = generate_release_notes.truncate_text(text, 12)
-        self.assertTrue(truncated.startswith("line1\nline2\n... [diff truncated,"))
+        text = "line1\nline2\nline3\nline4\n" + ("x" * 100)
+        truncated = generate_release_notes.truncate_text(text, 60)
+        self.assertLessEqual(len(truncated), 60)
+        self.assertIn("[diff truncated,", truncated)
 
     def test_diff_file_priority_orders_api_code_examples_docs(self):
         paths = [
@@ -201,6 +202,18 @@ class CommitClassificationAndSignalsTest(unittest.TestCase):
         # Fits inside max_chars, so it is not needlessly truncated by max_file_chars.
         self.assertNotIn("[diff truncated,", result)
         self.assertEqual(result, single.strip())
+
+    def test_budget_commit_diff_stays_within_max_chars_with_many_omitted_files(self):
+        sections = [
+            f"diff --git a/pkg/sub/file_{i:04d}.go b/pkg/sub/file_{i:04d}.go\n"
+            + ("+some changed line in this file\n" * 20)
+            for i in range(500)
+        ]
+        result = generate_release_notes.budget_commit_diff(
+            "\n".join(sections), max_chars=2000, max_file_chars=500
+        )
+        self.assertLessEqual(len(result), 2000)
+        self.assertIn("file diff(s) omitted due to commit budget", result)
 
     def test_get_commits_uses_first_parent(self):
         fake_stdout = (

@@ -192,15 +192,23 @@ def get_commit_stat(sha):
 
 
 def truncate_text(text, max_chars):
-    """Truncates text on a newline boundary when it exceeds max_chars."""
+    """Truncates text on a newline boundary so the result fits within max_chars."""
     if max_chars <= 0:
         return ""
     if len(text) <= max_chars:
         return text
-    omitted = len(text) - max_chars
-    cut = text.rfind("\n", 0, max_chars)
-    prefix = text[:cut] if cut > 0 else text[:max_chars]
-    return f"{prefix}\n... [diff truncated, {omitted} chars omitted]"
+    # Account for the suffix length so the returned string stays within max_chars.
+    suffix = f"\n... [diff truncated, {len(text)} chars omitted]"
+    if len(suffix) >= max_chars:
+        return text[:max_chars]
+    body_limit = max_chars - len(suffix)
+    cut = text.rfind("\n", 0, body_limit)
+    prefix = text[:cut] if cut > 0 else text[:body_limit]
+    omitted = len(text) - len(prefix)
+    suffix = f"\n... [diff truncated, {omitted} chars omitted]"
+    if len(prefix) + len(suffix) > max_chars:
+        prefix = prefix[: max(0, max_chars - len(suffix))]
+    return prefix + suffix
 
 
 def split_diff_by_file(diff_text):
@@ -268,30 +276,38 @@ def budget_commit_diff(
     if len(full_joined) <= max_chars:
         return full_joined
 
+    max_notice = (
+        f"... [{len(sections)} file diff(s) omitted due to commit budget; "
+        "see changed files above]"
+    )
+    content_budget = max(0, max_chars - len(max_notice) - 1)
+
     kept = []
-    omitted_paths = []
+    omitted_count = 0
     used = 0
-    for path, sec in sections:
+    for _, sec in sections:
         separator = 1 if kept else 0
-        remaining = max_chars - used - separator
+        remaining = content_budget - used - separator
         if len(sec) <= min(max_file_chars, remaining):
             kept.append(sec)
             used += separator + len(sec)
             continue
         if remaining < MIN_TRUNCATED_FILE_DIFF_CHARS:
-            omitted_paths.append(path or "(unknown)")
+            omitted_count += 1
             continue
         cap = min(max_file_chars, remaining)
         chunk = truncate_text(sec, cap)
         kept.append(chunk)
         used += separator + len(chunk)
 
-    if omitted_paths:
-        kept.append(
-            f"... [{len(omitted_paths)} file diff(s) omitted due to commit budget: "
-            + ", ".join(omitted_paths)
-            + "]"
+    if omitted_count:
+        notice = (
+            f"... [{omitted_count} file diff(s) omitted due to commit budget; "
+            "see changed files above]"
         )
+        separator = 1 if kept else 0
+        if used + separator + len(notice) <= max_chars:
+            kept.append(notice)
     return "\n".join(kept)
 
 

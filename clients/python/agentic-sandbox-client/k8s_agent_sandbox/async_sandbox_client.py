@@ -369,16 +369,17 @@ class AsyncSandboxClient(Generic[T]):
                 claim_rv = metadata.get("resourceVersion")
                 claim_uid = metadata.get("uid")
             wait_kwargs = {} if generated_name else {
-                "expected_uid": claim_uid, "initial_claim": created_claim,
+                "initial_claim": created_claim,
             }
             sandbox_id = await self._wait_for_claim_ready(
                 claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv,
-                **wait_kwargs,
+                expected_uid=claim_uid, **wait_kwargs,
             )
 
             async with self._lock:
                 existing = self._active_connection_sandboxes.get((namespace, claim_name))
-            if existing and existing.is_active and existing.sandbox_id == sandbox_id:
+            if (existing and existing.is_active and existing.sandbox_id == sandbox_id
+                    and existing._claim_uid == claim_uid):
                 # Preserve extension state across serial retries on this client.
                 return existing
 
@@ -391,6 +392,7 @@ class AsyncSandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
                 **({"file_config": self.file_config} if self.file_config is not None else {}),
             )
+            sandbox._claim_uid = claim_uid
             self._attach_handle(sandbox)
         except (Exception, asyncio.CancelledError):
             if cleanup_generated:
@@ -481,10 +483,17 @@ class AsyncSandboxClient(Generic[T]):
                 f"in namespace '{namespace}': {e}"
             ) from e
 
-        # Reuse the tracked handle only while it is active and still bound to
-        # the claim's current Sandbox.
-        if existing and existing.is_active and existing.sandbox_id == sandbox_id:
-            return existing
+        claim_uid = claim_object["metadata"].get("uid")
+        # The Claim and Sandbox names can both survive deletion and recreation.
+        if (existing and existing.is_active and existing.sandbox_id == sandbox_id
+                and existing._claim_uid == claim_uid):
+            async with self._lock:
+                if self._active_connection_sandboxes.get(key) is existing:
+                    return existing
+            raise SandboxNotFoundError(
+                f"SandboxClaim '{claim_name}' changed during lookup in "
+                f"namespace '{namespace}'; retry get_sandbox()."
+            )
 
         # Close the inactive or stale handle. A failed close must not block its
         # replacement.
@@ -506,20 +515,30 @@ class AsyncSandboxClient(Generic[T]):
             k8s_helper=self.k8s_helper,
             **({"file_config": self.file_config} if self.file_config is not None else {}),
         )
+        new_handle._claim_uid = claim_uid
         self._attach_handle(new_handle)
 
-        # A concurrent call may have tracked a handle for this Sandbox while
-        # this one awaited the API server. Share it rather than leave the new
-        # handle open and untracked.
+        # Share a concurrently registered handle for the same Claim UID.
+        # A different UID requires a fresh lookup so an older response cannot
+        # replace the handle registered for a recreated Claim.
+        handle: T | None
         async with self._lock:
             tracked = self._active_connection_sandboxes.get(key)
-            if tracked and tracked.is_active and tracked.sandbox_id == sandbox_id:
+            if (tracked and tracked.is_active and tracked.sandbox_id == sandbox_id
+                    and tracked._claim_uid == claim_uid):
                 handle = tracked
+            elif tracked is not None and tracked is not existing:
+                handle = None
             else:
                 self._active_connection_sandboxes[key] = new_handle
                 handle = new_handle
         if handle is not new_handle:
             await new_handle.close_connection()
+        if handle is None:
+            raise SandboxNotFoundError(
+                f"SandboxClaim '{claim_name}' changed during lookup in "
+                f"namespace '{namespace}'; retry get_sandbox()."
+            )
         return handle
 
     async def _claim_or_sandbox_gone(self, claim_name: str, sandbox_id: str, namespace: str) -> bool:
@@ -652,14 +671,16 @@ class AsyncSandboxClient(Generic[T]):
             )
             with kube_config_dir_cm as kube_config_dir:
                 helper = K8sHelper(api_client=atexit_api_client, kube_config_temp_dir=kube_config_dir)
-                for ns, claim_name in (key for key, _ in tracked):
+                for (ns, claim_name), sandbox in tracked:
                     if (ns, claim_name) in explicit_claims:
                         continue
                     try:
+                        delete_kwargs: dict[str, Any] = {"expected_uid": sandbox._claim_uid} if sandbox._claim_uid is not None else {}
                         helper.delete_sandbox_claim(
                             claim_name,
                             ns,
                             _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
+                            **delete_kwargs,
                         )
                     except Exception as e:
                         if sys.stderr is not None:

@@ -248,15 +248,16 @@ class SandboxClient(Generic[T]):
                 claim_rv = metadata.get("resourceVersion")
                 claim_uid = metadata.get("uid")
             wait_kwargs = {} if generated_name else {
-                "expected_uid": claim_uid, "initial_claim": created_claim,
+                "initial_claim": created_claim,
             }
             sandbox_id = self._wait_for_claim_ready(
                 claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv,
-                **wait_kwargs,
+                expected_uid=claim_uid, **wait_kwargs,
             )
 
             existing = self._active_connection_sandboxes.get((namespace, claim_name))
-            if existing and existing.is_active and existing.sandbox_id == sandbox_id:
+            if (existing and existing.is_active and existing.sandbox_id == sandbox_id
+                    and existing._claim_uid == claim_uid):
                 # Preserve extension state (for example snapshot trigger cleanup).
                 return existing
 
@@ -269,6 +270,7 @@ class SandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
                 **({"file_config": self.file_config} if self.file_config is not None else {}),
             )
+            sandbox._claim_uid = claim_uid
         except Exception:
             if cleanup_generated:
                 # Preserve legacy rollback even if the create response was lost.
@@ -329,8 +331,10 @@ class SandboxClient(Generic[T]):
                 existing.close_connection()
             raise SandboxNotFoundError(f"Sandbox claim '{claim_name}' not found or resolution failed in namespace '{namespace}': {e}") from e
 
-        # Reuse the tracked handle only while it is active and still bound to the claim's current Sandbox
-        if existing and existing.is_active and existing.sandbox_id == sandbox_id:
+        claim_uid = claim_object["metadata"].get("uid")
+        # The Claim and Sandbox names can both survive deletion and recreation.
+        if (existing and existing.is_active and existing.sandbox_id == sandbox_id
+                and existing._claim_uid == claim_uid):
             return existing
 
         # Close the inactive or stale handle. A failed close must not block its replacement.
@@ -350,6 +354,7 @@ class SandboxClient(Generic[T]):
             k8s_helper=self.k8s_helper,
             **({"file_config": self.file_config} if self.file_config is not None else {}),
         )
+        new_handle._claim_uid = claim_uid
 
         new_handle._on_terminated = functools.partial(self._untrack, self._active_connection_sandboxes)
         self._active_connection_sandboxes[key] = new_handle

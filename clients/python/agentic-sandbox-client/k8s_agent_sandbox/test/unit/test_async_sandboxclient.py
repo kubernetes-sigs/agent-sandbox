@@ -118,7 +118,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         env = {"FOO": "bar", "DEBUG": "true"}
 
         with patch.object(self.client, "_create_claim", new_callable=AsyncMock) as mock_create:
-            mock_create.return_value = {"metadata": {"resourceVersion": "12345"}}
+            mock_create.return_value = {"metadata": {"resourceVersion": "12345", "uid": "uid-claim"}}
 
             await self.client.create_sandbox("test-warmpool", "test-namespace", env=env)
 
@@ -133,7 +133,8 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
                 env=env,
             )
             self.mock_k8s_helper.wait_for_claim_ready.assert_awaited_once_with(
-                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345"
+                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345",
+                expected_uid="uid-claim",
             )
 
     async def test_create_sandbox_failure_cleanup(self):
@@ -168,10 +169,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
         mock_sandbox.sandbox_id = "resolved-id"
+        mock_sandbox._claim_uid = "uid-claim"
         mock_sandbox.terminate = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
 
-        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {"uid": "uid-claim"}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -410,9 +412,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
     def test_atexit_cleanup_deletes_tracked_claims(self):
         first_sandbox = MagicMock()
+        first_sandbox._claim_uid = "uid-abc"
         first_sandbox.close_connection = AsyncMock()
         first_sandbox._close_for_atexit = MagicMock()
         second_sandbox = MagicMock()
+        second_sandbox._claim_uid = "uid-xyz"
         second_sandbox.close_connection = AsyncMock()
         second_sandbox._close_for_atexit = MagicMock()
         registry = {
@@ -426,10 +430,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             AsyncSandboxClient._atexit_cleanup(registry, set(), None)
 
         mock_helper_instance.delete_sandbox_claim.assert_any_call(
-            "claim-abc", "default", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+            "claim-abc", "default", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS, expected_uid="uid-abc"
         )
         mock_helper_instance.delete_sandbox_claim.assert_any_call(
-            "claim-xyz", "other-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+            "claim-xyz", "other-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS, expected_uid="uid-xyz"
         )
         first_sandbox._close_for_atexit.assert_called_once_with()
         second_sandbox._close_for_atexit.assert_called_once_with()
@@ -491,6 +495,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         injected_api_client.cookie = None
         client, exit_hook = self._exit_hook_for(injected_api_client)
         client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")]._claim_uid = "uid-abc"
         mock_helper_instance = MagicMock()
 
         with patch(
@@ -505,7 +510,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_tmpdir.assert_not_called()
         self.assertIsNone(MockHelper.call_args.kwargs["kube_config_temp_dir"])
         mock_helper_instance.delete_sandbox_claim.assert_called_once_with(
-            "claim-abc", "tenant-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+            "claim-abc", "tenant-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS, expected_uid="uid-abc"
         )
 
     def test_atexit_cleanup_reflects_injected_client_state_at_cleanup_time_not_construction_time(self):
@@ -2480,7 +2485,10 @@ async def main():
         connection_config=SandboxDirectConnectionConfig(api_url="http://unused:8080"),
         cleanup=True,
     )
-    client._active_connection_sandboxes[("default", "claim-abc")] = object()
+    client._active_connection_sandboxes[("default", "claim-abc")] = client.sandbox_class(
+        claim_name="claim-abc", sandbox_id="sandbox-abc",
+        connection_config=client.connection_config, k8s_helper=client.k8s_helper,
+    )
 
 asyncio.run(main())
 # No explicit close()/delete_all() — relying entirely on the atexit hook.

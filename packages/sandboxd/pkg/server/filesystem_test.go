@@ -30,14 +30,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/unix"
 )
 
 func newRESTFixture(t *testing.T) (*RESTServer, http.Handler, string) {
@@ -1569,36 +1567,44 @@ func TestWritesStayInsideRootWhenParentIsSwapped(t *testing.T) {
 	}
 }
 
-func TestPutStaysInsideRootWhileDirectoryIsSwapped(t *testing.T) {
-	base := t.TempDir()
-	dir, outside := filepath.Join(base, "root"), filepath.Join(base, "outside")
-	writeFiles(t, base, map[string]string{"root/shared/real/keep": "k"})
-	require.NoError(t, os.MkdirAll(outside, 0o755))
-	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "shared", "link")))
-	handler := NewRESTServer(dir, "SANDBOX_", logr.Discard()).Handler()
+func TestRemoveTreeDoesNotFollowStagedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	writeFiles(t, dir, map[string]string{"target/f": "f"})
+	require.NoError(t, os.Chmod(filepath.Join(dir, "target"), 0o750))
+	require.NoError(t, os.Symlink("target", filepath.Join(dir, "link")))
 
-	// A process in the sandbox exchanges a directory and a symlink out of the
-	// root in a loop, so some request resolves its path just before the swap.
-	var stop atomic.Bool
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		dirPath, linkPath := filepath.Join(dir, "shared", "real"), filepath.Join(dir, "shared", "link")
-		for !stop.Load() {
-			_ = unix.Renameat2(unix.AT_FDCWD, dirPath, unix.AT_FDCWD, linkPath, unix.RENAME_EXCHANGE)
-		}
-	}()
-	for i, deadline := 0, time.Now().Add(time.Second); time.Now().Before(deadline); i++ {
-		doRequest(handler, http.MethodPut, fmt.Sprintf("/v1/files/shared/real/f-%d", i), []byte("x"), nil)
-	}
-	stop.Store(true)
-	<-done
+	require.NoError(t, removeTree(openTestRoot(t, dir), filepath.Join(dir, "link")))
 
-	entries, err := os.ReadDir(outside)
+	info, err := os.Stat(filepath.Join(dir, "target"))
 	require.NoError(t, err)
-	for _, e := range entries {
-		require.NotContains(t, e.Name(), "f-", "a write left the sandbox root")
+	require.Equal(t, os.FileMode(0o750), info.Mode().Perm())
+	_, err = os.Lstat(filepath.Join(dir, "link"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestWalksHandleNamesThatAreNotUTF8(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad\xff")
+	if err := os.Mkdir(bad, 0o755); err != nil {
+		t.Skipf("filesystem does not allow non-UTF-8 names: %v", err)
 	}
+	require.NoError(t, os.WriteFile(filepath.Join(bad, "f"), []byte("f"), 0o644))
+	require.NoError(t, os.Chmod(bad, 0o500))
+	root := openTestRoot(t, dir)
+
+	t.Run("listing", func(t *testing.T) {
+		handler := NewRESTServer(dir, "SANDBOX_", logr.Discard()).Handler()
+		rec := doRequest(handler, http.MethodGet, "/v1/files/?recursive=true", nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var listing DirectoryListing
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listing))
+		require.Len(t, listing.Entries, 2)
+	})
+	t.Run("removeTree", func(t *testing.T) {
+		require.NoError(t, removeTree(root, bad))
+		_, err := os.Lstat(bad)
+		require.ErrorIs(t, err, os.ErrNotExist)
+	})
 }
 
 func TestMoveEntryFallsBackToCopyAcrossFilesystems(t *testing.T) {

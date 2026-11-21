@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,23 +398,23 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 	requestPath := r.PathValue("path")
 	entries := []FileEntry{}
 	start := rootRel(root, target)
-	// WalkDir visits each directory's entries in name order and does not
+	// walkRoot visits each directory's entries in name order and does not
 	// follow symlinks, so a link to a directory is listed but never entered.
-	err := fs.WalkDir(root.FS(), filepath.ToSlash(start), func(p string, d fs.DirEntry, walkErr error) error {
+	err := walkRoot(root, start, func(p string, d fs.DirEntry, walkErr error) error {
 		if err := r.Context().Err(); err != nil {
 			return err
 		}
-		if p == filepath.ToSlash(start) {
+		if p == start {
 			return walkErr
 		}
 		if walkErr != nil {
 			return nil // Unreadable subdirectory: keep it listed, without contents.
 		}
-		rel, err := filepath.Rel(start, filepath.FromSlash(p))
+		rel, err := filepath.Rel(start, p)
 		if err != nil {
 			return err
 		}
-		entry, ok := s.fileEntry(root, filepath.FromSlash(p), filepath.ToSlash(rel), filepath.Join(requestPath, rel))
+		entry, ok := s.fileEntry(root, p, filepath.ToSlash(rel), filepath.Join(requestPath, rel))
 		if !ok {
 			return nil
 		}
@@ -1263,7 +1264,7 @@ func copyEntry(root *os.Root, src, dst string) error {
 // directory owner-writable, so a read-only one does not block removal.
 func removeTree(root *os.Root, path string) error {
 	rel := rootRel(root, path)
-	_ = fs.WalkDir(root.FS(), filepath.ToSlash(rel), func(p string, d fs.DirEntry, walkErr error) error {
+	_ = walkRoot(root, rel, func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr == nil && d.IsDir() {
 			if info, err := root.Lstat(p); err == nil {
 				_ = root.Chmod(p, info.Mode().Perm()|0o700)
@@ -1274,16 +1275,66 @@ func removeTree(root *os.Root, path string) error {
 	return root.RemoveAll(rel)
 }
 
+// readDirIn returns the entries of directory rel below root, sorted by name.
+func readDirIn(root *os.Root, rel string) ([]fs.DirEntry, error) {
+	dir, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, err
+}
+
+// walkRoot is filepath.WalkDir through root: start and the paths fn receives
+// are relative to root, and symlinks are not followed. fs.WalkDir over
+// root.FS() would reject names that are not valid UTF-8.
+func walkRoot(root *os.Root, start string, fn fs.WalkDirFunc) error {
+	info, err := root.Lstat(start)
+	if err != nil {
+		err = fn(start, nil, err)
+	} else {
+		err = walkRootDir(root, start, fs.FileInfoToDirEntry(info), fn)
+	}
+	if err == fs.SkipDir || err == fs.SkipAll {
+		return nil
+	}
+	return err
+}
+
+func walkRootDir(root *os.Root, p string, d fs.DirEntry, fn fs.WalkDirFunc) error {
+	if err := fn(p, d, nil); err != nil || !d.IsDir() {
+		if err == fs.SkipDir && d.IsDir() {
+			err = nil
+		}
+		return err
+	}
+	entries, err := readDirIn(root, p)
+	if err != nil {
+		if err = fn(p, d, err); err != nil {
+			if err == fs.SkipDir {
+				err = nil
+			}
+			return err
+		}
+	}
+	for _, entry := range entries {
+		if err := walkRootDir(root, filepath.Join(p, entry.Name()), entry, fn); err != nil {
+			if err == fs.SkipDir {
+				break
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 // copyTree copies the entries of directory rel, a path below root, into the
 // existing directory dst, a resolved path below root, then sets dst to mode. The mode comes last so a
 // read-only source directory does not block writing its children.
 func copyTree(root *os.Root, rel, dst string, mode os.FileMode) error {
-	dir, err := root.Open(rel)
-	if err != nil {
-		return err
-	}
-	entries, err := dir.ReadDir(-1)
-	_ = dir.Close()
+	entries, err := readDirIn(root, rel)
 	if err != nil {
 		return err
 	}

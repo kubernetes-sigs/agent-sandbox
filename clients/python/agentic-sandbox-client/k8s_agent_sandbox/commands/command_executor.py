@@ -26,7 +26,7 @@ from k8s_agent_sandbox.models import (
 )
 from k8s_agent_sandbox.trace_manager import trace, trace_span
 
-# Extra time the client waits beyond command_timeout, so the response the
+# Extra time the client waits beyond an execution limit, so the response the
 # runtime sends after killing a timed-out command still arrives.
 _COMMAND_TIMEOUT_MARGIN_SECONDS = 10
 
@@ -39,10 +39,12 @@ _DEFAULT_GRPC_RECEIVE_BYTES = 4 * 1024 * 1024
 _EXECUTE_RESPONSE_OVERHEAD_BYTES = 1024
 
 
-def _validate_rpc_timeout(timeout: float) -> float:
+def _validate_rpc_timeout(timeout: float, time_limit: float | None = None) -> float:
     value = _RPC_TIMEOUT.validate_python(timeout)
     if value <= 0:
         raise ValueError("timeout must be positive")
+    if time_limit is not None:
+        value = max(value, time_limit + _COMMAND_TIMEOUT_MARGIN_SECONDS)
     # Python gRPC adds the current Unix epoch before converting the deadline.
     # Keep that absolute timestamp within signed nanoseconds, with headroom.
     if value > _MAX_RPC_DEADLINE_SECONDS - time.time() - _RPC_DEADLINE_MARGIN_SECONDS:
@@ -272,8 +274,8 @@ class CommandExecutor:
 
         Args:
             command: The shell command to run in the sandbox.
-            timeout: Positive, finite gRPC deadline in seconds. This wait is
-                independent of time_limit; allow time for execution and result
+            timeout: Positive, finite gRPC wait in seconds. When time_limit is
+                set, the wait is at least time_limit plus 10 seconds for result
                 delivery. The absolute Unix deadline must fit in signed 64-bit
                 nanoseconds with 60 seconds of headroom. Router and deployment
                 timeouts also apply.
@@ -298,6 +300,11 @@ class CommandExecutor:
         Transport errors raise RuntimeError with the gRPC error as the cause.
         Legacy runtimes and servers without ExecuteWithLimits raise
         NotImplementedError. The SDK never retries or falls back to Execute.
+
+        Use run(command_timeout=...) for ExecutionResult and the portable
+        timeout exit code 124. Use run_with_limits() for per-stream budgets
+        and termination diagnostics, including the daemon's actual exit code
+        (usually 137 when sandboxd kills the process after a time limit).
         """
         sandboxd = self.connector.is_sandboxd()
         if not sandboxd:
@@ -309,7 +316,7 @@ class CommandExecutor:
             stderr_limit_bytes=stderr_limit_bytes,
         )
         _check_response_capacity(limits, self.connector.connection_config)
-        timeout = _validate_rpc_timeout(timeout)
+        timeout = _validate_rpc_timeout(timeout, limits.time_limit)
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.command.executable", _extract_executable(command))

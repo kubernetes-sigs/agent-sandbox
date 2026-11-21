@@ -216,7 +216,7 @@ async def test_daemon_independent_quotas_and_utf8(client):
 @pytest.mark.asyncio
 async def test_daemon_execution_timeout_keeps_diagnostics(client):
     run, case = client
-    result = await run(_slow(), timeout=5, time_limit=0.3)
+    result = await run(_slow(), timeout=0.1, time_limit=0.3)
     assert result.stdout == "before"
     assert result.stderr == "diagnostic"
     assert result.exit_code == 137
@@ -231,7 +231,7 @@ async def test_daemon_execution_timeout_keeps_diagnostics(client):
 async def test_daemon_transport_deadline_preserves_error(client):
     run, case = client
     with pytest.raises(RuntimeError) as raised:
-        await run(_slow(), timeout=0.3, time_limit=3)
+        await run(_slow(), timeout=0.3)
     error = raised.value.__cause__
     assert isinstance(error, grpc.RpcError)
     assert error.code() in (grpc.StatusCode.DEADLINE_EXCEEDED, grpc.StatusCode.CANCELLED)

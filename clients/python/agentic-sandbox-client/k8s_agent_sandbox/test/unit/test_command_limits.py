@@ -27,7 +27,7 @@ import pytest
 from pydantic import ValidationError
 
 from k8s_agent_sandbox.commands.async_command_executor import AsyncCommandExecutor
-from k8s_agent_sandbox.commands.command_executor import CommandExecutor
+from k8s_agent_sandbox.commands.command_executor import CommandExecutor, _bounded_execute_request
 from k8s_agent_sandbox.commands._process_stubs import process_pb2 as pb
 from k8s_agent_sandbox.models import (
     BoundedExecutionResult, ExecutionLimits, SandboxdInClusterConnectionConfig,
@@ -124,14 +124,35 @@ async def test_minimum_time_and_byte_limits(bounded):
     assert request.stderr_limit_bytes == 2
 
 
-@pytest.mark.asyncio
-async def test_largest_representable_time_limit(bounded):
-    run, _, stub = bounded
+def test_largest_representable_time_limit():
     limit = math.nextafter((2**63 - 1) / 1e9, 0)
-    await run(time_limit=limit)
-    request = stub.ExecuteWithLimits.call_args.args[0]
+    request = _bounded_execute_request(
+        pb, "true", ExecutionLimits(time_limit=limit), None, None,
+    )
     assert 0 < request.time_limit.ToNanoseconds() <= 2**63 - 1
     assert request.time_limit.ToNanoseconds() == round(limit * 1e9)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options,expected", [
+    ({"time_limit": 300}, 310),
+    ({"timeout": 0.1, "time_limit": 0.3}, 10.3),
+    ({"timeout": 400, "time_limit": 300}, 400),
+])
+async def test_rpc_wait_includes_execution_and_result_delivery(bounded, options, expected):
+    run, _, stub = bounded
+    await run(**options)
+    assert stub.ExecuteWithLimits.call_args.kwargs == {"timeout": expected}
+
+
+@pytest.mark.asyncio
+async def test_execution_limit_must_fit_absolute_rpc_deadline(bounded):
+    run, connector, stub = bounded
+    limit = math.nextafter((2**63 - 1) / 1e9, 0)
+    with pytest.raises(ValueError, match="deadline"):
+        await run(time_limit=limit)
+    connector.connect.assert_not_called()
+    stub.ExecuteWithLimits.assert_not_called()
 
 
 @pytest.mark.asyncio

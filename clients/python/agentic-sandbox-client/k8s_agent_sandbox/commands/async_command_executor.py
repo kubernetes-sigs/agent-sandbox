@@ -131,14 +131,17 @@ class AsyncCommandExecutor:
     ) -> BoundedExecutionResult:
         """Run a shell command with sandboxd's execution and output budgets.
 
-        Async mirror of :meth:`CommandExecutor.run_with_limits`. timeout is
-        the independent gRPC deadline in seconds. time_limit bounds execution,
+        Async mirror of :meth:`CommandExecutor.run_with_limits`. The gRPC wait
+        is at least time_limit plus 10 seconds when that limit is set.
+        time_limit bounds execution,
         including launch and output collection. Each stream retains its own
         byte-limited prefix and decodes it as UTF-8 with replacement. Unset
         limits inherit deployment policy. Transport errors raise RuntimeError;
         servers without ExecuteWithLimits raise NotImplementedError. Explicit
         output budgets plus 1 KiB of protobuf overhead must fit in the
         connection's grpc_max_receive_message_bytes (4 MiB by default).
+        Use run(command_timeout=...) for timeout exit code 124. This method
+        retains sandboxd's actual exit code and termination diagnostics.
         """
         sandboxd = self.connector.is_sandboxd()
         if not sandboxd:
@@ -150,7 +153,7 @@ class AsyncCommandExecutor:
             stderr_limit_bytes=stderr_limit_bytes,
         )
         _check_response_capacity(limits, self.connector.connection_config)
-        timeout = _validate_rpc_timeout(timeout)
+        timeout = _validate_rpc_timeout(timeout, limits.time_limit)
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.command.executable", _extract_executable(command))

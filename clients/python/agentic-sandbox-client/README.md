@@ -875,7 +875,7 @@ seconds, 180 by default. `AsyncSandbox` provides the same methods with `await`.
 For snapshot-backed suspension on GKE, use the
 [GKE snapshot extension](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md).
 
-### 16. Bounded Exec (sandboxd runtime)
+## Bounded Exec (sandboxd runtime)
 
 `commands.run_with_limits()` runs a shell command with independent execution
 and output budgets through sandboxd's `ExecuteWithLimits` RPC. Install
@@ -897,6 +897,13 @@ print(result.exit_code, result.termination_reason, result.elapsed_duration)
 print(result.stdout_truncated, result.stderr_truncated)
 ```
 
+Use `commands.run(command_timeout=...)` when you need the portable
+`ExecutionResult`: an execution timeout sets `timed_out=True` and exit code 124.
+Use `run_with_limits()` when you need per-stream byte budgets, elapsed duration,
+truncation flags, or the daemon's termination reason and actual exit code.
+For a time limit, sandboxd usually returns exit code 137 after killing the
+process group. Both methods retain output from `ExecuteWithLimits`.
+
 The async API takes the same arguments:
 
 ```python
@@ -917,9 +924,11 @@ retained stdout and stderr, the actual exit code, and
 Normal and nonzero exits report `"exited"`. `elapsed_duration` measures seconds
 from launch preparation through termination and I/O cleanup.
 
-`timeout` is the independent, positive gRPC deadline in seconds, defaulting to 60.
-Allow enough time for execution and result delivery. Router and deployment
-timeouts also apply. A transport deadline or cancellation raises `RuntimeError`
+`timeout` is a positive gRPC wait in seconds, defaulting to 60. When `time_limit`
+is set, the SDK uses `max(timeout, time_limit + 10)` so execution and result
+delivery have time to finish. For example, `time_limit=300` gives the RPC at least
+310 seconds. Router and deployment timeouts also apply. A transport deadline or
+cancellation raises `RuntimeError`
 with the gRPC status and diagnostic in its message and the original error in
 `__cause__`.
 
@@ -981,8 +990,9 @@ SANDBOXD_BINARY=/absolute/path/to/sandboxd \
 
 These Linux loopback tests start a daemon in a temporary directory and exercise
 both command executors without a Kubernetes cluster. They run trusted test
-commands on the local host. The regular unit suite skips the daemon cases when
-`SANDBOXD_BINARY` is unset.
+commands on the local host. On Linux, `make test-unit` builds sandboxd and sets
+`SANDBOXD_BINARY` for the SDK suite, including in CI. An individual pytest run
+skips daemon cases when this variable is unset.
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).
 

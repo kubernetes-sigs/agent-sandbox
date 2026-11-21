@@ -75,6 +75,16 @@ type SandboxTemplateSpecApplyConfiguration struct {
 	// volumeClaimTemplatesPolicy allows a SandboxClaim to inject or override volume claim templates defined in the template.
 	// If set to Disallowed, the SandboxClaim will be rejected if it specifies any volume claim templates.
 	VolumeClaimTemplatesPolicy *extensionsapiv1beta1.VolumeClaimTemplatesPolicy `json:"volumeClaimTemplatesPolicy,omitempty"`
+	// containerResourcesPolicy controls whether a SandboxClaim may override container
+	// resource requirements (spec.containerResources) on sandboxes created from this template:
+	// - Disallowed (default): claims may not specify container resource overrides; a claim that
+	// specifies spec.containerResources is rejected.
+	// - Allowed: claims may override resource requirements for containers declared in the template.
+	// Note: resource overrides are baked into the Pod before it is created; they cannot be applied
+	// to an already-running warm pool Pod. Consequently, any claim that actually sets
+	// spec.containerResources is forced to cold-start a fresh Sandbox and cannot adopt a warm pool
+	// Sandbox. Claims that set no overrides still use the warm pool normally.
+	ContainerResourcesPolicy *extensionsapiv1beta1.ContainerResourcesPolicy `json:"containerResourcesPolicy,omitempty"`
 }
 
 // SandboxTemplateSpecApplyConfiguration constructs a declarative configuration of the SandboxTemplateSpec type for use with
@@ -149,5 +159,13 @@ func (b *SandboxTemplateSpecApplyConfiguration) WithEnvVarsInjectionPolicy(value
 // If called multiple times, the VolumeClaimTemplatesPolicy field is set to the value of the last call.
 func (b *SandboxTemplateSpecApplyConfiguration) WithVolumeClaimTemplatesPolicy(value extensionsapiv1beta1.VolumeClaimTemplatesPolicy) *SandboxTemplateSpecApplyConfiguration {
 	b.VolumeClaimTemplatesPolicy = &value
+	return b
+}
+
+// WithContainerResourcesPolicy sets the ContainerResourcesPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ContainerResourcesPolicy field is set to the value of the last call.
+func (b *SandboxTemplateSpecApplyConfiguration) WithContainerResourcesPolicy(value extensionsapiv1beta1.ContainerResourcesPolicy) *SandboxTemplateSpecApplyConfiguration {
+	b.ContainerResourcesPolicy = &value
 	return b
 }

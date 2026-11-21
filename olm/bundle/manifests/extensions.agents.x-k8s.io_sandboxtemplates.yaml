@@ -28,6 +28,12 @@ spec:
             type: object
           spec:
             properties:
+              containerResourcesPolicy:
+                default: Disallowed
+                enum:
+                - Disallowed
+                - Allowed
+                type: string
               envVarsInjectionPolicy:
                 default: Disallowed
                 enum:

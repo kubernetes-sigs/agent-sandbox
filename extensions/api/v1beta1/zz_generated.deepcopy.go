@@ -142,6 +142,11 @@ func (in *SandboxClaimList) DeepCopyObject() runtime.Object {
 func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 	*out = *in
 	out.WarmPoolRef = in.WarmPoolRef
+	if in.WarmPoolMaxRetries != nil {
+		in, out := &in.WarmPoolMaxRetries, &out.WarmPoolMaxRetries
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Lifecycle != nil {
 		in, out := &in.Lifecycle, &out.Lifecycle
 		*out = new(Lifecycle)

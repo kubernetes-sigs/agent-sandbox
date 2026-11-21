@@ -19,6 +19,7 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -8319,6 +8320,96 @@ func newPoolCandidateSandbox(name string) *sandboxv1beta1.Sandbox {
 				Reason: "Ready",
 			}},
 		},
+	}
+}
+
+func TestSandboxClaimWarmPoolMaxRetries(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		spec         string
+		conflicts    int
+		wantAttempts int
+		assigned     bool
+		claimWrite   bool
+	}{
+		{name: "omitted", conflicts: 11, wantAttempts: 6},
+		{name: "zero in memory", spec: `{"warmPoolMaxRetries":0}`, conflicts: 11, wantAttempts: 6},
+		{name: "minimum", spec: `{"warmPoolMaxRetries":1}`, conflicts: 2, wantAttempts: 2},
+		{name: "maximum", spec: `{"warmPoolMaxRetries":10}`, conflicts: 11, wantAttempts: 11},
+		{name: "succeeds beyond default", spec: `{"warmPoolMaxRetries":7}`, conflicts: 7, wantAttempts: 8},
+		{name: "recovers existing assignment", spec: `{"warmPoolMaxRetries":1}`, conflicts: 2, wantAttempts: 2, assigned: true},
+		{name: "retries claim annotation", spec: `{"warmPoolMaxRetries":7}`, conflicts: 7, wantAttempts: 8, claimWrite: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := newScheme(t)
+			claim, template, warmPool, _ := newOptimisticLockTestObjects()
+			candidate := newPoolCandidateSandbox("pool-sb-1")
+			next := newPoolCandidateSandbox("pool-sb-2")
+			if tc.spec != "" {
+				require.NoError(t, json.Unmarshal([]byte(tc.spec), &claim.Spec))
+			}
+			if tc.assigned {
+				claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = candidate.Name
+			} else {
+				delete(claim.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation)
+			}
+			rawClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(claim, template, warmPool, candidate, next).
+				WithStatusSubresource(claim).Build()
+			attempts := 0
+			cachedClient := interceptor.NewClient(rawClient, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if _, ok := obj.(*extensionsv1beta1.SandboxClaim); ok && tc.claimWrite {
+						attempts++
+						if attempts <= tc.conflicts {
+							return k8errors.NewConflict(extensionsv1beta1.Resource("sandboxclaims"), obj.GetName(), errors.New("simulated claim update conflict"))
+						}
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+						require.Equal(t, candidate.Name, sb.Name, "adoption must stay on the same candidate")
+						if !tc.claimWrite {
+							attempts++
+							if attempts <= tc.conflicts {
+								return k8errors.NewConflict(sandboxv1beta1.Resource("sandboxes"), sb.Name, errors.New("simulated sandbox patch conflict"))
+							}
+						}
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			warmQueue := queue.NewSimpleSandboxQueue()
+			poolKey := queue.GetNamespacedWarmPoolName(warmPool.Namespace, warmPool.Name)
+			for _, sb := range []*sandboxv1beta1.Sandbox{candidate, next} {
+				warmQueue.Add(poolKey, queue.SandboxKey{Namespace: sb.Namespace, Name: sb.Name})
+			}
+			reconciler := &SandboxClaimReconciler{
+				Client:                          cachedClient,
+				APIReader:                       rawClient,
+				Scheme:                          scheme,
+				Tracer:                          asmetrics.NewNoOp(),
+				WarmSandboxQueue:                warmQueue,
+				DisableObservabilityAnnotations: true,
+			}
+
+			key := client.ObjectKeyFromObject(claim)
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			require.Equal(t, tc.wantAttempts, attempts, "adoption writes including the initial attempt")
+			require.NoError(t, rawClient.Get(ctx, key, claim))
+			require.Equal(t, candidate.Name, claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+			require.NoError(t, rawClient.Get(ctx, client.ObjectKeyFromObject(candidate), candidate))
+			if tc.conflicts < tc.wantAttempts {
+				require.NoError(t, err)
+				require.Equal(t, candidate.Name, claim.Status.SandboxStatus.Name)
+				require.True(t, metav1.IsControlledBy(candidate, claim))
+			} else {
+				require.ErrorIs(t, err, errAdoptionConflict)
+				require.True(t, metav1.IsControlledBy(candidate, warmPool))
+			}
+		})
 	}
 }
 

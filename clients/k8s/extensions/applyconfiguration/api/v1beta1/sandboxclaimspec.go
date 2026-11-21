@@ -27,6 +27,10 @@ import (
 type SandboxClaimSpecApplyConfiguration struct {
 	// warmPoolRef targets the specific pre-warmed infrastructure pool to check out from.
 	WarmPoolRef *SandboxWarmPoolRefApplyConfiguration `json:"warmPoolRef,omitempty"`
+	// warmPoolMaxRetries is the maximum number of retries after the initial
+	// write conflicts while recording or completing a warm pool adoption.
+	// Each write has its own retry limit.
+	WarmPoolMaxRetries *int32 `json:"warmPoolMaxRetries,omitempty"`
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	Lifecycle *LifecycleApplyConfiguration `json:"lifecycle,omitempty"`
 	// additionalPodMetadata defines the labels and annotations to be propagated to the Sandbox Pod.
@@ -58,6 +62,14 @@ func SandboxClaimSpec() *SandboxClaimSpecApplyConfiguration {
 // If called multiple times, the WarmPoolRef field is set to the value of the last call.
 func (b *SandboxClaimSpecApplyConfiguration) WithWarmPoolRef(value *SandboxWarmPoolRefApplyConfiguration) *SandboxClaimSpecApplyConfiguration {
 	b.WarmPoolRef = value
+	return b
+}
+
+// WithWarmPoolMaxRetries sets the WarmPoolMaxRetries field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the WarmPoolMaxRetries field is set to the value of the last call.
+func (b *SandboxClaimSpecApplyConfiguration) WithWarmPoolMaxRetries(value int32) *SandboxClaimSpecApplyConfiguration {
+	b.WarmPoolMaxRetries = &value
 	return b
 }
 

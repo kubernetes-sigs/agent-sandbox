@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
@@ -1397,101 +1398,80 @@ func (r *SandboxClaimReconciler) adoptSandboxFromCandidates(ctx context.Context,
 	logger := log.FromContext(ctx)
 	namespacedWarmPoolNameForQueue := queue.GetNamespacedWarmPoolName(claim.Namespace, claim.Spec.WarmPoolRef.Name)
 
-	// Keep trying until we successfully adopt a sandbox, or run out of candidates
-	for range 3 {
-		adopted, adoptedKey, pendingNetworkCandidates, err := r.getCandidate(ctx, claim)
-		if err != nil {
+	adopted, adoptedKey, pendingNetworkCandidates, err := r.getCandidate(ctx, claim)
+	if err != nil {
+		return nil, 0, err
+	}
+	if adopted == nil {
+		if pendingNetworkCandidates > 0 {
+			logger.V(4).Info("No network-ready warm sandbox after checking candidates", "claim", claim.Name, "pendingCandidates", pendingNetworkCandidates)
+			return nil, pendingNetworkCandidates, nil
+		}
+		logger.V(4).Info("No warm sandbox candidates available", "claim", claim.Name)
+		return nil, 0, nil // Warm pool is truly empty, fall completely to cold start
+	}
+
+	poolName := getWarmPoolName(adopted)
+
+	logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
+
+	// Update claim to record adoption (optimistic lock)
+	if claim.Annotations == nil {
+		claim.Annotations = make(map[string]string)
+	}
+	claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = adopted.Name
+	if err := r.Update(ctx, claim); err != nil {
+		if !k8errors.IsConflict(err) {
+			r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+			logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
 			return nil, 0, err
 		}
-		if adopted == nil {
-			if pendingNetworkCandidates > 0 {
-				logger.V(4).Info("No network-ready warm sandbox after checking candidates", "claim", claim.Name, "pendingCandidates", pendingNetworkCandidates)
-				return nil, pendingNetworkCandidates, nil
+		// Retry against a fresh read so cache lag does not waste a candidate.
+		if retryErr := r.retryAdoptionAnnotation(ctx, claim, adopted.Name); retryErr != nil {
+			r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+			if k8errors.IsConflict(retryErr) {
+				// Retries exhausted on persistent contention: surface it
+				// with the benign AdoptionConflict condition reason and
+				// let the per-item failure backoff pace further retries.
+				return nil, 0, fmt.Errorf("%w: claim %s: %w", errAdoptionConflict, claim.Name, retryErr)
 			}
-			logger.V(4).Info("No warm sandbox candidates available", "claim", claim.Name)
-			return nil, 0, nil // Warm pool is truly empty, fall completely to cold start
-		}
-
-		// Wrap the API logic in a closure
-		success, err := func() (bool, error) {
-			poolName := getWarmPoolName(adopted)
-
-			logger.V(4).Info("Attempting sandbox adoption", "sandbox candidate", adopted.Name, "warm pool", poolName, "claim", claim.Name)
-
-			// Update claim to record adoption (optimistic lock)
-			if claim.Annotations == nil {
-				claim.Annotations = make(map[string]string)
-			}
-			claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] = adopted.Name
-			if err := r.Update(ctx, claim); err != nil {
-				if !k8errors.IsConflict(err) {
-					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
-					logger.Error(err, "Failed to update claim for adoption", "claim", claim.Name, "sandbox", adopted.Name)
-					return false, err
-				}
-				// 409: the cached base was stale (typically behind a write this
-				// controller committed itself, e.g. the observability annotation
-				// patch). Retry in-pass against a fresh read instead of failing
-				// the pass — this resolves in single-digit milliseconds and
-				// keeps the popped candidate from being burned on a doomed pass.
-				if retryErr := r.retryAdoptionAnnotation(ctx, claim, adopted.Name); retryErr != nil {
-					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
-					if k8errors.IsConflict(retryErr) {
-						// Retries exhausted on persistent contention: surface it
-						// with the benign AdoptionConflict condition reason and
-						// let the per-item failure backoff pace further retries.
-						return false, fmt.Errorf("%w: claim %s: %w", errAdoptionConflict, claim.Name, retryErr)
-					}
-					return false, retryErr
-				}
-			}
-
-			// Call helper to complete adoption (patch sandbox)
-			if err := r.completeAdoption(ctx, claim, adopted); err != nil {
-				if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
-					r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
-					logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
-					return false, err
-				}
-				// A 404/409 only proves the cached candidate view is stale.
-				// The annotation is already committed: never move on to
-				// another candidate; resolve THIS assignment authoritatively.
-				resolved, resolveErr := r.resolveAdoptionCompletion(ctx, claim, adopted.Name)
-				if resolveErr != nil {
-					// Terminal for this pass; the workqueue rate limiter paces
-					// the retry. The candidate key is deliberately not re-queued.
-					return false, resolveErr
-				}
-				resolved.DeepCopyInto(adopted)
-			}
-
-			logger.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
-
-			if r.Recorder != nil {
-				r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxAdopted", "Adoption", "Adopted warm pool Sandbox %q", adopted.Name)
-			}
-
-			podCondition := "not_ready"
-			if isSandboxReady(adopted) {
-				podCondition = "ready"
-			}
-			templateName := r.resolveTemplateName(adopted)
-			asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition, claim.Labels[v1beta1.CreatedByLabel])
-
-			return true, nil
-		}()
-
-		if err != nil {
-			return nil, 0, err
-		}
-
-		if success {
-			return adopted, 0, nil
+			return nil, 0, retryErr
 		}
 	}
 
-	logger.Info("Failed to adopt sandbox after max retries", "claim", claim.Name)
-	return nil, 0, nil
+	// Call helper to complete adoption (patch sandbox)
+	if err := r.completeAdoption(ctx, claim, adopted); err != nil {
+		if !k8errors.IsNotFound(err) && !k8errors.IsConflict(err) {
+			r.WarmSandboxQueue.Add(namespacedWarmPoolNameForQueue, adoptedKey)
+			logger.Error(err, "Failed to complete adoption for candidate sandbox", "sandbox candidate", adopted.Name, "claim", claim.Name)
+			return nil, 0, err
+		}
+		// A 404/409 only proves the cached candidate view is stale.
+		// The annotation is already committed: never move on to
+		// another candidate; resolve THIS assignment authoritatively.
+		resolved, resolveErr := r.resolveAdoptionCompletion(ctx, claim, adopted.Name)
+		if resolveErr != nil {
+			// Terminal for this pass; the workqueue rate limiter paces
+			// the retry. The candidate key is deliberately not re-queued.
+			return nil, 0, resolveErr
+		}
+		resolved.DeepCopyInto(adopted)
+	}
+
+	logger.Info("Successfully adopted sandbox from warm pool", "sandbox", adopted.Name, "claim", claim.Name)
+
+	if r.Recorder != nil {
+		r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, "SandboxAdopted", "Adoption", "Adopted warm pool Sandbox %q", adopted.Name)
+	}
+
+	podCondition := "not_ready"
+	if isSandboxReady(adopted) {
+		podCondition = "ready"
+	}
+	templateName := r.resolveTemplateName(adopted)
+	asmetrics.RecordSandboxClaimCreation(claim.Namespace, templateName, asmetrics.LaunchTypeWarm, poolName, podCondition, claim.Labels[v1beta1.CreatedByLabel])
+
+	return adopted, 0, nil
 }
 
 func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, adopted *v1beta1.Sandbox) error {
@@ -1615,7 +1595,7 @@ func (r *SandboxClaimReconciler) authoritativeReader() client.Reader {
 // copied back. Any error from the fresh read or from mutate aborts the
 // attempt with claim left untouched (RetryOnConflict re-runs the closure on
 // conflict errors only).
-func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, mutate func(fresh *extensionsv1beta1.SandboxClaim) (bool, error)) error {
+func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, backoff wait.Backoff, mutate func(fresh *extensionsv1beta1.SandboxClaim) (bool, error)) error {
 	reader := r.authoritativeReader()
 	key := client.ObjectKeyFromObject(claim)
 	attempt := func() error {
@@ -1635,7 +1615,7 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 		fresh.DeepCopyInto(claim)
 		return nil
 	}
-	return retryOnConflictKeepingAttemptErr(attempt)
+	return retryOnConflictKeepingAttemptErr(backoff, attempt)
 }
 
 // retryOnConflictKeepingAttemptErr runs fn under RetryOnConflict but keeps the
@@ -1644,9 +1624,9 @@ func (r *SandboxClaimReconciler) updateClaimOnFreshBase(ctx context.Context, cla
 // conflict — nil when the first attempt is interrupted — which would report a
 // canceled write as success, or mask a cancellation that followed an earlier
 // conflict as contention.
-func retryOnConflictKeepingAttemptErr(fn func() error) error {
+func retryOnConflictKeepingAttemptErr(backoff wait.Backoff, fn func() error) error {
 	var attemptErr error
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err := retry.RetryOnConflict(backoff, func() error {
 		attemptErr = fn()
 		return attemptErr
 	})
@@ -1656,6 +1636,16 @@ func retryOnConflictKeepingAttemptErr(fn func() error) error {
 	return err
 }
 
+func warmPoolAdoptionRetryBackoff(claim *extensionsv1beta1.SandboxClaim) wait.Backoff {
+	backoff := retry.DefaultRetry
+	// Match the API default and preserve the original five retries for older claims.
+	backoff.Steps = 5
+	if retries := claim.Spec.WarmPoolMaxRetries; retries != nil && *retries > 0 {
+		backoff.Steps = int(*retries)
+	}
+	return backoff
+}
+
 // retryAdoptionAnnotation retries the optimistically locked claim update that
 // records an adoption after a 409: verify on a fresh base that no other
 // sandbox has been assigned in the meantime, then re-apply the assignment. On
@@ -1663,7 +1653,7 @@ func retryOnConflictKeepingAttemptErr(fn func() error) error {
 // of the adoption pass (sandbox patch, status finalization) operates on the
 // object the server accepted.
 func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) error {
-	return r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
+	return r.updateClaimOnFreshBase(ctx, claim, warmPoolAdoptionRetryBackoff(claim), func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
 		if fresh.UID != claim.UID {
 			return false, fmt.Errorf("%w: claim %s was deleted and recreated during adoption", errAdoptionConflict, claim.Name)
 		}
@@ -1684,7 +1674,7 @@ func (r *SandboxClaimReconciler) retryAdoptionAnnotation(ctx context.Context, cl
 // resolveAdoptionCompletion resolves a completeAdoption 404/409 against
 // authoritative reads, upholding one invariant: a committed assignment is
 // never abandoned for another candidate inside the same pass. Outcomes:
-// no-op when the adoption already completed; one fresh-base re-patch when
+// no-op when the adoption already completed; bounded patch retries when
 // the sandbox is still pool-owned and adoptable; otherwise terminal cleanup
 // of the dead reference plus a benign errAdoptionConflict.
 func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, sandboxName string) (*v1beta1.Sandbox, error) {
@@ -1718,7 +1708,7 @@ func (r *SandboxClaimReconciler) resolveAdoptionCompletion(ctx context.Context, 
 	}
 	// Without the attempt-error guard a canceled attempt reports success
 	// with resolved == nil, and callers would dereference nil.
-	err := retryOnConflictKeepingAttemptErr(attempt)
+	err := retryOnConflictKeepingAttemptErr(warmPoolAdoptionRetryBackoff(claim), attempt)
 	if err == nil {
 		return resolved, nil
 	}
@@ -1762,7 +1752,7 @@ func (r *SandboxClaimReconciler) removeAssignedSandboxReference(ctx context.Cont
 	// A deleted or recreated claim leaves nothing to clean and must not be
 	// copied back over this pass's object.
 	errClaimGone := errors.New("claim gone")
-	err := r.updateClaimOnFreshBase(ctx, claim, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
+	err := r.updateClaimOnFreshBase(ctx, claim, retry.DefaultRetry, func(fresh *extensionsv1beta1.SandboxClaim) (bool, error) {
 		if fresh.UID != claim.UID {
 			return false, errClaimGone
 		}

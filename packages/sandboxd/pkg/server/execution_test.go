@@ -286,7 +286,7 @@ func TestExecuteWithLimitsIncompletePipeCleanup(t *testing.T) {
 
 func TestProcessGroupCancellationAfterLeaderExit(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("requires /proc to observe parent reaping")
+		t.Skip("requires /proc to observe parent exit")
 	}
 	skipIfGVisor(t)
 	for _, rpc := range []string{"Start", "Execute", "ExecuteWithLimits"} {
@@ -295,7 +295,7 @@ func TestProcessGroupCancellationAfterLeaderExit(t *testing.T) {
 			client := newProcessClient(t, root)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			var childPID int
+			var parentPID, childPID int
 			t.Cleanup(func() {
 				if childPID > 0 {
 					p, err := os.FindProcess(childPID)
@@ -337,13 +337,16 @@ func TestProcessGroupCancellationAfterLeaderExit(t *testing.T) {
 				if len(fields) != 2 {
 					return false
 				}
-				parentPID, err := strconv.Atoi(fields[0])
+				parentPID, err = strconv.Atoi(fields[0])
 				if err != nil {
 					return false
 				}
 				childPID, err = strconv.Atoi(fields[1])
-				return err == nil && syscall.Kill(parentPID, 0) == syscall.ESRCH
-			}, 2*time.Second, 10*time.Millisecond, "parent was not reaped before cancellation")
+				return err == nil && isProcessDead(parentPID)
+			}, 2*time.Second, 10*time.Millisecond, "parent did not exit before cancellation")
+			require.Never(t, func() bool { return syscall.Kill(parentPID, 0) == syscall.ESRCH },
+				300*time.Millisecond, 20*time.Millisecond,
+				"the leader must stay unreaped while cleanup may still signal its PID")
 			cancel()
 			select {
 			case err := <-result:

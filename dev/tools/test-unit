@@ -392,6 +392,9 @@ def run_python_tests(repo_root, artifact_dir):
             [venv_pip, "install", "--quiet", "pytest"], env=env)
 
         if suite["name"] == "k8s-agent-sandbox":
+            if sys.platform == "linux":
+                subprocess.check_call(["make", "build-sandboxd"], cwd=repo_root)
+                env["SANDBOXD_BINARY"] = os.path.join(repo_root, "bin", "sandboxd")
             print(f"\n=== Running mypy type checks: {suite['name']} ===")
             package_dir = os.path.dirname(test_dir)
             mypy_result = subprocess.run([
@@ -409,7 +412,7 @@ def run_python_tests(repo_root, artifact_dir):
             test_dir,
             f"--junitxml={junit_file}",
             "-v",
-        ], cwd=test_dir)
+        ], cwd=test_dir, env=env)
 
         if result.returncode != 0:
             returncode = result.returncode

@@ -459,6 +459,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		r.recreateBackoff.clear(req.NamespacedName)
 		if !sandboxMarkedExpired(sandbox) {
 			setSandboxExpiredCondition(sandbox)
+			// The Pod is not deleted yet. Read it so that a Sandbox expiring
+			// before its first reconcile also reports Serving in this write.
+			pod, podErr := r.getExpiringPod(ctx, sandbox)
+			meta.SetStatusCondition(&sandbox.Status.Conditions, r.computeExpiredServingCondition(sandbox, pod, podErr))
 			if statusUpdateErr := r.updateStatus(ctx, oldStatus, oldResourceVersion, sandbox); statusUpdateErr != nil {
 				return ctrl.Result{}, statusUpdateErr
 			}
@@ -624,8 +628,72 @@ func (r *SandboxReconciler) computeConditions(sandbox *sandboxv1beta1.Sandbox, e
 	conditions = append(conditions, r.computePodScheduledCondition(sandbox, pod, podErr))
 
 	conditions = append(conditions, r.computeReadyCondition(sandbox, err, svc, pod))
+	conditions = append(conditions, r.computeServingCondition(sandbox, pod, podErr))
 
 	return conditions
+}
+
+// computeServingCondition reports whether the backing Pod is Running and Ready
+// with an assigned IP, whether or not it is terminating. Ready turns False with
+// reason PodTerminating for the whole termination window, but a Pod with a
+// graceful shutdown keeps serving the work it already holds until it reports
+// Ready=False. The Sandbox recreates its Pod under the same name only after the
+// old Pod is gone, so during that window the terminating Pod is the only one
+// that can serve. This mirrors the EndpointSlice split between "serving" and
+// "ready" (KEP-1672).
+func (r *SandboxReconciler) computeServingCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	condition := metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionServing),
+		ObservedGeneration: sandbox.Generation,
+		Status:             metav1.ConditionFalse,
+	}
+
+	// Reconciling the Pod failed, so a nil pod does not prove the Pod is gone.
+	if pod == nil && podErr != nil {
+		condition.Status = metav1.ConditionUnknown
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodStateUnknown
+		condition.Message = "Pod state is unknown. Serving cannot be determined"
+		return condition
+	}
+	if pod == nil {
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodNotFound
+		condition.Message = "Pod does not exist"
+		return condition
+	}
+	if !isOwnedBySandbox(pod, sandbox) {
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodNotOwned
+		condition.Message = "Pod is not owned by this sandbox"
+		return condition
+	}
+	if !podServing(pod) {
+		condition.Reason = sandboxv1beta1.SandboxReasonServingPodNotReady
+		condition.Message = "Pod is not Running and Ready with an assigned IP"
+		return condition
+	}
+
+	condition.Status = metav1.ConditionTrue
+	condition.Reason = sandboxv1beta1.SandboxReasonServingPodReady
+	if pod.DeletionTimestamp.IsZero() {
+		condition.Message = "Pod is Ready"
+	} else {
+		condition.Message = "Pod is terminating and still Ready"
+	}
+	return condition
+}
+
+// podServing reports whether the Pod is Running with its Ready condition True
+// and at least one pod IP. It ignores the deletion timestamp on purpose; see
+// computeServingCondition.
+func podServing(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning || len(pod.Status.PodIPs) == 0 {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // computePodScheduledCondition mirrors the backing Pod's PodScheduled
@@ -2347,13 +2415,10 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 	var allErrors error
 
 	// Delete pod only if owned by this sandbox
-	podName := resolvePodName(sandbox)
-	pod := &corev1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: sandbox.Namespace}, pod); err != nil {
-		if !k8serrors.IsNotFound(err) {
-			allErrors = errors.Join(allErrors, fmt.Errorf("failed to get pod: %w", err))
-		}
-	} else {
+	pod, podErr := r.getExpiringPod(ctx, sandbox)
+	if podErr != nil {
+		allErrors = errors.Join(allErrors, podErr)
+	} else if pod != nil {
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
 		case resourceOwnedBySandbox:
@@ -2409,8 +2474,38 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		sandbox.Status = sandboxv1beta1.SandboxStatus{Conditions: conditions}
 		setSandboxExpiredCondition(sandbox)
 	}
+	// Report Serving even when cleanup failed, because it describes the Pod,
+	// not the cleanup. This pass runs for every expired Sandbox, so it also
+	// adds Serving to one that expired before the condition existed.
+	meta.SetStatusCondition(&sandbox.Status.Conditions, r.computeExpiredServingCondition(sandbox, pod, podErr))
 
 	return false, allErrors
+}
+
+// getExpiringPod returns the expired Sandbox's Pod, or nil if it does not exist.
+func (r *SandboxReconciler) getExpiringPod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (*corev1.Pod, error) {
+	pod := &corev1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: resolvePodName(sandbox), Namespace: sandbox.Namespace}, pod); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get pod: %w", err)
+	}
+	return pod, nil
+}
+
+// computeExpiredServingCondition reports Serving for an expired Sandbox. Expiry
+// deletes the Pod, and a Pod with a graceful shutdown keeps serving the work it
+// holds until it reports Ready=False, so Serving follows that Pod as it does for
+// any other deletion. Once the Pod no longer serves, the reason is
+// SandboxExpired, because expiry is why it stopped.
+func (r *SandboxReconciler) computeExpiredServingCondition(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, podErr error) metav1.Condition {
+	condition := r.computeServingCondition(sandbox, pod, podErr)
+	if condition.Status == metav1.ConditionFalse {
+		condition.Reason = sandboxv1beta1.SandboxReasonExpired
+		condition.Message = "Sandbox has expired"
+	}
+	return condition
 }
 
 // checks if the sandbox has expired
@@ -2442,6 +2537,8 @@ func setSandboxExpiredCondition(sandbox *sandboxv1beta1.Sandbox) {
 		Reason:             sandboxv1beta1.SandboxReasonExpired,
 		Message:            "Sandbox has expired",
 	})
+	// Serving is left alone because it describes the Pod, which may keep
+	// serving while it drains. handleSandboxExpiry keeps it current from the Pod.
 	// Expiry tears down the backing pod and skips reconcileChildResources
 	// (where PodScheduled is normally maintained), so report the final state
 	// here or the condition would keep its stale pre-expiry contents.

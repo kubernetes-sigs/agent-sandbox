@@ -28,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/creack/pty"
 	"github.com/go-logr/logr"
@@ -306,17 +307,19 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// short-lived process, so give the reader a chance to finish first.
 		// Closing the PTY only on timeout unblocks a straggling read (e.g. a
 		// grandchild still holds the slave side).
-		waitErr = cmd.Wait()
+		waitForExit(cmd.Process.Pid)
 		waitForReaders(&streamWg, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
+		waitErr = cmd.Wait()
 	} else {
 		streamWg.Add(2)
 		go streamOutput(stdoutR, false)
 		go streamOutput(stderrR, true)
 
-		waitErr = cmd.Wait()
+		waitForExit(cmd.Process.Pid)
 		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
+		waitErr = cmd.Wait()
 	}
 
 	exitCode := int32(0)
@@ -460,8 +463,8 @@ func channelClosed(done <-chan struct{}) bool {
 	}
 }
 
-func (run unaryExecution) finished(waitDone <-chan struct{}) bool {
-	return channelClosed(waitDone) && channelClosed(run.stdout.done) && channelClosed(run.stderr.done)
+func (run unaryExecution) finished(exited <-chan struct{}) bool {
+	return channelClosed(exited) && channelClosed(run.stdout.done) && channelClosed(run.stderr.done)
 }
 
 func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessConfig, limits executionLimits) (*processv1.ExecuteWithLimitsResponse, error) {
@@ -538,15 +541,26 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 
 // waitExecution owns the sole Wait call and joins termination before inspecting
 // output. Even if cleanup times out, the Wait goroutine still reaps the child.
+//
+// The leader stays unreaped until the loop ends, so its PID cannot be reused
+// while termination may still signal it or its process group.
 func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, timeExpired <-chan time.Time) (executionOutcome, error) {
+	exited := make(chan struct{})
+	release := make(chan struct{})
 	waitDone := make(chan struct{})
 	var runErr error
 	go func() {
+		waitForExit(run.cmd.Process.Pid)
+		close(exited)
+		<-release
 		runErr = run.cmd.Wait()
 		close(waitDone)
 	}()
+	var releaseOnce sync.Once
+	releaseLeader := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseLeader()
 	var outcome executionOutcome
-	pendingWait, pendingOut, pendingErr := waitDone, run.stdout.done, run.stderr.done
+	pendingWait, pendingOut, pendingErr := exited, run.stdout.done, run.stderr.done
 	ctxDone := ctx.Done()
 	var pendingKill chan struct{}
 	var cleanupDone <-chan struct{}
@@ -592,19 +606,19 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 			}
 		case <-ctxDone:
 			ctxDone, timeExpired = nil, nil
-			if run.finished(waitDone) {
+			if run.finished(exited) {
 				continue
 			}
 			startCleanup()
 		case <-timeExpired:
 			ctxDone, timeExpired = nil, nil
-			if run.finished(waitDone) {
+			if run.finished(exited) {
 				continue
 			}
 			outcome.timeLimitExceeded = true
 			startCleanup()
 		case <-cleanupDone:
-			if run.finished(waitDone) && (pendingKill == nil || channelClosed(pendingKill)) {
+			if run.finished(exited) && (pendingKill == nil || channelClosed(pendingKill)) {
 				cleanupDone = nil
 				continue
 			}
@@ -632,6 +646,8 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 			drainDone = nil
 		}
 	}
+	releaseLeader()
+	<-waitDone
 	if err := ctx.Err(); err != nil {
 		return executionOutcome{}, status.FromContextError(err).Err()
 	}
@@ -652,6 +668,20 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 		}
 	}
 	return outcome, nil
+}
+
+// waitForExit blocks until the process pid has exited, without reaping it. An
+// unreaped process keeps its PID reserved, so signalling the PID or its process
+// group stays safe until the caller reaps it with cmd.Wait.
+func waitForExit(pid int) {
+	var info [128]byte // siginfo_t
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, 1 /* P_PID */, uintptr(pid),
+			uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOWAIT, 0, 0)
+		if errno != syscall.EINTR {
+			return
+		}
+	}
 }
 
 func (s *ProcessServer) terminateExecution(ctx context.Context, cmd *exec.Cmd) chan struct{} {

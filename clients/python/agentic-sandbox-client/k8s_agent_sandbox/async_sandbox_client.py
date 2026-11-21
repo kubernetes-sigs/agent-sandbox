@@ -369,11 +369,11 @@ class AsyncSandboxClient(Generic[T]):
                 claim_rv = metadata.get("resourceVersion")
                 claim_uid = metadata.get("uid")
             wait_kwargs = {} if generated_name else {
-                "expected_uid": claim_uid, "initial_claim": created_claim,
+                "initial_claim": created_claim,
             }
             sandbox_id = await self._wait_for_claim_ready(
                 claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv,
-                **wait_kwargs,
+                expected_uid=claim_uid, **wait_kwargs,
             )
 
             async with self._lock:
@@ -487,7 +487,13 @@ class AsyncSandboxClient(Generic[T]):
         # The Claim and Sandbox names can both survive deletion and recreation.
         if (existing and existing.is_active and existing.sandbox_id == sandbox_id
                 and existing._claim_uid == claim_uid):
-            return existing
+            async with self._lock:
+                if self._active_connection_sandboxes.get(key) is existing:
+                    return existing
+            raise SandboxNotFoundError(
+                f"SandboxClaim '{claim_name}' changed during lookup in "
+                f"namespace '{namespace}'; retry get_sandbox()."
+            )
 
         # Close the inactive or stale handle. A failed close must not block its
         # replacement.

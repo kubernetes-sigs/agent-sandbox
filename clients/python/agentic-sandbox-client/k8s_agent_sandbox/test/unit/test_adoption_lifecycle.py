@@ -783,9 +783,11 @@ async def test_async_lookup_checks_claim_uid_of_concurrently_tracked_handle(sdk_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('sdk_client', ['async'], indirect=True)
-async def test_async_old_lookup_preserves_concurrently_registered_replacement(sdk_client):
+@pytest.mark.parametrize('cache_old_handle', [False, True])
+async def test_async_old_lookup_preserves_concurrently_registered_replacement(sdk_client, cache_old_handle):
     api, client, _ = sdk_client
     seed_claim(api)
+    stale = await client.get_sandbox('workflow-a') if cache_old_handle else None
     key = (C.CLAIM_PLURAL_NAME, 'default', 'workflow-a')
     started, release = asyncio.Event(), asyncio.Event()
     get_sandbox = client.k8s_helper.get_sandbox
@@ -807,7 +809,12 @@ async def test_async_old_lookup_preserves_concurrently_registered_replacement(sd
             api.objects.pop(key)
             seed_claim(api)
             api.objects[key]['metadata']['uid'] = 'replacement-uid'
-            current = await client.get_sandbox('workflow-a')
+            close_failure = (patch.object(stale, 'close_connection', side_effect=RuntimeError('close failed'))
+                             if stale is not None else contextlib.nullcontext())
+            with close_failure:
+                current = await client.get_sandbox('workflow-a')
+            if stale is not None:
+                assert stale.is_active
             release.set()
             with pytest.raises(SandboxNotFoundError, match='changed during lookup'):
                 await older
@@ -819,6 +826,8 @@ async def test_async_old_lookup_preserves_concurrently_registered_replacement(sd
         finally:
             older.cancel()
             await asyncio.gather(older, return_exceptions=True)
+            if stale is not None:
+                await stale.close_connection()
 
 
 @pytest.mark.asyncio
@@ -878,6 +887,56 @@ async def test_adoption_resumes_same_claim_after_watch_compaction(sdk_client):
     assert sandbox.sandbox_id == 'sandbox-a'
     assert [call.kwargs['resource_version'] for call in stream.call_args_list] == ['10', '0']
     assert api.deletes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('compacted', [False, True], ids=['watch', 'compaction'])
+async def test_generated_creation_rejects_replaced_claim(sdk_client, compacted):
+    api, client, _ = sdk_client
+    api.claim_ready = False
+
+    def replace_claim(**_):
+        key = api.remaining(C.CLAIM_PLURAL_NAME)[0]
+        replacement = api.objects[key]
+        replacement['metadata']['uid'] = 'replacement-uid'
+        replacement['status']['conditions'][0]['status'] = 'True'
+        if compacted and stream.call_count == 1:
+            raise ApiException(status=410)
+        return {'items': [deepcopy(replacement)]}
+
+    with patch.object(api, 'list_namespaced_custom_object', side_effect=replace_claim) as stream:
+        with pytest.raises(SandboxNotFoundError, match='replaced'):
+            await invoke(client.create_sandbox, 'pool-a')
+    assert [call.kwargs['resource_version'] for call in stream.call_args_list] == (
+        ['10', '0'] if compacted else ['10']
+    )
+    key, = api.remaining(C.CLAIM_PLURAL_NAME)
+    assert api.objects[key]['metadata']['uid'] == 'replacement-uid'
+    assert api.deletes == []
+    assert client._active_connection_sandboxes == {}
+
+
+@pytest.mark.asyncio
+async def test_generated_creation_resumes_same_claim_after_watch_compaction(sdk_client):
+    api, client, _ = sdk_client
+    api.claim_ready = False
+
+    def ready_claim(**_):
+        if stream.call_count == 1:
+            raise ApiException(status=410)
+        key, = api.remaining(C.CLAIM_PLURAL_NAME)
+        ready = api.objects[key]
+        ready['status']['conditions'][0]['status'] = 'True'
+        return {'items': [deepcopy(ready)]}
+
+    with patch.object(api, 'list_namespaced_custom_object', side_effect=ready_claim) as stream:
+        sandbox = await invoke(client.create_sandbox, 'pool-a')
+    key, = api.remaining(C.CLAIM_PLURAL_NAME)
+    assert sandbox._claim_uid == api.objects[key]['metadata']['uid']
+    assert sandbox.sandbox_id == 'sandbox-a'
+    assert [call.kwargs['resource_version'] for call in stream.call_args_list] == ['10', '0']
+    await invoke(sandbox.terminate)
+    assert key not in api.objects
 
 
 @pytest.mark.asyncio

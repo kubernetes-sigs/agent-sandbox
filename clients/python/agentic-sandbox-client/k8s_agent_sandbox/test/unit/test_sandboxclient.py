@@ -77,7 +77,7 @@ class TestSandboxClient(unittest.TestCase):
         with patch.object(self.client, '_create_claim') as mock_create_claim:
             # The create response's resourceVersion seeds the ready-wait
             # watch so it is served from the apiserver watch cache.
-            mock_create_claim.return_value = {"metadata": {"resourceVersion": "12345"}}
+            mock_create_claim.return_value = {"metadata": {"resourceVersion": "12345", "uid": "uid-claim"}}
 
             sandbox = self.client.create_sandbox("test-warmpool", "test-namespace")
 
@@ -95,7 +95,8 @@ class TestSandboxClient(unittest.TestCase):
             # no separate wait on the Sandbox resource. The watch starts at
             # the created claim's resourceVersion.
             self.mock_k8s_helper.wait_for_claim_ready.assert_called_once_with(
-                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345")
+                "sandbox-claim-1234abcd", "test-namespace", 180, resource_version="12345",
+                expected_uid="uid-claim")
             self.mock_k8s_helper.wait_for_sandbox_ready.assert_not_called()
             self.assertEqual(sandbox, mock_sandbox_instance)
             

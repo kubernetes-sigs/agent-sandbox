@@ -248,11 +248,11 @@ class SandboxClient(Generic[T]):
                 claim_rv = metadata.get("resourceVersion")
                 claim_uid = metadata.get("uid")
             wait_kwargs = {} if generated_name else {
-                "expected_uid": claim_uid, "initial_claim": created_claim,
+                "initial_claim": created_claim,
             }
             sandbox_id = self._wait_for_claim_ready(
                 claim_name, namespace, sandbox_ready_timeout, resource_version=claim_rv,
-                **wait_kwargs,
+                expected_uid=claim_uid, **wait_kwargs,
             )
 
             existing = self._active_connection_sandboxes.get((namespace, claim_name))

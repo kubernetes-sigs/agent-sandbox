@@ -46,10 +46,13 @@ platform protocol differs:
 └─────────────────────┘
 ```
 
-- **Controller** — polls (or receives) work items from the platform,
-  acknowledges them so they are not re-delivered, and routes each item to its
-  session. One goroutine per session serializes that session's items; the
-  first item claims a warm sandbox, later items reuse or resume it.
+- **Controller** — polls (or receives) work from the platform and routes it
+  to its session. Where the protocol has ack semantics (CMA), the controller
+  acknowledges work items so they are not re-delivered; where it does not
+  (the Agents API re-publishes a pending connection action until served),
+  idempotent consumption replaces acks. One goroutine per session serializes
+  that session's items; the first item claims a warm sandbox, later items
+  reuse or resume it.
 - **Session manager ↔ Sandbox lifecycle** — `EnsureReady` (claim or resume +
   re-establish the port-forward), dispatch the work item, wait for the runner
   to report completion, then let the session go idle.
@@ -57,20 +60,22 @@ platform protocol differs:
   claim (deleting the PVC) past a longer one. Suspension is always safe
   against racing work: the next item simply resumes the sandbox.
 - **Runner** — an HTTP daemon inside the sandbox image. It accepts a work
-  item, executes the platform's tool calls locally (bash, files, skills)
-  while keeping any lease/heartbeat contract alive, and exposes status and
-  idle-time endpoints the controller polls.
+  item and executes the platform's tool calls locally (bash, files,
+  skills) — directly, or by supervising the platform's own executor binary
+  when the platform ships one — while keeping any lease/heartbeat contract
+  alive, and exposes status and idle-time endpoints the controller polls.
 
 What each bridge implements on top of this shape: the platform-specific
-**work protocol** (poll/ack/lease semantics, credentials), the **runner
-image** (platform SDK + shell/tool dependencies), and the **manifests**
-(`SandboxTemplate` + `SandboxWarmPool`).
+**work protocol** (poll/ack/lease or connection semantics, credentials),
+the **runner image** (platform SDK or executor + shell/tool dependencies),
+and the **manifests** (`SandboxTemplate` + `SandboxWarmPool`).
 
 ## Bridges
 
 | Directory | Platform | Work protocol |
 | :--- | :--- | :--- |
 | [claude-managed-agents](./claude-managed-agents/) | [Claude Managed Agents self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes) | poll → ack → heartbeat lease hand-off to the in-sandbox worker |
+| [openai-managed-agents](./openai-managed-agents/) | [OpenAI Agents API self-hosted sandboxes](https://developers.openai.com/api/docs/guides/agents-api/environments/self-hosted) | poll session required actions → start the platform's `codex exec-server` in-sandbox; it connects outbound (WSS), no lease — the connection's lifetime is the state |
 
 ## Shared prerequisites
 

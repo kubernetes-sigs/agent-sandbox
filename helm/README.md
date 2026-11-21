@@ -136,7 +136,7 @@ The following table lists the configurable parameters and their defaults. For fl
 
 ### High availability
 
-With `replicaCount` of 2 or more, these opt-in settings keep the controller replicas from being evicted together or scheduled onto the same node:
+With `replicaCount` of 2 or more, these opt-in settings protect the controller replicas from being evicted together (the PDB covers voluntary disruptions only) and spread them across nodes. `ScheduleAnyway` is best-effort: both replicas can still land on one node if only one fits. Use `DoNotSchedule` to forbid that.
 
 ```yaml
 # ha-values.yaml

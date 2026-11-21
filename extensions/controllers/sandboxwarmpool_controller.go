@@ -420,6 +420,10 @@ func (r *SandboxWarmPoolReconciler) refundRefillTokens(key types.NamespacedName,
 // The state is in memory, like the other per-pool tuning state. A controller
 // restart forgets it and costs at most one extra round.
 type stuckBackoffState struct {
+	// uid identifies the pool object the failures belong to. A pool deleted
+	// and recreated under the same name starts without history, even if its
+	// blueprint is the same.
+	uid types.UID
 	// blueprintHash is the blueprint the failures were observed against. A
 	// different blueprint is a different experiment, so the count restarts.
 	blueprintHash string
@@ -430,6 +434,11 @@ type stuckBackoffState struct {
 	// period of it belong to the same round: a replacement created at or after
 	// it cannot be judged stuck sooner than one grace period later.
 	roundStart time.Time
+	// lastBusy is the last time the pool had a member that was not Ready, or
+	// the last time it replaced one. The history is forgotten only after the
+	// pool has been idle for a long while; a replacement that waits to be
+	// scheduled or created for longer than one round keeps the pool busy.
+	lastBusy time.Time
 }
 
 // stuckBackoffDelay is the extra wait beyond the grace period after failures
@@ -454,20 +463,31 @@ func stuckBackoffDelay(failures int) time.Duration {
 // long enough to count, so the caller can schedule a recheck.
 //
 // The count resets when a replacement stays Ready, when the blueprint changes,
-// and after a quiet period long enough that the pool must have been replacing
-// nothing. Only members that turned Ready after the latest round began count
-// as progress: a member that was already Ready says nothing about whether the
-// replacements are succeeding.
-func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, blueprintHash string, members []sandboxv1beta1.Sandbox, grace time.Duration, now time.Time) (int, time.Duration) {
+// when the pool object is a different one, and after the pool has had no
+// non-Ready member for long enough that it must be healthy. Only members that
+// turned Ready after the latest round began count as progress: a member that
+// was already Ready says nothing about whether the replacements are
+// succeeding.
+func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, uid types.UID, blueprintHash string, members []sandboxv1beta1.Sandbox, grace time.Duration, now time.Time) (int, time.Duration) {
 	r.stuckMu.Lock()
 	defer r.stuckMu.Unlock()
 	st := r.stuckBackoff[key]
 	if st == nil {
 		return 0, 0
 	}
-	quiet := !st.roundStart.IsZero() && now.Sub(st.roundStart) > 2*(grace+stuckBackoffDelay(st.failures))
+	if st.uid != uid || (blueprintHash != "" && st.blueprintHash != blueprintHash) {
+		delete(r.stuckBackoff, key)
+		return 0, 0
+	}
+	for i := range members {
+		if !isSandboxReady(&members[i]) {
+			st.lastBusy = now
+			break
+		}
+	}
 	stable, remaining := readyReplacements(members, st.roundStart, now)
-	if stable || quiet || (blueprintHash != "" && st.blueprintHash != blueprintHash) {
+	idle := now.Sub(st.lastBusy) > 2*(grace+stuckBackoffDelay(st.failures))
+	if stable || idle {
 		delete(r.stuckBackoff, key)
 		return 0, 0
 	}
@@ -476,17 +496,18 @@ func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName
 
 // noteStuckReplacement records that this reconcile deleted stuck members and
 // returns the failure count, which grows at most once per grace period.
-func (r *SandboxWarmPoolReconciler) noteStuckReplacement(key types.NamespacedName, blueprintHash string, grace time.Duration, now time.Time) int {
+func (r *SandboxWarmPoolReconciler) noteStuckReplacement(key types.NamespacedName, uid types.UID, blueprintHash string, grace time.Duration, now time.Time) int {
 	r.stuckMu.Lock()
 	defer r.stuckMu.Unlock()
 	if r.stuckBackoff == nil {
 		r.stuckBackoff = make(map[types.NamespacedName]*stuckBackoffState)
 	}
 	st := r.stuckBackoff[key]
-	if st == nil {
-		st = &stuckBackoffState{blueprintHash: blueprintHash}
+	if st == nil || st.uid != uid {
+		st = &stuckBackoffState{uid: uid, blueprintHash: blueprintHash}
 		r.stuckBackoff[key] = st
 	}
+	st.lastBusy = now
 	if st.failures == 0 || now.Sub(st.roundStart) >= grace {
 		st.failures++
 		st.roundStart = now
@@ -499,11 +520,16 @@ func (r *SandboxWarmPoolReconciler) noteStuckReplacement(key types.NamespacedNam
 // has stayed Ready for stuckProgressReadyFor, and otherwise how long until the
 // soonest one will, or 0 if there is none. Nothing else wakes a pool whose
 // members are all Ready, so the caller schedules a recheck for that time.
+//
+// A transition time is stored with second precision, so it is compared with
+// since rounded down to the same precision. A replacement that turns Ready in
+// the second the round began still counts.
 func readyReplacements(members []sandboxv1beta1.Sandbox, since, now time.Time) (bool, time.Duration) {
 	var remaining time.Duration
+	since = since.Truncate(time.Second)
 	for i := range members {
 		cond := meta.FindStatusCondition(members[i].Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
-		if cond == nil || cond.Status != metav1.ConditionTrue || !cond.LastTransitionTime.Time.After(since) {
+		if cond == nil || cond.Status != metav1.ConditionTrue || cond.LastTransitionTime.Time.Before(since) {
 			continue
 		}
 		left := stuckProgressReadyFor - now.Sub(cond.LastTransitionTime.Time)
@@ -684,7 +710,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// same blueprint did not produce a Ready member, so each failed round
 	// extends the wait before the next one. Only the delete path waits longer:
 	// the unschedulable and gated holds below are unchanged.
-	stuckFailures, stuckRecheck := r.observeStuckBackoff(poolKey, currentSandboxBlueprintHash, activeSandboxes, graceWindow, now)
+	stuckFailures, stuckRecheck := r.observeStuckBackoff(poolKey, warmPool.UID, currentSandboxBlueprintHash, activeSandboxes, graceWindow, now)
 	stuckDelay := stuckBackoffDelay(stuckFailures)
 	stuckDeleted := false
 	// A replacement that only just turned Ready is not yet progress, and with
@@ -767,7 +793,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 	activeSandboxes = healthySandboxes
 	if stuckDeleted {
-		stuckFailures = r.noteStuckReplacement(poolKey, currentSandboxBlueprintHash, graceWindow, now)
+		stuckFailures = r.noteStuckReplacement(poolKey, warmPool.UID, currentSandboxBlueprintHash, graceWindow, now)
 	}
 
 	desiredReplicas := int32(1)

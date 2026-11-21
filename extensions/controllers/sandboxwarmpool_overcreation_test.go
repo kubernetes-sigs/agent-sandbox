@@ -1629,6 +1629,22 @@ func TestReadyReplacements(t *testing.T) {
 	stable, remaining = readyReplacements([]sandboxv1beta1.Sandbox{ready(time.Hour)}, roundStart, now)
 	require.False(t, stable, "a member Ready before the round does not count as progress")
 	require.Zero(t, remaining)
+
+	// Transition times are stored with second precision, so a replacement that
+	// turns Ready in the second the round began is stored as that whole second.
+	started := time.Date(2026, 11, 1, 10, 0, 0, 500_000_000, time.UTC)
+	later := started.Add(time.Minute)
+	readyAt := func(at time.Time) sandboxv1beta1.Sandbox {
+		return sandboxv1beta1.Sandbox{Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionReady),
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Time{Time: at},
+		}}}}
+	}
+	stable, _ = readyReplacements([]sandboxv1beta1.Sandbox{readyAt(started.Truncate(time.Second))}, started, later)
+	require.True(t, stable, "Ready in the same second as the round start still counts")
+	stable, _ = readyReplacements([]sandboxv1beta1.Sandbox{readyAt(started.Truncate(time.Second).Add(-time.Second))}, started, later)
+	require.False(t, stable, "Ready in the previous second does not")
 }
 
 func TestObserveStuckBackoff(t *testing.T) {
@@ -1637,8 +1653,8 @@ func TestObserveStuckBackoff(t *testing.T) {
 	base := time.Now()
 	seed := func() *SandboxWarmPoolReconciler {
 		r := &SandboxWarmPoolReconciler{}
-		r.noteStuckReplacement(key, "hash-a", grace, base)
-		r.noteStuckReplacement(key, "hash-a", grace, base.Add(grace+time.Second))
+		r.noteStuckReplacement(key, "uid", "hash-a", grace, base)
+		r.noteStuckReplacement(key, "uid", "hash-a", grace, base.Add(grace+time.Second))
 		return r
 	}
 	readySince := func(since time.Time) []sandboxv1beta1.Sandbox {
@@ -1649,7 +1665,7 @@ func TestObserveStuckBackoff(t *testing.T) {
 		}}}}}
 	}
 	observe := func(r *SandboxWarmPoolReconciler, hash string, members []sandboxv1beta1.Sandbox, now time.Time) int {
-		failures, _ := r.observeStuckBackoff(key, hash, members, grace, now)
+		failures, _ := r.observeStuckBackoff(key, "uid", hash, members, grace, now)
 		return failures
 	}
 	now := base.Add(grace + time.Minute) // the second round began at base+grace+1s
@@ -1667,17 +1683,35 @@ func TestObserveStuckBackoff(t *testing.T) {
 	require.Equal(t, 0, observe(&SandboxWarmPoolReconciler{}, "hash-a", nil, now),
 		"no state means no backoff")
 
-	// A replacement that only just turned Ready keeps the history and asks for a recheck.
+	// A different pool object that reuses the name starts without history.
+	failures, _ := seed().observeStuckBackoff(key, "other-uid", "hash-a", nil, grace, now)
+	require.Zero(t, failures, "history belongs to one pool object")
+	require.Equal(t, 1, seed().noteStuckReplacement(key, "other-uid", "hash-a", grace, now),
+		"a recreated pool begins at its first round")
+
+	// A replacement that waits hours for a node keeps the pool busy, so the
+	// history survives until it is stuck. The pool is idle only after it has
+	// had no non-Ready member for a while.
+	notReady := []sandboxv1beta1.Sandbox{{Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+	}}}}}
 	r := seed()
-	failures, recheck := r.observeStuckBackoff(key, "hash-a", readySince(now.Add(-5*time.Second)), grace, now)
+	require.Equal(t, 2, observe(r, "hash-a", notReady, base.Add(3*time.Hour)),
+		"a non-Ready member means the pool is not idle")
+	require.Equal(t, 2, observe(r, "hash-a", nil, base.Add(3*time.Hour+time.Minute)))
+	require.Equal(t, 0, observe(r, "hash-a", nil, base.Add(4*time.Hour)), "idle for long enough")
+
+	// A replacement that only just turned Ready keeps the history and asks for a recheck.
+	r = seed()
+	failures, recheck := r.observeStuckBackoff(key, "uid", "hash-a", readySince(now.Add(-5*time.Second)), grace, now)
 	require.Equal(t, 2, failures)
 	require.Equal(t, stuckProgressReadyFor-5*time.Second, recheck)
 
 	// Deletions within one grace period are one round; the next round starts a grace later.
 	r = &SandboxWarmPoolReconciler{}
-	require.Equal(t, 1, r.noteStuckReplacement(key, "h", grace, base))
-	require.Equal(t, 1, r.noteStuckReplacement(key, "h", grace, base.Add(grace-time.Second)))
-	require.Equal(t, 2, r.noteStuckReplacement(key, "h", grace, base.Add(grace)))
+	require.Equal(t, 1, r.noteStuckReplacement(key, "uid", "h", grace, base))
+	require.Equal(t, 1, r.noteStuckReplacement(key, "uid", "h", grace, base.Add(grace-time.Second)))
+	require.Equal(t, 2, r.noteStuckReplacement(key, "uid", "h", grace, base.Add(grace)))
 }
 
 // TestReconcilePool_StuckReplacementBackoff walks a pool whose template can
@@ -1781,7 +1815,7 @@ func TestReconcilePool_StuckReplacementBackoff(t *testing.T) {
 	ev = warnings()
 	require.Len(t, ev, 1)
 	require.Contains(t, ev[0], reasonWarmPoolProgressing)
-	failures, _ := r.observeStuckBackoff(types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}, "", nil, grace, current)
+	failures, _ := r.observeStuckBackoff(types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}, warmPool.UID, "", nil, grace, current)
 	require.Zero(t, failures)
 }
 
@@ -1812,20 +1846,20 @@ func TestReconcilePool_StuckBackoffRechecksStableReady(t *testing.T) {
 	}
 	key := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
 	grace := DefaultWarmPoolReadinessGracePeriod
-	r.noteStuckReplacement(key, hash, grace, base.Add(-time.Minute))
+	r.noteStuckReplacement(key, warmPool.UID, hash, grace, base.Add(-time.Minute))
 	ctx := context.Background()
 
 	requeueAfter, err := r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
 	require.Equal(t, stuckProgressReadyFor-5*time.Second+graceRequeueSlack, requeueAfter,
 		"the recheck lands once the member has been Ready long enough")
-	failures, _ := r.observeStuckBackoff(key, hash, nil, grace, current)
+	failures, _ := r.observeStuckBackoff(key, warmPool.UID, hash, nil, grace, current)
 	require.Equal(t, 1, failures, "not progress yet")
 
 	current = current.Add(requeueAfter)
 	_, err = r.reconcilePool(ctx, warmPool)
 	require.NoError(t, err)
-	failures, _ = r.observeStuckBackoff(key, hash, nil, grace, current)
+	failures, _ = r.observeStuckBackoff(key, warmPool.UID, hash, nil, grace, current)
 	require.Zero(t, failures, "a replacement that stayed Ready ends the backoff")
 }
 

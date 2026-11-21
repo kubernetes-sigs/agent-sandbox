@@ -194,6 +194,14 @@ func TestPrometheusImportsStayInMetricsPackage(t *testing.T) {
 			return err
 		}
 		for _, imp := range file.Imports {
+			// promhttp is carved out because metricsserver.Options.HandlerOpts is
+			// typed []func(*promhttp.HandlerOpts), so wiring the metrics server in
+			// cmd/ cannot avoid the import. It serves metrics; the families this
+			// guard protects are declared through the root package (or promauto),
+			// which stay rejected everywhere outside the allowed dir.
+			if imp.Path.Value == `"`+prometheusPath+`/promhttp"` {
+				continue
+			}
 			require.NotContains(t, imp.Path.Value, prometheusPath,
 				"%s imports the Prometheus client; metrics belong in %s so they reach the generated reference", path, controllerMetricsDir)
 		}

@@ -248,7 +248,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	// Kill the entire process group (not just the child PID) when the
 	// stream context is cancelled (client disconnects). This prevents
 	// grandchildren from becoming orphan processes.
-	s.killProcessGroupOnContextDone(stream.Context(), cmd, proc.Done)
+	stopCancelKill := s.killProcessGroupOnContextDone(stream.Context(), cmd)
 
 	if err := stream.Send(&processv1.StartResponse{
 		Event: &processv1.StartResponse_Init{
@@ -258,9 +258,10 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		_ = proc.Signal(syscall.SIGKILL)
 		closeAll(stdoutR, stderrR, stdinW)
 		go func() {
+			stopCancelKill()
 			_ = cmd.Wait()
 			_ = proc.ClosePTY()
-			close(proc.Done) // release the cancellation watcher so it doesn't leak
+			close(proc.Done)
 		}()
 		return status.Errorf(codes.Internal, "failed to send InitEvent: %v", err)
 	}
@@ -310,6 +311,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		waitForExit(cmd.Process.Pid)
 		waitForReaders(&streamWg, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
+		stopCancelKill()
 		waitErr = cmd.Wait()
 	} else {
 		streamWg.Add(2)
@@ -319,6 +321,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		waitForExit(cmd.Process.Pid)
 		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
+		stopCancelKill()
 		waitErr = cmd.Wait()
 	}
 
@@ -558,11 +561,21 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 	}()
 	var releaseOnce sync.Once
 	releaseLeader := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseLeader()
+	var pendingKill chan struct{}
+	defer func() {
+		// On an early return the leader stays unreaped until termination ends.
+		if pendingKill == nil {
+			releaseLeader()
+			return
+		}
+		go func() {
+			<-pendingKill
+			releaseLeader()
+		}()
+	}()
 	var outcome executionOutcome
 	pendingWait, pendingOut, pendingErr := exited, run.stdout.done, run.stderr.done
 	ctxDone := ctx.Done()
-	var pendingKill chan struct{}
 	var cleanupDone <-chan struct{}
 	var cleanupCancel context.CancelFunc
 	var drainDone <-chan time.Time
@@ -774,9 +787,11 @@ func closeAll(files ...*os.File) {
 // killProcessGroupOnContextDone starts a goroutine that terminates the
 // command's entire process tree when ctx is cancelled. This replaces the
 // default exec.CommandContext behaviour (which only sends SIGKILL to the
-// child PID) so that grandchildren are reaped as well. The goroutine exits
-// when ctx is done OR when the process exits (done closed), whichever comes
-// first.
+// child PID) so that grandchildren are reaped as well.
+//
+// The returned stop function prevents any new termination and waits for one
+// in progress. Callers must call it before cmd.Wait reaps the leader, since
+// its PID/PGID may be reused by an unrelated process afterwards.
 //
 // The kill strategy is layered to work across container runtimes:
 //
@@ -792,21 +807,31 @@ func closeAll(files ...*os.File) {
 //
 // The caller must have set Setpgid (or Setsid via PTY) on the command so
 // that the child and its descendants share a process group.
-func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
+func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *exec.Cmd) (stop func()) {
+	var mu sync.Mutex
+	var stopped bool
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
 	go func() {
 		select {
 		case <-ctx.Done():
-			// Skip the kill if the child has already been reaped by Wait;
-			// its PID/PGID may have been reused by an unrelated process.
-			select {
-			case <-done:
-				return
-			default:
+			mu.Lock()
+			defer mu.Unlock()
+			if !stopped {
+				s.killProcessTree(context.Background(), cmd)
 			}
-			s.killProcessTree(context.Background(), cmd)
-		case <-done:
+		case <-stopCh:
 		}
 	}()
+	return func() {
+		stopOnce.Do(func() {
+			// Taking the lock waits for a termination already in progress.
+			mu.Lock()
+			stopped = true
+			mu.Unlock()
+			close(stopCh)
+		})
+	}
 }
 
 func (s *ProcessServer) killProcessTree(ctx context.Context, cmd *exec.Cmd) {

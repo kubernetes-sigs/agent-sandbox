@@ -391,3 +391,26 @@ func TestMintScopedToken_RequiresFields(t *testing.T) {
 		})
 	}
 }
+
+// TestScopedToken_V1DoesNotBindSandboxUID pins a documented limitation: a v1
+// token has no UID claim, so it authorizes a Sandbox recreated under the same
+// namespace and name. Use v2 when recreation isolation matters. If v1
+// semantics ever change, update this test and the README together.
+func TestScopedToken_V1DoesNotBindSandboxUID(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	tok, err := MintScopedToken(secret, "ns", "box-a", time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth, err := NewScopedTokenAuthorizer(ScopedTokenOptions{Secret: secret})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	for _, uid := range []string{"uid-original", "uid-recreated"} {
+		target := testAuthorizationTarget("ns", "box-a")
+		target.SandboxUID = uid
+		if err := auth.Authorize(context.Background(), reqWithBearer(tok), target); err != nil {
+			t.Fatalf("v1 token rejected for Sandbox UID %q: %v", uid, err)
+		}
+	}
+}

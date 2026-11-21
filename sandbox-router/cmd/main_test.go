@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +170,17 @@ func TestWarnIfScopedTokenV1Only(t *testing.T) {
 			warnIfScopedTokenV1Only(log, tc.hasV1Secret, tc.hasV2Keys)
 			if got := len(lines) > 0; got != tc.wantWarning {
 				t.Fatalf("warning logged = %v, want %v (lines: %q)", got, tc.wantWarning, lines)
+			}
+			if !tc.wantWarning {
+				return
+			}
+			for _, want := range []string{
+				`"msg"="` + scopedTokenV1OnlyMsg + `"`,
+				`"flag"="--authz-scoped-token-secret-file"`,
+			} {
+				if !strings.Contains(lines[0], want) {
+					t.Errorf("warning %q does not contain %q", lines[0], want)
+				}
 			}
 		})
 	}

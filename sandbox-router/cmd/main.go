@@ -108,6 +108,10 @@ const cacheSyncTimeout = 90 * time.Second
 // other startup steps, so a slow but healthy start does not trigger a restart loop.
 const probeStartupTimeout = 120 * time.Second
 
+// scopedTokenV1OnlyMsg is constant so that log queries and alerts can match
+// it exactly. The README explains the limitation and the migration steps.
+const scopedTokenV1OnlyMsg = "scoped-token v1 is the only enabled token format"
+
 // warnIfScopedTokenV1Only logs a warning when the router accepts only
 // scoped-token v1. A v1 token carries no Sandbox UID, so it keeps authorizing
 // a Sandbox that is deleted and recreated under the same namespace and name
@@ -117,7 +121,10 @@ func warnIfScopedTokenV1Only(log logr.Logger, hasV1Secret, hasV2Keys bool) {
 	if !hasV1Secret || hasV2Keys {
 		return
 	}
-	log.Info("WARNING: scoped-token v1 is the only enabled token format. v1 tokens bind the Sandbox namespace and name but not its UID, so a token stays valid for a Sandbox recreated under the same name until the token expires. Migrate to v2 with --authz-scoped-token-verification-keys-file.")
+	log.Info(scopedTokenV1OnlyMsg,
+		"flag", "--authz-scoped-token-secret-file",
+		"reason", "v1 tokens do not bind the Sandbox UID",
+		"migrateWith", "--authz-scoped-token-verification-keys-file")
 }
 
 func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {

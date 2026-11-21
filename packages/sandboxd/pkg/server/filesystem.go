@@ -289,9 +289,16 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := os.Stat(target)
+	root, ok := s.openRoot(w)
+	if !ok {
+		return
+	}
+	defer func() { _ = root.Close() }()
+
+	rel := rootRel(root, target)
+	info, err := root.Stat(rel)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if os.IsNotExist(err) || isDanglingLink(root, rel) {
 			s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
 		} else if os.IsPermission(err) {
 			s.writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "permission denied")
@@ -316,11 +323,11 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if info.IsDir() {
-		s.serveDirectoryListing(w, r, target, maxDepth)
+		s.serveDirectoryListing(w, r, root, target, maxDepth)
 		return
 	}
 
-	f, err := openRegularFile(target, os.O_RDONLY, 0)
+	f, err := openRegularFile(root, rel, os.O_RDONLY, 0)
 	if err != nil {
 		if errors.Is(err, errUnsupportedFileType) {
 			s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
@@ -339,6 +346,14 @@ func (s *RESTServer) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	// handles HEAD, Content-Length, and Range requests, and keeps the
 	// Content-Type set above.
 	http.ServeContent(w, r, "", info.ModTime(), f)
+}
+
+// isDanglingLink reports whether rel is a symlink that Stat could not follow.
+// pathutil resolves every link that has a target, so the only one left is
+// dangling. os.Root also refuses to follow such a link when it is absolute.
+func isDanglingLink(root *os.Root, rel string) bool {
+	info, err := root.Lstat(rel)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
 }
 
 // typeMismatch returns why the path disagrees with the "type" query, or "".
@@ -378,26 +393,27 @@ func (s *RESTServer) listDepth(w http.ResponseWriter, r *http.Request) (depth in
 
 // serveDirectoryListing lists target up to maxDepth levels deep. Entry names
 // are paths relative to target, so a flat listing yields plain names.
-func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Request, target string, maxDepth int) {
+func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Request, root *os.Root, target string, maxDepth int) {
 	requestPath := r.PathValue("path")
 	entries := []FileEntry{}
+	start := rootRel(root, target)
 	// WalkDir visits each directory's entries in name order and does not
 	// follow symlinks, so a link to a directory is listed but never entered.
-	err := filepath.WalkDir(target, func(p string, d fs.DirEntry, walkErr error) error {
+	err := fs.WalkDir(root.FS(), filepath.ToSlash(start), func(p string, d fs.DirEntry, walkErr error) error {
 		if err := r.Context().Err(); err != nil {
 			return err
 		}
-		if p == target {
+		if p == filepath.ToSlash(start) {
 			return walkErr
 		}
 		if walkErr != nil {
 			return nil // Unreadable subdirectory: keep it listed, without contents.
 		}
-		rel, err := filepath.Rel(target, p)
+		rel, err := filepath.Rel(start, filepath.FromSlash(p))
 		if err != nil {
 			return err
 		}
-		entry, ok := s.fileEntry(d, filepath.ToSlash(rel), filepath.Join(requestPath, rel))
+		entry, ok := s.fileEntry(root, filepath.FromSlash(p), filepath.ToSlash(rel), filepath.Join(requestPath, rel))
 		if !ok {
 			return nil
 		}
@@ -428,20 +444,21 @@ func (s *RESTServer) serveDirectoryListing(w http.ResponseWriter, r *http.Reques
 	s.writeJSON(w, http.StatusOK, DirectoryListing{Path: relPath, Entries: entries})
 }
 
-// fileEntry describes d, which lives at sandboxPath below the sandbox root, as
-// a listing row called name. It returns ok=false for entries a listing omits:
-// ones that vanished, and symlinks that are broken or leave the sandbox root.
-func (s *RESTServer) fileEntry(d fs.DirEntry, name, sandboxPath string) (entry FileEntry, ok bool) {
-	info, err := d.Info()
+// fileEntry describes the entry at rel below root, which lives at sandboxPath
+// in the sandbox, as a listing row called name. It returns ok=false for
+// entries a listing omits: ones that vanished, and symlinks that are broken or
+// leave the sandbox root.
+func (s *RESTServer) fileEntry(root *os.Root, rel, name, sandboxPath string) (entry FileEntry, ok bool) {
+	info, err := root.Lstat(rel)
 	if err != nil {
 		return FileEntry{}, false
 	}
-	if d.Type()&os.ModeSymlink != 0 {
+	if info.Mode()&os.ModeSymlink != 0 {
 		resolved, err := pathutil.SanitizePath(s.rootDir, sandboxPath)
 		if err != nil {
 			return FileEntry{}, false
 		}
-		if info, err = os.Stat(resolved); err != nil {
+		if info, err = root.Stat(rootRel(root, resolved)); err != nil {
 			return FileEntry{}, false
 		}
 	}
@@ -497,6 +514,11 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	root, ok := s.openRoot(w)
+	if !ok {
+		return
+	}
+	defer func() { _ = root.Close() }()
 
 	if extract {
 		if appendMode || createOnly || putType != "" {
@@ -504,7 +526,7 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 				"extract cannot be used with append, type, or If-None-Match")
 			return
 		}
-		s.putArchive(w, r, target, mode)
+		s.putArchive(w, r, root, target, mode)
 		return
 	}
 
@@ -520,11 +542,11 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 				"If-None-Match cannot be used with type=directory")
 			return
 		}
-		s.putDirectory(w, r, target, mode)
+		s.putDirectory(w, r, root, target, mode)
 		return
 	}
 
-	if info, err := os.Stat(target); err == nil && info.IsDir() {
+	if info, err := root.Stat(rootRel(root, target)); err == nil && info.IsDir() {
 		if createOnly {
 			s.writePathExists(w)
 			return
@@ -551,7 +573,7 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	case appendMode:
 		write = appendWrite
 	}
-	if err := write(target, body, mode); err != nil {
+	if err := write(root, target, body, mode); err != nil {
 		switch {
 		case createOnly && errors.Is(err, os.ErrExist):
 			s.writePathExists(w)
@@ -569,13 +591,13 @@ func (s *RESTServer) handlePutFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // putDirectory handles PUT with type=directory. It ignores the request body.
-func (s *RESTServer) putDirectory(w http.ResponseWriter, r *http.Request, target string, mode os.FileMode) {
+func (s *RESTServer) putDirectory(w http.ResponseWriter, r *http.Request, root *os.Root, target string, mode os.FileMode) {
 	parents, ok := s.boolQuery(w, r, "parents")
 	if !ok {
 		return
 	}
 
-	if err := makeDirectory(target, mode, parents); err != nil {
+	if err := makeDirectory(root, target, mode, parents); err != nil {
 		s.writeMakeDirectoryError(w, err)
 		return
 	}
@@ -600,16 +622,17 @@ func (s *RESTServer) writeMakeDirectoryError(w http.ResponseWriter, err error) {
 // makeDirectory creates the directory target, and its missing parents when
 // parents is true. It succeeds when target is already a directory, so retries
 // are safe, and applies mode only to a directory it creates.
-func makeDirectory(target string, mode os.FileMode, parents bool) error {
+func makeDirectory(root *os.Root, target string, mode os.FileMode, parents bool) error {
+	rel := rootRel(root, target)
 	if parents {
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 			return fmt.Errorf("failed to create parent directory: %w", err)
 		}
 	}
 
-	err := os.Mkdir(target, mode)
+	err := root.Mkdir(rel, mode)
 	if errors.Is(err, os.ErrExist) {
-		if info, statErr := os.Stat(target); statErr == nil && info.IsDir() {
+		if info, statErr := root.Stat(rel); statErr == nil && info.IsDir() {
 			return nil
 		}
 	}
@@ -619,7 +642,7 @@ func makeDirectory(target string, mode os.FileMode, parents bool) error {
 
 	// Mkdir applies the umask; chmod so a new directory gets exactly mode, as
 	// atomicWrite does for files.
-	if err := os.Chmod(target, mode); err != nil {
+	if err := root.Chmod(rel, mode); err != nil {
 		return fmt.Errorf("failed to set directory mode: %w", err)
 	}
 	return nil
@@ -682,32 +705,34 @@ func (s *RESTServer) createOnly(w http.ResponseWriter, r *http.Request) (createO
 // atomically, so an already-open reader sees either the previous complete file
 // or the new one. A concurrent delete can remove the temporary file or its
 // parent directory before rename, in which case the write fails.
-func atomicWrite(target string, src io.Reader, mode os.FileMode) error {
-	return writeViaTemp(target, src, mode, os.Rename)
+func atomicWrite(root *os.Root, target string, src io.Reader, mode os.FileMode) error {
+	return writeViaTemp(root, target, src, mode, root.Rename)
 }
 
 // atomicCreate is atomicWrite for a target that must not exist: when it does,
 // the write fails with an error wrapping os.ErrExist. link(2) never replaces
 // its destination, so the check and the create are one atomic step.
-func atomicCreate(target string, src io.Reader, mode os.FileMode) error {
-	return writeViaTemp(target, src, mode, func(tmp, target string) error {
-		if err := os.Link(tmp, target); err != nil {
+func atomicCreate(root *os.Root, target string, src io.Reader, mode os.FileMode) error {
+	return writeViaTemp(root, target, src, mode, func(tmp, target string) error {
+		if err := root.Link(tmp, target); err != nil {
 			return err
 		}
-		_ = os.Remove(tmp)
+		_ = root.Remove(tmp)
 		return nil
 	})
 }
 
 // writeViaTemp writes src to a synced temporary file beside target, then calls
-// place to put it at target.
-func writeViaTemp(target string, src io.Reader, mode os.FileMode, place func(tmp, target string) error) (err error) {
-	dir := filepath.Dir(target)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+// place, with paths relative to root, to put it at target.
+func writeViaTemp(root *os.Root, target string, src io.Reader, mode os.FileMode, place func(tmp, target string) error) (err error) {
+	rel := rootRel(root, target)
+	dir := filepath.Dir(rel)
+	if err := root.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	tmpFile, err := os.CreateTemp(dir, tmpPattern)
+	tmp := tmpPath(dir)
+	tmpFile, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -716,7 +741,7 @@ func writeViaTemp(target string, src io.Reader, mode os.FileMode, place func(tmp
 	defer func() {
 		if err != nil {
 			_ = tmpFile.Close()
-			_ = os.Remove(tmpFile.Name())
+			_ = root.Remove(tmp)
 		}
 	}()
 
@@ -732,7 +757,7 @@ func writeViaTemp(target string, src io.Reader, mode os.FileMode, place func(tmp
 	if err = tmpFile.Close(); err != nil {
 		return fmt.Errorf("failed to close file: %w", err)
 	}
-	if err = place(tmpFile.Name(), target); err != nil {
+	if err = place(tmp, rel); err != nil {
 		return fmt.Errorf("failed to move file into place: %w", err)
 	}
 	return nil
@@ -742,16 +767,17 @@ func writeViaTemp(target string, src io.Reader, mode os.FileMode, place func(tmp
 // parent directories, when missing, and applies mode only to a file it creates.
 // Unlike atomicWrite, readers can see a partial append, and concurrent appends
 // can interleave between writes.
-func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+func appendWrite(root *os.Root, target string, src io.Reader, mode os.FileMode) (err error) {
+	rel := rootRel(root, target)
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
 	// O_EXCL tells us whether this request created the file.
-	f, err := openRegularFile(target, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
+	f, err := openRegularFile(root, rel, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_EXCL, mode)
 	created := err == nil
 	if errors.Is(err, os.ErrExist) {
-		f, err = openRegularFile(target, os.O_WRONLY|os.O_APPEND, 0)
+		f, err = openRegularFile(root, rel, os.O_WRONLY|os.O_APPEND, 0)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to open file: %w", err)
@@ -775,20 +801,21 @@ func appendWrite(target string, src io.Reader, mode os.FileMode) (err error) {
 	return nil
 }
 
-// openRegularFile rejects special files without waiting for a FIFO peer. Check
-// the opened descriptor because a path can change after a prior Stat call.
-func openRegularFile(path string, flags int, mode os.FileMode) (*os.File, error) {
-	f, err := os.OpenFile(path, flags|syscall.O_NONBLOCK, mode)
+// openRegularFile opens the file at rel below root. It rejects special files
+// without waiting for a FIFO peer. Check the opened descriptor because a path
+// can change after a prior Stat call.
+func openRegularFile(root *os.Root, rel string, flags int, mode os.FileMode) (*os.File, error) {
+	f, err := root.OpenFile(rel, flags|syscall.O_NONBLOCK, mode)
 	if errors.Is(err, syscall.ENXIO) {
 		// A FIFO opened for writing without a reader fails before Stat.
-		return nil, fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(path))
+		return nil, fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
 	}
 	if err != nil {
 		return nil, err
 	}
 	info, err := f.Stat()
 	if err == nil && !info.Mode().IsRegular() {
-		err = fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(path))
+		err = fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
 	}
 	if err != nil {
 		_ = f.Close()
@@ -813,8 +840,8 @@ var (
 // stream that may be gzip-compressed, into target and creates target first
 // when it is missing. Extraction is not atomic: an error leaves the entries
 // written so far in place.
-func (s *RESTServer) putArchive(w http.ResponseWriter, r *http.Request, target string, mode os.FileMode) {
-	if err := makeDirectory(target, mode, true); err != nil {
+func (s *RESTServer) putArchive(w http.ResponseWriter, r *http.Request, root *os.Root, target string, mode os.FileMode) {
+	if err := makeDirectory(root, target, mode, true); err != nil {
 		s.writeMakeDirectoryError(w, err)
 		return
 	}
@@ -826,7 +853,7 @@ func (s *RESTServer) putArchive(w http.ResponseWriter, r *http.Request, target s
 	}
 	defer cleanup()
 
-	if err := s.extractTar(body, target); err != nil {
+	if err := s.extractTar(root, body, target); err != nil {
 		s.writeExtractError(w, err)
 		return
 	}
@@ -834,7 +861,7 @@ func (s *RESTServer) putArchive(w http.ResponseWriter, r *http.Request, target s
 }
 
 // extractTar writes the entries of the tar stream src below dir.
-func (s *RESTServer) extractTar(src io.Reader, dir string) error {
+func (s *RESTServer) extractTar(root *os.Root, src io.Reader, dir string) error {
 	buffered := bufio.NewReader(src)
 	src = buffered
 	if magic, _ := buffered.Peek(len(gzipMagic)); bytes.Equal(magic, gzipMagic) {
@@ -865,7 +892,7 @@ func (s *RESTServer) extractTar(src io.Reader, dir string) error {
 		if entries > s.maxExtractEntries || bytesLeft < 0 {
 			return errArchiveTooLarge
 		}
-		if err := s.extractEntry(tr, hdr, dir); err != nil {
+		if err := s.extractEntry(root, tr, hdr, dir); err != nil {
 			return err
 		}
 	}
@@ -874,7 +901,7 @@ func (s *RESTServer) extractTar(src io.Reader, dir string) error {
 // extractEntry writes one archive entry below dir. It supports regular files,
 // directories, and symlinks. It rejects hard links, which could alias a file
 // outside the sandbox root, and device and FIFO entries.
-func (s *RESTServer) extractEntry(body io.Reader, hdr *tar.Header, dir string) error {
+func (s *RESTServer) extractEntry(root *os.Root, body io.Reader, hdr *tar.Header, dir string) error {
 	if hdr.Typeflag == tar.TypeXGlobalHeader {
 		return nil // `git archive` writes one that carries the commit ID.
 	}
@@ -904,7 +931,7 @@ func (s *RESTServer) extractEntry(body io.Reader, hdr *tar.Header, dir string) e
 	// A directory entry may only meet a directory, and any other entry only a
 	// non-directory. Lstat reports a symlink as a non-directory.
 	isDir := hdr.Typeflag == tar.TypeDir
-	if existing, err := os.Lstat(leaf); err == nil && existing.IsDir() != isDir {
+	if existing, err := root.Lstat(rootRel(root, leaf)); err == nil && existing.IsDir() != isDir {
 		return fmt.Errorf("%w: %q", errArchiveConflict, hdr.Name)
 	}
 
@@ -912,27 +939,15 @@ func (s *RESTServer) extractEntry(body io.Reader, hdr *tar.Header, dir string) e
 	switch hdr.Typeflag {
 	case tar.TypeDir:
 		// Keep owner access so the entries below the directory can be written.
-		return makeDirectory(leaf, perm|0o700, true)
+		return makeDirectory(root, leaf, perm|0o700, true)
 	case tar.TypeReg:
-		return atomicWrite(leaf, body, perm)
+		return atomicWrite(root, leaf, body, perm)
 	default:
-		return replaceSymlink(leaf, hdr.Linkname)
+		if err := root.MkdirAll(filepath.Dir(rootRel(root, leaf)), 0o755); err != nil {
+			return fmt.Errorf("failed to create parent directory: %w", err)
+		}
+		return atomicSymlink(root, hdr.Linkname, leaf)
 	}
-}
-
-// replaceSymlink makes link a symlink to target, replacing an existing file or
-// symlink and creating missing parent directories.
-func replaceSymlink(link, target string) error {
-	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
-		return fmt.Errorf("failed to create parent directory: %w", err)
-	}
-	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to replace symlink: %w", err)
-	}
-	if err := os.Symlink(target, link); err != nil {
-		return fmt.Errorf("failed to create symlink: %w", err)
-	}
-	return nil
 }
 
 // writeExtractError maps an extraction failure to the status the spec
@@ -966,7 +981,14 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := os.Lstat(target); err != nil {
+	root, ok := s.openRoot(w)
+	if !ok {
+		return
+	}
+	defer func() { _ = root.Close() }()
+
+	rel := rootRel(root, target)
+	if _, err := root.Lstat(rel); err != nil {
 		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
 			s.writeError(w, http.StatusNotFound, "NOT_FOUND", "path does not exist within the sandbox")
 		} else {
@@ -996,13 +1018,13 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		}
 		// For the sandbox root directory itself, clear its contents rather
 		// than deleting the volume mount entity.
-		dirEntries, err := os.ReadDir(target)
+		dirEntries, err := fs.ReadDir(root.FS(), ".")
 		if err != nil {
 			s.writeUnexpectedFSError(w, err)
 			return
 		}
 		for _, entry := range dirEntries {
-			if err := os.RemoveAll(filepath.Join(target, entry.Name())); err != nil {
+			if err := root.RemoveAll(entry.Name()); err != nil {
 				s.writeUnexpectedFSError(w, err)
 				return
 			}
@@ -1013,9 +1035,9 @@ func (s *RESTServer) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 
 	var removeErr error
 	if recursive {
-		removeErr = os.RemoveAll(target)
+		removeErr = root.RemoveAll(rel)
 	} else {
-		removeErr = os.Remove(target)
+		removeErr = root.Remove(rel)
 	}
 	if removeErr != nil {
 		switch {
@@ -1081,7 +1103,13 @@ func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srcInfo, err := os.Lstat(src)
+	root, ok := s.openRoot(w)
+	if !ok {
+		return
+	}
+	defer func() { _ = root.Close() }()
+
+	srcInfo, err := root.Lstat(rootRel(root, src))
 	if err != nil {
 		s.writeFSError(w, err)
 		return
@@ -1095,7 +1123,7 @@ func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch dstInfo, err := os.Lstat(dst); {
+	switch dstInfo, err := root.Lstat(rootRel(root, dst)); {
 	case err == nil && !overwrite:
 		s.writeError(w, http.StatusConflict, "CONFLICT", "destination exists; pass overwrite=true to replace a file")
 		return
@@ -1107,9 +1135,9 @@ func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = os.MkdirAll(filepath.Dir(dst), 0o755)
+	err = root.MkdirAll(filepath.Dir(rootRel(root, dst)), 0o755)
 	if err == nil {
-		err = s.moveOrCopy(action, src, dst)
+		err = moveOrCopy(root, action, src, dst)
 	}
 	if errors.Is(err, errUnsupportedFileType) {
 		s.writeError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
@@ -1122,19 +1150,19 @@ func (s *RESTServer) handleFileAction(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// moveOrCopy runs action on src and dst, which are resolved paths. Sources are
-// read through a handle on the sandbox root, so a path swapped for a symlink
-// during the operation cannot lead outside it.
-func (s *RESTServer) moveOrCopy(action, src, dst string) error {
-	root, err := os.OpenRoot(s.resolvedRoot)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
+// moveOrCopy runs action on src and dst, which are resolved paths below root.
+func moveOrCopy(root *os.Root, action, src, dst string) error {
 	if action == actionMove {
-		return moveEntry(os.Rename, root, src, dst)
+		return moveEntry(renameIn(root), root, src, dst)
 	}
 	return copyEntry(root, src, dst)
+}
+
+// renameIn returns a rename of resolved paths through root.
+func renameIn(root *os.Root) func(oldPath, newPath string) error {
+	return func(oldPath, newPath string) error {
+		return root.Rename(rootRel(root, oldPath), rootRel(root, newPath))
+	}
 }
 
 // isWithin reports whether path lies strictly inside dir. Both must be clean
@@ -1154,27 +1182,49 @@ func moveEntry(rename func(oldPath, newPath string) error, root *os.Root, src, d
 	}
 	// Claim the source under a private name first: a request that replaces
 	// src while the copy runs must not be deleted with the original.
-	staged, err := stageEntry(src)
+	staged, err := stageEntry(root, src)
 	if err != nil {
 		return err
 	}
 	if err := copyEntry(root, staged, dst); err != nil {
-		if _, statErr := os.Lstat(src); errors.Is(statErr, os.ErrNotExist) {
-			_ = os.Rename(staged, src)
+		if _, statErr := root.Lstat(rootRel(root, src)); errors.Is(statErr, os.ErrNotExist) {
+			_ = renameIn(root)(staged, src)
 		}
 		return err
 	}
-	return removeTree(staged)
+	return removeTree(root, staged)
 }
 
 // stageEntry renames src to a fresh private name in the same directory, which
 // cannot fail with EXDEV, and returns that name.
-func stageEntry(src string) (string, error) {
+func stageEntry(root *os.Root, src string) (string, error) {
 	staged := tmpPath(filepath.Dir(src))
-	if err := os.Rename(src, staged); err != nil {
+	if err := renameIn(root)(src, staged); err != nil {
 		return "", err
 	}
 	return staged, nil
+}
+
+// openRoot opens a handle on the sandbox root. A request does its file
+// operations through one, so a directory that a process in the sandbox swaps
+// for a symlink after pathutil resolved the path cannot lead outside the root.
+func (s *RESTServer) openRoot(w http.ResponseWriter) (*os.Root, bool) {
+	root, err := os.OpenRoot(s.resolvedRoot)
+	if err != nil {
+		s.writeUnexpectedFSError(w, err)
+		return nil, false
+	}
+	return root, true
+}
+
+// rootRel returns p, a resolved path below root, relative to root, the form
+// os.Root methods take. A path outside root becomes "..", which they refuse.
+func rootRel(root *os.Root, p string) string {
+	rel, err := filepath.Rel(root.Name(), p)
+	if err != nil {
+		return ".."
+	}
+	return rel
 }
 
 // tmpPath returns an unused path for a temporary entry in dir.
@@ -1186,10 +1236,7 @@ func tmpPath(dir string) string {
 // builds a directory in a temporary sibling and renames it into place, so a
 // failed copy leaves no partial dst.
 func copyEntry(root *os.Root, src, dst string) error {
-	rel, err := filepath.Rel(root.Name(), src)
-	if err != nil {
-		return err
-	}
+	rel := rootRel(root, src)
 	info, err := root.Lstat(rel)
 	if err != nil {
 		return err
@@ -1197,37 +1244,38 @@ func copyEntry(root *os.Root, src, dst string) error {
 	if !info.IsDir() {
 		return copyLeaf(root, rel, dst, info)
 	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dst), tmpPattern)
-	if err != nil {
+	tmp := tmpPath(filepath.Dir(dst))
+	if err := root.Mkdir(rootRel(root, tmp), 0o700); err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	if err := copyTree(root, rel, tmp, info.Mode().Perm()); err != nil {
-		_ = removeTree(tmp)
+		_ = removeTree(root, tmp)
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		_ = removeTree(tmp)
+	if err := renameIn(root)(tmp, dst); err != nil {
+		_ = removeTree(root, tmp)
 		return fmt.Errorf("failed to move directory into place: %w", err)
 	}
 	return nil
 }
 
-// removeTree is os.RemoveAll after making every directory owner-writable, so a
-// read-only one does not block removal.
-func removeTree(path string) error {
-	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
+// removeTree removes path, a resolved path below root, after making every
+// directory owner-writable, so a read-only one does not block removal.
+func removeTree(root *os.Root, path string) error {
+	rel := rootRel(root, path)
+	_ = fs.WalkDir(root.FS(), filepath.ToSlash(rel), func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr == nil && d.IsDir() {
-			if info, err := d.Info(); err == nil {
-				_ = os.Chmod(p, info.Mode().Perm()|0o700)
+			if info, err := root.Lstat(p); err == nil {
+				_ = root.Chmod(p, info.Mode().Perm()|0o700)
 			}
 		}
 		return nil
 	})
-	return os.RemoveAll(path)
+	return root.RemoveAll(rel)
 }
 
 // copyTree copies the entries of directory rel, a path below root, into the
-// existing directory dst, then sets dst to mode. The mode comes last so a
+// existing directory dst, a resolved path below root, then sets dst to mode. The mode comes last so a
 // read-only source directory does not block writing its children.
 func copyTree(root *os.Root, rel, dst string, mode os.FileMode) error {
 	dir, err := root.Open(rel)
@@ -1251,27 +1299,27 @@ func copyTree(root *os.Root, rel, dst string, mode os.FileMode) error {
 			}
 			continue
 		}
-		if err := os.Mkdir(to, 0o700); err != nil {
+		if err := root.Mkdir(rootRel(root, to), 0o700); err != nil {
 			return err
 		}
 		if err := copyTree(root, from, to, info.Mode().Perm()); err != nil {
 			return err
 		}
 	}
-	return os.Chmod(dst, mode)
+	return root.Chmod(rootRel(root, dst), mode)
 }
 
-// copyLeaf copies the regular file or symlink at rel below root to dst. It
+// copyLeaf copies the regular file or symlink at rel below root to dst, a
+// resolved path below root. It
 // recreates a symlink rather than following it, so a copy never reads outside
 // the sandbox root through a link inside a copied tree.
 func copyLeaf(root *os.Root, rel, dst string, info os.FileInfo) error {
 	switch {
 	case info.Mode().IsRegular():
 		// A process in the sandbox can swap the file after the caller's Lstat.
-		// OpenFile refuses a swapped-in symlink that leaves the sandbox root,
-		// O_NONBLOCK keeps a swapped-in named pipe from blocking the open, and
-		// the Stat below rejects anything that is not a regular file.
-		f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		// openRegularFile refuses a swapped-in symlink that leaves the sandbox
+		// root and a swapped-in named pipe or other special file.
+		f, err := openRegularFile(root, rel, os.O_RDONLY, 0)
 		if err != nil {
 			return err
 		}
@@ -1280,30 +1328,27 @@ func copyLeaf(root *os.Root, rel, dst string, info os.FileInfo) error {
 		if err != nil {
 			return err
 		}
-		if !opened.Mode().IsRegular() {
-			return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
-		}
-		return atomicWrite(dst, f, opened.Mode().Perm())
+		return atomicWrite(root, dst, f, opened.Mode().Perm())
 	case info.Mode()&os.ModeSymlink != 0:
 		target, err := root.Readlink(rel)
 		if err != nil {
 			return err
 		}
-		return atomicSymlink(target, dst)
+		return atomicSymlink(root, target, dst)
 	default:
 		return fmt.Errorf("%w: %s", errUnsupportedFileType, filepath.Base(rel))
 	}
 }
 
-// atomicSymlink makes dst a symlink to target, replacing an existing file or
-// symlink in one rename.
-func atomicSymlink(target, dst string) error {
-	tmp := tmpPath(filepath.Dir(dst))
-	if err := os.Symlink(target, tmp); err != nil {
+// atomicSymlink makes dst, a resolved path below root, a symlink to target,
+// replacing an existing file or symlink in one rename.
+func atomicSymlink(root *os.Root, target, dst string) error {
+	tmp := rootRel(root, tmpPath(filepath.Dir(dst)))
+	if err := root.Symlink(target, tmp); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		_ = os.Remove(tmp)
+	if err := root.Rename(tmp, rootRel(root, dst)); err != nil {
+		_ = root.Remove(tmp)
 		return err
 	}
 	return nil

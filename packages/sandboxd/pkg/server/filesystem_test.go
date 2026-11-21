@@ -30,12 +30,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func newRESTFixture(t *testing.T) (*RESTServer, http.Handler, string) {
@@ -1532,7 +1534,7 @@ func TestCopyTreeStaysInsideRoot(t *testing.T) {
 	// caller's Lstat, is not read through.
 	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "swapped")))
 	root := openTestRoot(t, dir)
-	dst := filepath.Join(t.TempDir(), "copy")
+	dst := filepath.Join(dir, "copy")
 	require.NoError(t, os.Mkdir(dst, 0o755))
 
 	require.Error(t, copyTree(root, "swapped", dst, 0o755))
@@ -1540,6 +1542,63 @@ func TestCopyTreeStaysInsideRoot(t *testing.T) {
 
 	require.NoError(t, copyTree(root, "d", dst, 0o755))
 	require.Equal(t, map[string]string{"f": "f"}, readTree(t, dst))
+}
+
+func TestWritesStayInsideRootWhenParentIsSwapped(t *testing.T) {
+	body := func() io.Reader { return strings.NewReader("x") }
+	for name, write := range map[string]func(root *os.Root, target string) error{
+		"atomicWrite":   func(root *os.Root, target string) error { return atomicWrite(root, target, body(), 0o644) },
+		"atomicCreate":  func(root *os.Root, target string) error { return atomicCreate(root, target, body(), 0o644) },
+		"appendWrite":   func(root *os.Root, target string) error { return appendWrite(root, target, body(), 0o644) },
+		"makeDirectory": func(root *os.Root, target string) error { return makeDirectory(root, target, 0o755, true) },
+		"atomicSymlink": func(root *os.Root, target string) error { return atomicSymlink(root, "t", target) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			dir, outside := filepath.Join(base, "root"), filepath.Join(base, "outside")
+			require.NoError(t, os.MkdirAll(outside, 0o755))
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			// The state a path is in when a process swaps a directory for a
+			// symlink out of the root after pathutil resolved it.
+			require.NoError(t, os.Symlink(outside, filepath.Join(dir, "swapped")))
+			root := openTestRoot(t, dir)
+
+			require.Error(t, write(root, filepath.Join(dir, "swapped", "sub", "f")))
+			require.Empty(t, readTree(t, outside))
+		})
+	}
+}
+
+func TestPutStaysInsideRootWhileDirectoryIsSwapped(t *testing.T) {
+	base := t.TempDir()
+	dir, outside := filepath.Join(base, "root"), filepath.Join(base, "outside")
+	writeFiles(t, base, map[string]string{"root/shared/real/keep": "k"})
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "shared", "link")))
+	handler := NewRESTServer(dir, "SANDBOX_", logr.Discard()).Handler()
+
+	// A process in the sandbox exchanges a directory and a symlink out of the
+	// root in a loop, so some request resolves its path just before the swap.
+	var stop atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		dirPath, linkPath := filepath.Join(dir, "shared", "real"), filepath.Join(dir, "shared", "link")
+		for !stop.Load() {
+			_ = unix.Renameat2(unix.AT_FDCWD, dirPath, unix.AT_FDCWD, linkPath, unix.RENAME_EXCHANGE)
+		}
+	}()
+	for i, deadline := 0, time.Now().Add(time.Second); time.Now().Before(deadline); i++ {
+		doRequest(handler, http.MethodPut, fmt.Sprintf("/v1/files/shared/real/f-%d", i), []byte("x"), nil)
+	}
+	stop.Store(true)
+	<-done
+
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NotContains(t, e.Name(), "f-", "a write left the sandbox root")
+	}
 }
 
 func TestMoveEntryFallsBackToCopyAcrossFilesystems(t *testing.T) {
@@ -1628,7 +1687,7 @@ func TestStageEntryKeepsReplacementSource(t *testing.T) {
 			writeFiles(t, dir, files)
 			src := filepath.Join(dir, "src")
 
-			staged, err := stageEntry(src)
+			staged, err := stageEntry(openTestRoot(t, dir), src)
 			require.NoError(t, err)
 			require.Equal(t, dir, filepath.Dir(staged))
 			_, err = os.Lstat(src)

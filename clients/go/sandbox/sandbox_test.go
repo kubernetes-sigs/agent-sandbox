@@ -866,6 +866,12 @@ func TestExtractGatewayAddress_SSRFRejection(t *testing.T) {
 		{"invalid hostname: trailing hyphen", "host-.example.com"},
 		{"invalid hostname: label starts with hyphen", "host.-bad.com"},
 		{"invalid hostname: empty", ""},
+		// libc resolvers parse all-numeric names as IPv4 (inet_aton), so these
+		// reach loopback without ever being a literal IP.
+		{"integer hostname: decimal", "2130706433"},
+		{"integer hostname: hex", "0x7f000001"},
+		{"integer hostname: short dotted", "127.1"},
+		{"integer hostname: dotted hex", "0x7f.0.0.1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -889,6 +895,8 @@ func TestIsValidGatewayHostname(t *testing.T) {
 		"a",
 		"A.B.C",
 		"123.example.com",
+		"example.123",
+		"0xfeed.example.com",
 	}
 	for _, h := range valid {
 		if !isValidGatewayHostname(h) {

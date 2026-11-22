@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -211,6 +212,12 @@ func isValidGatewayHostname(s string) bool {
 	if len(s) == 0 || len(s) > 253 {
 		return false
 	}
+	labels := strings.Split(s, ".")
+	// libc resolvers parse names made only of decimal or hex labels, such as
+	// "2130706433" or "0x7f.1", as IPv4 addresses, so they could reach loopback.
+	if !slices.ContainsFunc(labels, func(label string) bool { return !isIntegerLabel(label) }) {
+		return false
+	}
 	for i := range len(s) {
 		c := s[i]
 		switch {
@@ -229,4 +236,12 @@ func isValidGatewayHostname(s string) bool {
 	}
 	last := s[len(s)-1]
 	return last != '-' && last != '.'
+}
+
+// isIntegerLabel reports whether label is a decimal or 0x-prefixed hex number.
+func isIntegerLabel(label string) bool {
+	if hex, ok := strings.CutPrefix(strings.ToLower(label), "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
+	}
+	return label != "" && strings.Trim(label, "0123456789") == ""
 }

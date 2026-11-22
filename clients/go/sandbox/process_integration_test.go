@@ -17,11 +17,14 @@ package sandbox
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
@@ -89,6 +92,46 @@ func TestProcessHandle_RealSignalAndExit(t *testing.T) {
 	result := receiveProcessResult(t, handle)
 	require.Equal(t, "stopped", result.Stdout)
 	require.Equal(t, 23, result.ExitCode)
+}
+
+func TestProcessHandle_RealPTYResize(t *testing.T) {
+	sb, _ := newRealProcessSandbox(t)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "stty -echo && stty size && read -r line && stty size >&2", WithPTY(80, 24))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+
+	var initial strings.Builder
+	for !strings.Contains(initial.String(), "\n") {
+		event, err := handle.Recv()
+		require.NoError(t, err)
+		require.Equal(t, ProcessEventStdout, event.Type)
+		initial.Write(event.Data)
+	}
+	require.Equal(t, "24 80", strings.TrimSpace(initial.String()))
+
+	require.NoError(t, handle.ResizeTTY(ctx, 120, 40))
+	require.NoError(t, handle.WriteStdin(ctx, []byte("continue\n")))
+	result := receiveProcessResult(t, handle)
+	require.Equal(t, 0, result.ExitCode)
+	require.Equal(t, "40 120", strings.TrimSpace(result.Stdout))
+	require.Empty(t, result.Stderr)
+}
+
+func TestProcessHandle_RealResizeWithoutPTY(t *testing.T) {
+	sb, _ := newRealProcessSandbox(t)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "cat")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+
+	err = handle.ResizeTTY(ctx, 120, 40)
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "%v", err)
+	require.NoError(t, handle.WriteStdin(ctx, []byte("still running\n")))
+	require.NoError(t, handle.CloseStdin(ctx))
+	result := receiveProcessResult(t, handle)
+	require.Equal(t, 0, result.ExitCode)
+	require.Equal(t, "still running\n", result.Stdout)
 }
 
 func TestProcessHandle_RealShortCommandWithEnvAndWorkingDir(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 
 	"go.opentelemetry.io/otel/trace"
@@ -73,6 +74,30 @@ func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) er
 	}
 	if _, err := h.client.SendSignal(ctx, &processv1.SendSignalRequest{ProcessId: h.pid, Signal: wireSignal}); err != nil {
 		return fmt.Errorf("%s: send signal: %w", h.prefix, err)
+	}
+	return nil
+}
+
+// ResizeTTY sets the process's terminal size in columns and rows. Both
+// dimensions must be in [1, 65535]. The daemon returns FailedPrecondition
+// for a process without a PTY. The context controls only this RPC.
+func (h *ProcessHandle) ResizeTTY(ctx context.Context, cols, rows uint32) error {
+	if err := h.checkLive(); err != nil {
+		return fmt.Errorf("%s: resize tty: %w", h.prefix, err)
+	}
+	if err := validatePTYSize(cols, rows); err != nil {
+		return fmt.Errorf("%s: resize tty: %w", h.prefix, err)
+	}
+	req := &processv1.ResizeTTYRequest{ProcessId: h.pid, Cols: cols, Rows: rows}
+	if _, err := h.client.ResizeTTY(ctx, req); err != nil {
+		return fmt.Errorf("%s: resize tty: %w", h.prefix, err)
+	}
+	return nil
+}
+
+func validatePTYSize(cols, rows uint32) error {
+	if cols == 0 || cols > math.MaxUint16 || rows == 0 || rows > math.MaxUint16 {
+		return status.Error(codes.InvalidArgument, "PTY columns and rows must be in [1, 65535]")
 	}
 	return nil
 }

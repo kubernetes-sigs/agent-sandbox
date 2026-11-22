@@ -40,6 +40,7 @@ type streamingProcessService struct {
 	start  func(*processv1.StartRequest, processv1.ProcessService_StartServer) error
 	signal func(context.Context, *processv1.SendSignalRequest) (*processv1.SendSignalResponse, error)
 	stdin  func(context.Context, *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error)
+	resize func(context.Context, *processv1.ResizeTTYRequest) (*processv1.ResizeTTYResponse, error)
 }
 
 func (s *streamingProcessService) Start(req *processv1.StartRequest, stream processv1.ProcessService_StartServer) error {
@@ -52,6 +53,10 @@ func (s *streamingProcessService) SendSignal(ctx context.Context, req *processv1
 
 func (s *streamingProcessService) WriteStdin(ctx context.Context, req *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
 	return s.stdin(ctx, req)
+}
+
+func (s *streamingProcessService) ResizeTTY(ctx context.Context, req *processv1.ResizeTTYRequest) (*processv1.ResizeTTYResponse, error) {
+	return s.resize(ctx, req)
 }
 
 func processTestContext(t *testing.T) context.Context {
@@ -169,7 +174,9 @@ func TestCommandsStart_EnvAndWorkingDir(t *testing.T) {
 		WithEnv(map[string]string{"B": "two"}), WithWorkingDir("project"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handle.Close()) })
-	config := (<-requests).GetConfig()
+	req := <-requests
+	require.Nil(t, req.GetPty())
+	config := req.GetConfig()
 	require.Equal(t, []string{"/bin/sh", "-c", "printf hello"}, config.GetCommand())
 	require.Equal(t, map[string]string{"A": "one", "B": "two"}, config.GetEnvVars())
 	require.Equal(t, "project", config.GetCwd())
@@ -178,6 +185,50 @@ func TestCommandsStart_EnvAndWorkingDir(t *testing.T) {
 		require.ErrorContains(t, err, "invalid env key")
 	}
 	require.Empty(t, requests, "invalid configuration must not reach the service")
+}
+
+func TestProcessHandle_ResizeTTY(t *testing.T) {
+	starts := make(chan *processv1.StartRequest, 1)
+	resizes := make(chan *processv1.ResizeTTYRequest, 1)
+	svc := &streamingProcessService{
+		start: func(req *processv1.StartRequest, stream processv1.ProcessService_StartServer) error {
+			starts <- req
+			if err := stream.Send(processInit()); err != nil {
+				return err
+			}
+			<-stream.Context().Done()
+			return stream.Context().Err()
+		},
+		resize: func(_ context.Context, req *processv1.ResizeTTYRequest) (*processv1.ResizeTTYResponse, error) {
+			resizes <- req
+			return &processv1.ResizeTTYResponse{}, nil
+		},
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	_, err := sb.Commands().Start(ctx, "example", WithPTY(0, 24))
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+	require.Empty(t, starts)
+
+	handle, err := sb.Commands().Start(ctx, "example", WithPTY(80, 24))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+	pty := (<-starts).GetPty()
+	require.Equal(t, uint32(80), pty.GetCols())
+	require.Equal(t, uint32(24), pty.GetRows())
+
+	err = handle.ResizeTTY(ctx, 120, 65536)
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+	require.Empty(t, resizes)
+	require.NoError(t, handle.ResizeTTY(ctx, 120, 40))
+	resize := <-resizes
+	require.Equal(t, handle.ProcessID(), resize.GetProcessId())
+	require.Equal(t, uint32(120), resize.GetCols())
+	require.Equal(t, uint32(40), resize.GetRows())
+
+	require.NoError(t, handle.Close())
+	require.Error(t, handle.ResizeTTY(ctx, 80, 24))
+	require.Empty(t, resizes)
 }
 
 func TestCommandsStart_InitializationFailures(t *testing.T) {

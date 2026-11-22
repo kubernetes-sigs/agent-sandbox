@@ -164,6 +164,7 @@ func (c *Commands) runSandboxd(ctx context.Context, span trace.Span, command str
 
 // Start starts a sandboxd command and returns after receiving its process ID.
 // It preserves Run's shell-string, WithEnv and WithWorkingDir semantics.
+// Use WithPTY to allocate a pseudo-terminal.
 // The caller must Recv through the exit event to io.EOF, or Close the handle.
 // The context and an explicit WithTimeout cover the entire stream; there is
 // no default RequestTimeout. Start never retries and rejects WithMaxAttempts > 1.
@@ -197,13 +198,18 @@ func (c *Commands) Start(ctx context.Context, command string, opts ...CallOption
 	if err != nil {
 		return nil, fmt.Errorf("%s: start: %w", prefix, err)
 	}
+	if co.pty != nil {
+		if err := validatePTYSize(co.pty.Cols, co.pty.Rows); err != nil {
+			return nil, fmt.Errorf("%s: start: %w", prefix, err)
+		}
+	}
 	conn, err := c.connector.GRPCConn()
 	if err != nil {
 		return nil, fmt.Errorf("%s: start: %w", prefix, err)
 	}
 	client := processv1.NewProcessServiceClient(conn)
 	// Commit the sent request so service-config retries cannot start it twice.
-	stream, err := client.Start(ctx, &processv1.StartRequest{Config: config}, grpc.MaxRetryRPCBufferSize(0))
+	stream, err := client.Start(ctx, &processv1.StartRequest{Config: config, Pty: co.pty}, grpc.MaxRetryRPCBufferSize(0))
 	if err != nil {
 		return nil, fmt.Errorf("%s: start: %w", prefix, err)
 	}

@@ -24,6 +24,7 @@ import (
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
 const (
@@ -92,6 +93,7 @@ type callOptions struct {
 	maxAttempts int // 0 = use default (maxAttempts const); 1 = no retry
 	env         map[string]string
 	cwd         string
+	pty         *processv1.PTY
 	appendWrite bool
 	createOnly  bool
 	recursive   bool
@@ -143,6 +145,14 @@ func WithEnv(env map[string]string) CallOption {
 func WithWorkingDir(dir string) CallOption {
 	return func(o *callOptions) {
 		o.cwd = dir
+	}
+}
+
+// WithPTY allocates a pseudo-terminal for Commands.Start and merges stderr into
+// stdout. Both dimensions must be in [1, 65535]. Other operations ignore it.
+func WithPTY(cols, rows uint32) CallOption {
+	return func(o *callOptions) {
+		o.pty = &processv1.PTY{Cols: cols, Rows: rows}
 	}
 }
 

@@ -26,21 +26,31 @@ type joinedError interface {
 	Unwrap() []error
 }
 
-// isNamespaceTerminatingError reports whether err or any error in its chain
-// indicates that the namespace is terminating (e.g. 403 Forbidden with
-// NamespaceTerminating cause, or wrapping ErrNamespaceTerminating).
-func isNamespaceTerminatingError(err error) bool {
+// anyJoined reports whether match holds for err or any error in an
+// errors.Join tree. The k8serrors helpers only inspect the first status in a
+// joined error.
+func anyJoined(err error, match func(error) bool) bool {
 	if err == nil {
 		return false
 	}
 
 	if joined, ok := err.(joinedError); ok {
-		return slices.ContainsFunc(joined.Unwrap(), isNamespaceTerminatingError)
+		return slices.ContainsFunc(joined.Unwrap(), func(e error) bool { return anyJoined(e, match) })
 	}
 
-	if k8serrors.HasStatusCause(err, corev1.NamespaceTerminatingCause) {
-		return true
-	}
+	return match(err)
+}
 
-	return false
+// isNamespaceTerminatingError reports whether err or any error in its chain
+// indicates that the namespace is terminating (e.g. 403 Forbidden with
+// NamespaceTerminating cause, or wrapping ErrNamespaceTerminating).
+func isNamespaceTerminatingError(err error) bool {
+	return anyJoined(err, func(e error) bool {
+		return k8serrors.HasStatusCause(e, corev1.NamespaceTerminatingCause)
+	})
+}
+
+// isForbiddenError reports whether err or any joined error is Forbidden.
+func isForbiddenError(err error) bool {
+	return anyJoined(err, k8serrors.IsForbidden)
 }

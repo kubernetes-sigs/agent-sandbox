@@ -758,7 +758,7 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			return readyCondition
 		}
 		readyCondition.Reason = sandboxv1beta1.SandboxReasonReconcilerError
-		if k8serrors.IsForbidden(err) {
+		if isForbiddenError(err) {
 			readyCondition.Reason = sandboxv1beta1.SandboxReasonForbidden
 		}
 		readyCondition.Message = "Error seen: " + err.Error()

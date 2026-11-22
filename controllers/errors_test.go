@@ -108,6 +108,32 @@ func TestIsNamespaceTerminatingError(t *testing.T) {
 	}
 }
 
+func TestIsForbiddenError(t *testing.T) {
+	forbidden := k8serrors.NewForbidden(corev1.Resource("pods"), "p", errors.New("exceeded quota"))
+	conflict := k8serrors.NewConflict(corev1.Resource("persistentvolumeclaims"), "c", errors.New("conflict"))
+
+	testCases := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "nil error", err: nil, expected: false},
+		{name: "generic error", err: errors.New("generic"), expected: false},
+		{name: "forbidden", err: forbidden, expected: true},
+		{name: "wrapped forbidden", err: fmt.Errorf("create pod: %w", forbidden), expected: true},
+		{name: "forbidden after conflict", err: errors.Join(conflict, forbidden), expected: true},
+		{name: "conflict only", err: errors.Join(conflict, errors.New("other")), expected: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isForbiddenError(tc.err); got != tc.expected {
+				t.Errorf("got %v, want %v", got, tc.expected)
+			}
+		})
+	}
+}
+
 func newNamespaceTerminatingError(ns string) error {
 	return &k8serrors.StatusError{
 		ErrStatus: metav1.Status{

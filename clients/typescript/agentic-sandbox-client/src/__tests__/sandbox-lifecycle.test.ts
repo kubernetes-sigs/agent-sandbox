@@ -15,13 +15,22 @@
 import * as http from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockGet, mockPatch, mockCreateStrategy } = vi.hoisted(() => ({
-  mockGet: vi.fn(),
-  mockPatch: vi.fn(),
-  mockCreateStrategy: vi.fn(),
-}));
+const { mockGet, mockPatch, mockWatch, mockCreateStrategy } = vi.hoisted(
+  () => ({
+    mockGet: vi.fn(),
+    mockPatch: vi.fn(),
+    mockWatch: vi.fn(),
+    mockCreateStrategy: vi.fn(),
+  }),
+);
 
-vi.mock("@kubernetes/client-node", () => ({ CustomObjectsApi: vi.fn() }));
+vi.mock("@kubernetes/client-node", () => ({
+  CustomObjectsApi: vi.fn(),
+  // biome-ignore lint/complexity/useArrowFunction: constructor mock requires function keyword
+  Watch: vi.fn().mockImplementation(function () {
+    return { watch: mockWatch };
+  }),
+}));
 vi.mock("../connection.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../connection.js")>()),
   createConnectionStrategy: mockCreateStrategy,
@@ -94,9 +103,34 @@ const patchBody = (mode: string) => [
   { op: "add", path: "/spec/operatingMode", value: mode },
 ];
 
+type WatchEvent = (type: string, obj: unknown) => void;
+type WatchDone = (err: unknown) => void;
+
+/**
+ * Makes the next watch stay open, and returns its event and done callbacks
+ * once the Sandbox has started it.
+ */
+function openWatch() {
+  const abort = new AbortController();
+  const started = new Promise<{ event: WatchEvent; done: WatchDone }>(
+    (resolve) => {
+      mockWatch.mockImplementationOnce(
+        async (_path, _params, event: WatchEvent, done: WatchDone) => {
+          resolve({ event, done });
+          return abort;
+        },
+      );
+    },
+  );
+  return { started, abort };
+}
+
 describe("Sandbox suspend/resume", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Without a watch the wait polls, which most cases here exercise.
+    mockWatch.mockReset();
+    mockWatch.mockRejectedValue(new Error("watch is forbidden"));
     mockCreateStrategy.mockImplementation((connectivity: string) => ({
       connectivity,
       open: vi.fn(),
@@ -402,6 +436,145 @@ describe("Sandbox suspend/resume", () => {
         "Suspended",
         "Running",
       ]);
+    });
+  });
+
+  describe("watching the Sandbox", () => {
+    const suspending = sandboxObj({ mode: "Suspended", generation: 2 });
+    const suspended = sandboxObj({
+      mode: "Suspended",
+      generation: 2,
+      conditions: [cond("Suspended", 2)],
+    });
+
+    beforeEach(() => {
+      mockPatch.mockResolvedValue(suspending);
+    });
+
+    it("returns on the watch event that reports Suspended, without another GET", async () => {
+      mockGet.mockResolvedValueOnce(sandboxObj({ mode: "Running" }));
+      mockGet.mockResolvedValueOnce({
+        ...suspending,
+        metadata: { ...suspending.metadata, resourceVersion: "42" },
+      });
+      const watch = openWatch();
+
+      const done = new Sandbox(createInit()).suspend();
+      const { event } = await watch.started;
+      // An event that is not there yet keeps the watch open.
+      event("MODIFIED", suspending);
+      event("MODIFIED", suspended);
+      await done;
+
+      expect(mockGet).toHaveBeenCalledTimes(2);
+      expect(mockWatch).toHaveBeenCalledExactlyOnceWith(
+        "/apis/agents.x-k8s.io/v1beta1/namespaces/default/sandboxes",
+        { fieldSelector: "metadata.name=test-sandbox", resourceVersion: "42" },
+        expect.any(Function),
+        expect.any(Function),
+      );
+      expect(watch.abort.signal.aborted).toBe(true);
+    });
+
+    it.each([
+      ["a DELETED event", "DELETED", suspending],
+      ["an event for another UID", "MODIFIED", sandboxObj({ uid: "other" })],
+      ["a terminating event", "MODIFIED", sandboxObj({ deleting: true })],
+    ])("reads the Sandbox again after %s and reports what the GET finds", async (_name, type, obj) => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(suspending)
+        .mockRejectedValueOnce({ code: 404 });
+      const watch = openWatch();
+
+      const done = expect(new Sandbox(createInit()).suspend()).rejects.toThrow(
+        SandboxNotFoundError,
+      );
+      (await watch.started).event(type, obj);
+      await done;
+
+      expect(mockGet).toHaveBeenCalledTimes(3);
+    });
+
+    it("watches again after the API server closes the watch", async () => {
+      vi.useFakeTimers();
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValue(suspending);
+      const first = openWatch();
+      const second = openWatch();
+
+      const done = new Sandbox(createInit()).suspend();
+      (await first.started).done(null);
+      await vi.advanceTimersByTimeAsync(500);
+      (await second.started).event("MODIFIED", suspended);
+      await done;
+
+      expect(mockWatch).toHaveBeenCalledTimes(2);
+    });
+
+    it("polls for the rest of the call once the watch fails", async () => {
+      vi.useFakeTimers();
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValueOnce(suspending)
+        .mockResolvedValueOnce(suspending)
+        .mockResolvedValueOnce(suspended);
+      const watch = openWatch();
+
+      const done = new Sandbox(createInit()).suspend();
+      (await watch.started).done(
+        Object.assign(new Error("forbidden"), { statusCode: 403 }),
+      );
+      await vi.advanceTimersByTimeAsync(1000);
+      await done;
+
+      expect(mockWatch).toHaveBeenCalledTimes(1);
+      expect(mockGet).toHaveBeenCalledTimes(4);
+    });
+
+    it("ends the watch when the caller aborts", async () => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
+        .mockResolvedValue(suspending);
+      const watch = openWatch();
+      const controller = new AbortController();
+      const reason = new Error("caller gave up");
+
+      const done = expect(
+        new Sandbox(createInit()).suspend({ signal: controller.signal }),
+      ).rejects.toBe(reason);
+      await watch.started;
+      controller.abort(reason);
+      await done;
+
+      expect(watch.abort.signal.aborted).toBe(true);
+    });
+
+    it("resume() adopts the pod IP from the watch event that reports Ready", async () => {
+      mockGet
+        .mockResolvedValueOnce(sandboxObj({ mode: "Suspended" }))
+        .mockResolvedValueOnce(sandboxObj({ mode: "Running", generation: 2 }));
+      mockPatch.mockResolvedValue(
+        sandboxObj({ mode: "Running", generation: 2 }),
+      );
+      const watch = openWatch();
+      const sandbox = new Sandbox(createInit());
+
+      const done = sandbox.resume();
+      (await watch.started).event(
+        "MODIFIED",
+        sandboxObj({
+          mode: "Running",
+          generation: 2,
+          podIPs: ["10.0.0.9"],
+          conditions: [cond("Ready", 2)],
+        }),
+      );
+      await done;
+
+      expect(sandbox.podIP).toBe("10.0.0.9");
+      expect(mockGet).toHaveBeenCalledTimes(2);
     });
   });
 

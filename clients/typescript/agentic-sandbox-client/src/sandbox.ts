@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import type * as k8s from "@kubernetes/client-node";
+import { Watch } from "@kubernetes/client-node";
 import {
   ProcessHandle,
   type ProcessSession,
@@ -107,6 +108,101 @@ export function readConditions(
 ): Array<Record<string, string>> {
   const status = (obj?.status as Record<string, unknown>) ?? {};
   return (status.conditions as Array<Record<string, string>>) ?? [];
+}
+
+/**
+ * True when a Watch `done(err)` signals the stream ended without a real
+ * failure, so the caller should re-GET and restart the watch from a fresh
+ * resourceVersion rather than surface the error:
+ *  - `done(null)`: the server closed the long-poll connection normally;
+ *  - AbortError: our own AbortController firing (deadline or success);
+ *  - TimeoutError: @kubernetes/client-node 2.x aborts every watch after its
+ *    30s request timeout — far shorter than the public ready-wait budget;
+ *  - 410 Gone: the supplied resourceVersion has been compacted away.
+ * @internal Not part of the public API.
+ */
+export function isWatchCleanClose(err: unknown): boolean {
+  if (!err) return true;
+  if (
+    err instanceof Error &&
+    (err.name === "AbortError" || err.name === "TimeoutError")
+  ) {
+    return true;
+  }
+  const code =
+    (err as { statusCode?: number; code?: number }).statusCode ??
+    (err as { statusCode?: number; code?: number }).code;
+  return code === 410;
+}
+
+/**
+ * Runs one watch on the Sandbox named `sandboxName` and resolves with the
+ * first result `onEvent` returns. Never rejects.
+ * @internal Not part of the public API.
+ */
+export function watchSandboxOnce<R>(args: {
+  kubeConfig: k8s.KubeConfig;
+  namespace: string;
+  sandboxName: string;
+  /** The watch reports changes made after this version. */
+  resourceVersion: string | undefined;
+  remainingMs: number;
+  /** Ends the watch with `closed` when it aborts. */
+  signal?: AbortSignal;
+  /** Returns the result that ends the watch, or undefined to keep watching. */
+  onEvent: (type: string, obj: Record<string, unknown>) => R | undefined;
+  /**
+   * The result when the watch ends without a failure (see
+   * {@link isWatchCleanClose}), or when `remainingMs` or `signal` ends it.
+   */
+  closed: R;
+  /** The result when the watch fails. */
+  failed: (err: Error) => R;
+}): Promise<R> {
+  const { signal } = args;
+  return new Promise((resolve) => {
+    let abortController: AbortController | undefined;
+    let settled = false;
+    const settle = (result: R) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      abortController?.abort();
+      resolve(result);
+    };
+    const onAbort = () => settle(args.closed);
+    const timer = setTimeout(onAbort, args.remainingMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const fail = (err: unknown) =>
+      settle(args.failed(err instanceof Error ? err : new Error(String(err))));
+
+    // An async function, so that a synchronous throw also reaches `fail`.
+    (async () =>
+      new Watch(args.kubeConfig).watch(
+        `/apis/${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}/namespaces/${args.namespace}/${SANDBOX_PLURAL_NAME}`,
+        {
+          fieldSelector: `metadata.name=${args.sandboxName}`,
+          resourceVersion: args.resourceVersion,
+        },
+        (type: string, obj: Record<string, unknown>) => {
+          if (type === "ERROR") {
+            // Usually 410 Gone: the resourceVersion was compacted away.
+            settle(args.closed);
+            return;
+          }
+          const result = args.onEvent(type, obj);
+          if (result !== undefined) settle(result);
+        },
+        (err: unknown) => {
+          if (isWatchCleanClose(err)) settle(args.closed);
+          else fail(err);
+        },
+      ))().then((ac) => {
+      if (settled) ac.abort();
+      else abortController = ac;
+    }, fail);
+  });
 }
 
 /**
@@ -930,8 +1026,14 @@ export class Sandbox {
   }
 
   /**
-   * Polls the Sandbox until `done` accepts it. Rejects with a
+   * Waits until `done` accepts the Sandbox. Rejects with a
    * SandboxTimeoutError once the budget runs out.
+   *
+   * Every error that ends the wait comes from a GET, which reports a
+   * deleted, terminating, or replaced Sandbox. Between GETs a watch reports
+   * changes as they happen, as in the Go and Python clients. When the watch
+   * fails, for example because the credentials lack the `watch` verb, the
+   * wait reads the Sandbox at a fixed interval for the rest of the call.
    */
   private async waitForSandbox(
     description: string,
@@ -940,6 +1042,7 @@ export class Sandbox {
     signal: AbortSignal,
     done: (obj: Record<string, unknown>) => boolean,
   ): Promise<Record<string, unknown>> {
+    let watchUsable = true;
     while (true) {
       if (signal.aborted) throw signal.reason;
       const obj = await this.abortable(signal, this.readLiveSandbox(uid));
@@ -951,7 +1054,50 @@ export class Sandbox {
           `Sandbox '${this.sandboxName}' did not ${description} within ${budget.timeoutMs}ms.`,
         );
       }
-      await this.sleep(Math.min(LIFECYCLE_POLL_INTERVAL_MS, remaining), signal);
+      if (watchUsable) {
+        const metadata = obj.metadata as Record<string, unknown>;
+        const result = await watchSandboxOnce<
+          { obj: Record<string, unknown> } | "recheck" | "closed" | "failed"
+        >({
+          kubeConfig: this.kubeConfig,
+          namespace: this.namespace,
+          sandboxName: this.sandboxName,
+          resourceVersion: metadata.resourceVersion as string | undefined,
+          remainingMs: remaining,
+          signal,
+          closed: "closed",
+          failed: () => "failed",
+          onEvent: (type, event) => {
+            if (type !== "ADDED" && type !== "MODIFIED" && type !== "DELETED") {
+              return undefined;
+            }
+            const eventMetadata =
+              (event?.metadata as Record<string, unknown>) ?? {};
+            // The next GET reports a deleted, replaced, or terminating Sandbox.
+            if (
+              type === "DELETED" ||
+              eventMetadata.uid !== uid ||
+              eventMetadata.deletionTimestamp
+            ) {
+              return "recheck";
+            }
+            return done(event) ? { obj: event } : undefined;
+          },
+        });
+        if (typeof result === "object") return result.obj;
+        if (result === "recheck") continue;
+        if (result === "failed") {
+          watchUsable = false;
+          this.logger.info(
+            `Could not watch Sandbox '${this.sandboxName}'; reading it every ${LIFECYCLE_POLL_INTERVAL_MS}ms instead.`,
+          );
+        }
+      }
+      // Also spaces out the GETs when the API server keeps closing the watch.
+      await this.sleep(
+        Math.min(LIFECYCLE_POLL_INTERVAL_MS, budget.deadline - Date.now()),
+        signal,
+      );
     }
   }
 

@@ -490,6 +490,16 @@ class TestSandboxClient(unittest.TestCase):
             self.client.create_sandbox("test-warmpool", labels={"a" * 64: "value"})
         self.assertIn("exceeds max length", str(ctx.exception))
 
+    def test_validate_labels_rejects_trailing_newline(self):
+        # A regex "$" also matches before a trailing newline.
+        for labels in (
+            {"agent": "value\n"},
+            {"agent\n": "value"},
+            {"app.kubernetes.io\n/name": "value"},
+        ):
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                validate_labels(labels)
+
     def test_validate_labels_accepts_prefixed_key(self):
         validate_labels({"app.kubernetes.io/name": "my-app"})
 
@@ -1003,6 +1013,7 @@ class TestConnectionConfigValidation(unittest.TestCase):
             "ns|sh",           # pipe attempt
             "ns&rm",           # ampersand attempt
             "",                # empty namespace
+            "default\n",       # trailing newline
         ]
         for ns in invalid_namespaces:
             with self.assertRaises(ValidationError):

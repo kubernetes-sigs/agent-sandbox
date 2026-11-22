@@ -31,7 +31,7 @@ def validate_label_name(name: str, context: str) -> None:
         raise ValueError(
             f"Label {context} '{name}' exceeds max length of {LABEL_NAME_MAX_LENGTH} characters."
         )
-    if not _LABEL_NAME_RE.match(name):
+    if not _LABEL_NAME_RE.fullmatch(name):
         raise ValueError(
             f"Label {context} '{name}' contains invalid characters. "
             f"Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.]."
@@ -51,7 +51,7 @@ def validate_labels(labels: dict[str, str]) -> None:
                 raise ValueError(
                     f"Label key prefix '{prefix}' is invalid or exceeds {LABEL_PREFIX_MAX_LENGTH} characters."
                 )
-            if not _LABEL_PREFIX_RE.match(prefix):
+            if not _LABEL_PREFIX_RE.fullmatch(prefix):
                 raise ValueError(
                     f"Label key prefix '{prefix}' must be a valid DNS subdomain."
                 )

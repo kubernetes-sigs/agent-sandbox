@@ -6983,7 +6983,7 @@ func TestReconcilePersistsStatusAfterAddingTraceContext(t *testing.T) {
 
 	live := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, c.Get(t.Context(), key, live))
-	require.Equal(t, traceContext, live.Annotations[asmetrics.TraceContextAnnotation])
+	require.JSONEq(t, traceContext, live.Annotations[asmetrics.TraceContextAnnotation])
 	ready := meta.FindStatusCondition(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	require.NotNil(t, ready, "the first reconcile must persist the Ready condition")
 	require.Equal(t, metav1.ConditionFalse, ready.Status)

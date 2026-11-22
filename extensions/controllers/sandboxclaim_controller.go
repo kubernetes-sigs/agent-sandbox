@@ -1557,6 +1557,10 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 
 		// Force an exact match
 		adopted.Spec.PodTemplate.ObjectMeta = mergedMeta
+
+		// The pool's priorityClassName is for idle Pods; a resumed Pod uses the template's.
+		spec, tspec := &adopted.Spec.PodTemplate.Spec, &template.Spec.PodTemplate.Spec
+		spec.PriorityClassName, spec.Priority, spec.PreemptionPolicy = tspec.PriorityClassName, tspec.Priority, tspec.PreemptionPolicy
 	} else {
 		// Fallback (just in case template is somehow missing)
 		if templateHash != "" {

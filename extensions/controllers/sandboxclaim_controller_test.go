@@ -2330,6 +2330,13 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		t.Fatalf("failed to compute blueprint hash: %v", hashErr)
 	}
 
+	withPoolPriority := func(sb *sandboxv1beta1.Sandbox) *sandboxv1beta1.Sandbox {
+		sb.Spec.PodTemplate.Spec.PriorityClassName = "warm-low"
+		sb.Spec.PodTemplate.Spec.Priority = new(int32(-10))
+		sb.Spec.PodTemplate.Spec.PreemptionPolicy = new(corev1.PreemptNever)
+		return sb
+	}
+
 	recreateStrategy := &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType}
 	onReplenishStrategy := &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType}
 
@@ -2637,7 +2644,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			existingObjects: []client.Object{
 				template,
 				claim,
-				withBlueprintHash(createWarmPoolSandbox("fresh-priority", metav1.Now(), true), priorityBlueprintHash),
+				withPoolPriority(withBlueprintHash(createWarmPoolSandbox("fresh-priority", metav1.Now(), true), priorityBlueprintHash)),
 			},
 			expectSandboxAdoption:   true,
 			expectedAdoptedSandbox:  "fresh-priority",
@@ -2794,6 +2801,12 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						t.Errorf("expected eviction annotation to be removed from adopted sandbox")
 					}
 				}
+
+				// An adopted sandbox resumes at the template's priority, not the pool's.
+				adoptedSpec, templateSpec := adoptedSandbox.Spec.PodTemplate.Spec, template.Spec.PodTemplate.Spec
+				require.Equal(t, templateSpec.PriorityClassName, adoptedSpec.PriorityClassName)
+				require.Equal(t, templateSpec.Priority, adoptedSpec.Priority)
+				require.Equal(t, templateSpec.PreemptionPolicy, adoptedSpec.PreemptionPolicy)
 
 				// 2. Verify SandboxID label was added to pod template
 				expectedUID := string(types.UID("claim-uid"))

@@ -168,6 +168,7 @@ func TestComputeConditions(t *testing.T) {
 	// 63-character limit) must map to Ready=False/InvalidConfiguration rather than
 	// the generic ReconcilerError.
 	invalidNameErr := invalidServiceNameError("too-long-service-name")
+	forbiddenErr := k8serrors.NewForbidden(corev1.Resource("pods"), "p", errors.New("exceeded quota"))
 
 	testCases := []struct {
 		name               string
@@ -821,6 +822,16 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+			},
+		},
+		{
+			name:    "28. Pod create refused by quota reports Forbidden",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			err:     fmt.Errorf("create pod: %w", forbiddenErr),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "Forbidden", Message: "Error seen: create pod: " + forbiddenErr.Error()},
 			},
 		},
 	}

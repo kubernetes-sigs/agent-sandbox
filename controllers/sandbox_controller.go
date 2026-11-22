@@ -758,6 +758,9 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			return readyCondition
 		}
 		readyCondition.Reason = sandboxv1beta1.SandboxReasonReconcilerError
+		if k8serrors.IsForbidden(err) {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonForbidden
+		}
 		readyCondition.Message = "Error seen: " + err.Error()
 		return readyCondition
 	}
@@ -1220,6 +1223,7 @@ func (r *SandboxReconciler) recordLifecycleMetrics(ctx context.Context, oldStatu
 
 	if newReady != nil {
 		isErrReason := newReady.Reason == sandboxv1beta1.SandboxReasonReconcilerError ||
+			newReady.Reason == sandboxv1beta1.SandboxReasonForbidden ||
 			newReady.Reason == sandboxv1beta1.SandboxReasonInvalidConfiguration ||
 			newReady.Reason == sandboxv1beta1.SandboxReasonMultiplePods
 		if isErrReason && r.resumeStartTimes.markError(key, sandbox.UID) {

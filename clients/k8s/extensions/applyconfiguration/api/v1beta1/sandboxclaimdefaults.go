@@ -16,6 +16,10 @@
 
 package v1beta1
 
+import (
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+)
+
 // SandboxClaimDefaultsApplyConfiguration represents a declarative configuration of the SandboxClaimDefaults type for use
 // with apply.
 //
@@ -23,11 +27,17 @@ package v1beta1
 type SandboxClaimDefaultsApplyConfiguration struct {
 	// ttlSecondsAfterCreated limits claim lifetime from its creation time.
 	// The controller snapshots this default before provisioning a claim without
-	// an explicit lifecycle. Later pool changes do not affect that claim.
-	// Expiration retains only the claim record and deletes its backing resources,
-	// including Sandbox-owned persistent volume claims and their data where
+	// an explicit shutdownTime. Later pool changes do not modify this deadline.
+	// Expiration deletes the backing resources, including Sandbox-owned
+	// persistent volume claims and their data where
 	// the storage reclaim policy deletes the volume.
 	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
+	// shutdownPolicy controls whether expiry also deletes the Claim record.
+	// It requires ttlSecondsAfterCreated and defaults to Retain.
+	// A Claim with its own lifecycle uses that lifecycle's shutdownPolicy
+	// instead, which the Claim API defaults to Retain.
+	// The controller freezes this pool policy together with the deadline.
+	ShutdownPolicy *apiv1beta1.ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
 // SandboxClaimDefaultsApplyConfiguration constructs a declarative configuration of the SandboxClaimDefaults type for use with
@@ -41,5 +51,13 @@ func SandboxClaimDefaults() *SandboxClaimDefaultsApplyConfiguration {
 // If called multiple times, the TTLSecondsAfterCreated field is set to the value of the last call.
 func (b *SandboxClaimDefaultsApplyConfiguration) WithTTLSecondsAfterCreated(value int32) *SandboxClaimDefaultsApplyConfiguration {
 	b.TTLSecondsAfterCreated = &value
+	return b
+}
+
+// WithShutdownPolicy sets the ShutdownPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ShutdownPolicy field is set to the value of the last call.
+func (b *SandboxClaimDefaultsApplyConfiguration) WithShutdownPolicy(value apiv1beta1.ShutdownPolicy) *SandboxClaimDefaultsApplyConfiguration {
+	b.ShutdownPolicy = &value
 	return b
 }

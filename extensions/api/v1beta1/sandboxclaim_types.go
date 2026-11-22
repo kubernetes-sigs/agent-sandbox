@@ -60,8 +60,8 @@ type Lifecycle struct {
 	// This time governs the lifecycle of the claim. It is not propagated to the
 	// underlying Sandbox. Instead, the SandboxClaim controller enforces this
 	// expiration by deleting the Sandbox resources when the time is reached.
-	// If this field is omitted or set to nil, the SandboxClaim does not expire at a
-	// scheduled time. It can still expire through ttlSecondsAfterFinished.
+	// If omitted, a configured warm pool TTL can supply a scheduled time. The
+	// claim can also expire through ttlSecondsAfterFinished.
 	// This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported.
 	// +kubebuilder:validation:Format="date-time"
 	// +optional
@@ -149,12 +149,17 @@ type SandboxClaimSpec struct {
 
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatus struct {
-	// defaultLifecycle is the pool default frozen before provisioning.
-	// An empty object records that no default applied. An absent object means
-	// the controller has not resolved defaults yet. Explicit spec.lifecycle
-	// always takes precedence. Pool changes never modify this snapshot.
+	// defaultShutdownTime is the absolute deadline resolved from the warm pool
+	// TTL before provisioning. It is absent when no deadline was resolved.
+	// A claim's explicit shutdownTime takes precedence.
 	// +optional
-	DefaultLifecycle *Lifecycle `json:"defaultLifecycle,omitempty"`
+	DefaultShutdownTime *metav1.Time `json:"defaultShutdownTime,omitempty"`
+
+	// defaultShutdownPolicy is a non-Retain pool policy frozen with
+	// defaultShutdownTime when the Claim has no lifecycle at resolution.
+	// Its absence means Retain. A Claim's own lifecycle policy takes precedence.
+	// +optional
+	DefaultShutdownPolicy ShutdownPolicy `json:"defaultShutdownPolicy,omitempty"`
 
 	// conditions represent the latest available observations of a Sandbox's current state.
 	// +optional

@@ -37,21 +37,30 @@ type SandboxTemplateRef struct {
 }
 
 // SandboxClaimDefaults defines lifecycle defaults for newly provisioned claims.
+// +kubebuilder:validation:XValidation:rule="!has(self.shutdownPolicy) || has(self.ttlSecondsAfterCreated)",message="shutdownPolicy requires ttlSecondsAfterCreated"
 type SandboxClaimDefaults struct {
 	// ttlSecondsAfterCreated limits claim lifetime from its creation time.
 	// The controller snapshots this default before provisioning a claim without
-	// an explicit lifecycle. Later pool changes do not affect that claim.
-	// Expiration retains only the claim record and deletes its backing resources,
-	// including Sandbox-owned persistent volume claims and their data where
+	// an explicit shutdownTime. Later pool changes do not modify this deadline.
+	// Expiration deletes the backing resources, including Sandbox-owned
+	// persistent volume claims and their data where
 	// the storage reclaim policy deletes the volume.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	TTLSecondsAfterCreated *int32 `json:"ttlSecondsAfterCreated,omitempty"`
+
+	// shutdownPolicy controls whether expiry also deletes the Claim record.
+	// It requires ttlSecondsAfterCreated and defaults to Retain.
+	// A Claim with its own lifecycle uses that lifecycle's shutdownPolicy
+	// instead, which the Claim API defaults to Retain.
+	// The controller freezes this pool policy together with the deadline.
+	// +optional
+	ShutdownPolicy ShutdownPolicy `json:"shutdownPolicy,omitempty"`
 }
 
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpec struct {
-	// claimDefaults applies only to claims without an explicit lifecycle.
+	// claimDefaults applies only to claims without an explicit shutdownTime.
 	// Existing assigned claims are not retroactively given a deadline.
 	// +optional
 	ClaimDefaults *SandboxClaimDefaults `json:"claimDefaults,omitempty"`

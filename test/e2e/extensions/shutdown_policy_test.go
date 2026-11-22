@@ -239,11 +239,9 @@ func TestSandboxClaimPoolDefaultRetain(t *testing.T) {
 	claimUID := claim.UID
 	waitForClaimReady(t, tc, claim)
 	require.Nil(t, claim.Spec.Lifecycle, "the controller must not mutate user intent")
-	require.NotNil(t, claim.Status.DefaultLifecycle)
-	require.NotNil(t, claim.Status.DefaultLifecycle.ShutdownTime)
+	require.NotNil(t, claim.Status.DefaultShutdownTime)
 	deadline := claim.CreationTimestamp.Add(time.Duration(ttl) * time.Second)
-	require.True(t, deadline.Equal(claim.Status.DefaultLifecycle.ShutdownTime.Time))
-	require.Equal(t, extensionsv1beta1.ShutdownPolicyRetain, claim.Status.DefaultLifecycle.ShutdownPolicy)
+	require.True(t, deadline.Equal(claim.Status.DefaultShutdownTime.Time))
 	sb := &sandboxv1beta1.Sandbox{}
 	key := types.NamespacedName{Namespace: ns.Name, Name: claim.Status.SandboxStatus.Name}
 	require.NoError(t, tc.Get(ctx, key, sb))
@@ -267,7 +265,7 @@ func TestSandboxClaimPoolDefaultRetain(t *testing.T) {
 	require.Equal(t, claimUID, claim.UID)
 	require.True(t, claim.DeletionTimestamp.IsZero(), "Retain preserves the Claim record")
 	require.Nil(t, claim.Spec.Lifecycle)
-	require.True(t, deadline.Equal(claim.Status.DefaultLifecycle.ShutdownTime.Time), "the deadline must remain frozen")
+	require.True(t, deadline.Equal(claim.Status.DefaultShutdownTime.Time), "the deadline must remain frozen")
 }
 
 func createTemplate(t *testing.T, tc *framework.TestContext, namespace, name string, podSpec corev1.PodSpec) *extensionsv1beta1.SandboxTemplate {

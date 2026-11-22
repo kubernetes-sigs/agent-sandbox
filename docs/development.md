@@ -56,6 +56,20 @@ make generate-api-docs
 make generate-metrics-docs
 ```
 
+
+### SandboxClaim TTL API regression tests
+
+Run these tests with a local envtest kube-apiserver and etcd:
+
+```sh
+KUBEBUILDER_ASSETS=/path/to/envtest/binaries make test-claim-ttl-integration
+```
+
+The suite starts a disposable API server and etcd, not the current kubeconfig
+cluster. It verifies deletion of a Claim with an inherited pool policy and
+recovery from a successful status write whose HTTP response is discarded while
+the Claim informer is stale. It does not run workload garbage collection.
+
 ## Deploying to cluster
 
 #### Deploying to local `kind` cluster

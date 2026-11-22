@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -77,11 +78,12 @@ func TestIndependentDefaultLifecycleStatusFailureFailsClosed(t *testing.T) {
 			r := &SandboxClaimReconciler{Client: failing, APIReader: base}
 			live := independentReadClaim(t, base)
 			stopPass, err := r.initializeDefaultLifecycle(ctx, live)
-			if err == nil || !errors.Is(err, tc.failure) || stopPass {
+			if apierrors.IsConflict(tc.failure) && (err != nil || !stopPass) ||
+				!apierrors.IsConflict(tc.failure) && (!errors.Is(err, tc.failure) || stopPass) {
 				t.Fatalf("failed write permitted progress: stopPass=%v err=%v", stopPass, err)
 			}
 			persisted := independentReadClaim(t, base)
-			if persisted.Status.DefaultLifecycle != nil {
+			if persisted.Status.DefaultShutdownTime != nil {
 				t.Fatal("failed status write persisted a decision")
 			}
 			var payload struct {
@@ -122,7 +124,41 @@ func TestIndependentDefaultLifecycleAuthoritativeReadFailure(t *testing.T) {
 	if stopPass || !errors.Is(err, failure) {
 		t.Fatalf("read failure did not stop initialization: %v %v", stopPass, err)
 	}
-	if independentReadClaim(t, base).Status.DefaultLifecycle != nil {
+	if independentReadClaim(t, base).Status.DefaultShutdownTime != nil {
 		t.Fatal("read failure persisted a default")
+	}
+}
+
+func TestDefaultDeadlineFailedAttemptDoesNotFreezePreviousPoolAfterClaimUpdate(t *testing.T) {
+	ctx := context.Background()
+	claim, originalPool := independentDefaultFixture()
+	originalPool.Spec.ClaimDefaults = independentTTL(60)
+	nextPool := originalPool.DeepCopy()
+	nextPool.Name = "replacement-pool"
+	nextPool.Spec.ClaimDefaults = independentTTL(3600)
+	base := independentClient(t, claim, originalPool, nextPool)
+	ackLost := errors.New("status response unavailable")
+	failing := &independentFailStatusClient{Client: base, failure: ackLost}
+	r := &SandboxClaimReconciler{Client: failing, APIReader: base}
+	stale := independentReadClaim(t, base)
+	if stop, err := r.initializeDefaultLifecycle(ctx, stale.DeepCopy()); stop || !errors.Is(err, ackLost) {
+		t.Fatalf("unexpected initial attempt result: stop=%v err=%v", stop, err)
+	}
+	changed := independentReadClaim(t, base)
+	if changed.Status.DefaultShutdownTime != nil {
+		t.Fatal("test did not simulate an uncommitted status PATCH")
+	}
+	changed.Spec.WarmPoolRef.Name = nextPool.Name
+	if err := base.Update(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	r.Client = base
+	if stop, err := r.initializeDefaultLifecycle(ctx, stale); stop || err != nil {
+		t.Fatalf("resolve replacement pool: stop=%v err=%v", stop, err)
+	}
+	persisted := independentReadClaim(t, base)
+	want := persisted.CreationTimestamp.Add(time.Hour)
+	if persisted.Status.DefaultShutdownTime == nil || !persisted.Status.DefaultShutdownTime.Time.Equal(want) {
+		t.Fatalf("deadline=%v want %v from replacement pool", persisted.Status.DefaultShutdownTime, want)
 	}
 }

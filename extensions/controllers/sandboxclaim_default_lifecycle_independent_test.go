@@ -16,8 +16,6 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -69,11 +67,8 @@ func TestIndependentDefaultLifecycleCreationDeadlineFrozen(t *testing.T) {
 	}
 	persisted := independentReadClaim(t, c)
 	want := claim.CreationTimestamp.Add(120 * time.Second)
-	if persisted.Status.DefaultLifecycle == nil || persisted.Status.DefaultLifecycle.ShutdownTime == nil || !persisted.Status.DefaultLifecycle.ShutdownTime.Time.Equal(want) {
-		t.Fatalf("deadline is not creation+TTL: %#v", persisted.Status.DefaultLifecycle)
-	}
-	if persisted.Status.DefaultLifecycle.ShutdownPolicy != ext.ShutdownPolicyRetain {
-		t.Fatal("default must retain claim evidence")
+	if persisted.Status.DefaultShutdownTime == nil || !persisted.Status.DefaultShutdownTime.Time.Equal(want) {
+		t.Fatalf("deadline is not creation+TTL: %#v", persisted.Status.DefaultShutdownTime)
 	}
 	if !reflect.DeepEqual(originalSpec, &persisted.Spec) {
 		t.Fatal("initialization mutated claim spec")
@@ -95,7 +90,7 @@ func TestIndependentDefaultLifecycleCreationDeadlineFrozen(t *testing.T) {
 		t.Fatalf("second initialization: %v %v", stopPass, err)
 	}
 	after := independentReadClaim(t, c)
-	if !after.Status.DefaultLifecycle.ShutdownTime.Time.Equal(want) {
+	if !after.Status.DefaultShutdownTime.Time.Equal(want) {
 		t.Fatal("pool edit slid deadline")
 	}
 	// Expiration consumes only claim state, without fetching a pool or depending
@@ -109,39 +104,25 @@ func TestIndependentDefaultLifecycleCreationDeadlineFrozen(t *testing.T) {
 	}
 }
 
-func TestIndependentDefaultLifecycleNoDefaultSnapshotSurvivesPoolEdit(t *testing.T) {
+func TestIndependentDefaultLifecycleAssignedClaimDoesNotInheritAfterPoolEdit(t *testing.T) {
 	ctx := context.Background()
 	claim, pool := independentDefaultFixture()
+	claim.Status.SandboxStatus.Name = "already-assigned"
 	c := independentClient(t, claim, pool)
 	r := &SandboxClaimReconciler{Client: c, APIReader: c}
-	if stopPass, err := r.initializeDefaultLifecycle(ctx, claim); err != nil || stopPass {
-		t.Fatalf("initialize: %v %v", stopPass, err)
-	}
-	saved := independentReadClaim(t, c)
-	if saved.Status.DefaultLifecycle == nil || !reflect.DeepEqual(*saved.Status.DefaultLifecycle, ext.Lifecycle{}) {
-		t.Fatalf("expected nonnil empty snapshot: %#v", saved.Status.DefaultLifecycle)
-	}
-	// Pin JSON persistence of {} versus nil. This does NOT prove CRD pruning.
-	data, err := json.Marshal(saved)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded ext.SandboxClaim
-	if err = json.Unmarshal(data, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if decoded.Status.DefaultLifecycle == nil {
-		t.Fatal("empty snapshot disappeared in JSON round trip")
+	if stop, err := r.initializeDefaultLifecycle(ctx, claim); err != nil || stop {
+		t.Fatalf("initialize: %v %v", stop, err)
 	}
 	pool.Spec.ClaimDefaults = independentTTL(1)
-	if err = c.Update(ctx, pool); err != nil {
+	if err := c.Update(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	if stopPass, err := r.initializeDefaultLifecycle(ctx, &decoded); err != nil || stopPass {
-		t.Fatalf("reinitialized empty snapshot: %v %v", stopPass, err)
+	saved := independentReadClaim(t, c)
+	if stop, err := r.initializeDefaultLifecycle(ctx, saved); err != nil || stop {
+		t.Fatalf("after edit: %v %v", stop, err)
 	}
-	if expired, _ := r.checkExpiration(&decoded); expired {
-		t.Fatal("new pool TTL retroactively expired claim")
+	if independentReadClaim(t, c).Status.DefaultShutdownTime != nil {
+		t.Fatal("TTL was retroactively applied to assigned claim")
 	}
 }
 
@@ -173,15 +154,12 @@ func TestIndependentDefaultLifecyclePositiveOptIn(t *testing.T) {
 			}
 			got := independentReadClaim(t, c)
 			if tc.wantErr {
-				if got.Status.DefaultLifecycle != nil {
+				if got.Status.DefaultShutdownTime != nil {
 					t.Fatal("failed resolution persisted a snapshot")
 				}
 				return
 			}
-			if got.Status.DefaultLifecycle == nil {
-				t.Fatal("decision not persisted")
-			}
-			if (got.Status.DefaultLifecycle.ShutdownTime != nil) != tc.wantDeadline {
+			if (got.Status.DefaultShutdownTime != nil) != tc.wantDeadline {
 				t.Fatal("unexpected TTL decision")
 			}
 		})
@@ -190,31 +168,44 @@ func TestIndependentDefaultLifecyclePositiveOptIn(t *testing.T) {
 
 func TestIndependentDefaultLifecycleExplicitPrecedence(t *testing.T) {
 	deadline := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
-	for _, explicit := range []*ext.Lifecycle{{}, {ShutdownTime: &deadline, ShutdownPolicy: ext.ShutdownPolicyDelete}} {
-		name := "empty"
-		if explicit.ShutdownTime != nil {
-			name = "deadline"
-		}
-		t.Run(name, func(t *testing.T) {
-			claim, _ := independentDefaultFixture()
-			claim.Spec.Lifecycle = explicit
-			// No pool exists: an explicit lifecycle must not depend on pool defaults.
-			c := independentClient(t, claim)
+	zero := int32(0)
+	for _, tc := range []struct {
+		name        string
+		lifecycle   *ext.Lifecycle
+		wantDefault bool
+	}{
+		{"policy only Retain", &ext.Lifecycle{ShutdownPolicy: ext.ShutdownPolicyRetain}, true},
+		{"policy only Delete", &ext.Lifecycle{ShutdownPolicy: ext.ShutdownPolicyDelete}, true},
+		{"finished TTL", &ext.Lifecycle{TTLSecondsAfterFinished: &zero, ShutdownPolicy: ext.ShutdownPolicyDelete}, true},
+		{"explicit deadline", &ext.Lifecycle{ShutdownTime: &deadline, ShutdownPolicy: ext.ShutdownPolicyDelete}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim, pool := independentDefaultFixture()
+			pool.Spec.ClaimDefaults = independentTTL(60)
+			claim.Spec.Lifecycle = tc.lifecycle
+			c := independentClient(t, claim, pool)
 			r := &SandboxClaimReconciler{Client: c, APIReader: c}
-			if _, err := r.initializeDefaultLifecycle(context.Background(), claim); err != nil {
-				t.Fatal(err)
+			if stop, err := r.initializeDefaultLifecycle(context.Background(), claim); err != nil || stop {
+				t.Fatalf("initialize: %v %v", stop, err)
 			}
 			saved := independentReadClaim(t, c)
-			if got := claimLifecycle(saved); !apiequality.Semantic.DeepEqual(got, explicit) {
-				t.Fatalf("explicit lost precedence: %#v", got)
+			if (saved.Status.DefaultShutdownTime != nil) != tc.wantDefault {
+				t.Fatalf("stored deadline: %v", saved.Status.DefaultShutdownTime)
 			}
-			if saved.Status.DefaultLifecycle == nil || saved.Status.DefaultLifecycle.ShutdownTime != nil {
-				t.Fatal("explicit claim inherited a default")
+			if !tc.wantDefault {
+				// A later explicit deadline still wins over an already frozen default.
+				past := metav1.NewTime(time.Now().Add(-time.Hour))
+				saved.Status.DefaultShutdownTime = &past
 			}
-			// Precedence must also hold when a previous default exists.
-			saved.Status.DefaultLifecycle = &ext.Lifecycle{ShutdownTime: &metav1.Time{Time: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}}
-			if !apiequality.Semantic.DeepEqual(claimLifecycle(saved), explicit) {
-				t.Fatal("frozen default overrode explicit lifecycle")
+			want := tc.lifecycle.DeepCopy()
+			if tc.wantDefault {
+				want.ShutdownTime = saved.Status.DefaultShutdownTime
+			}
+			if got := claimLifecycle(saved); !apiequality.Semantic.DeepEqual(got, want) {
+				t.Fatalf("effective lifecycle: %#v, want %#v", got, want)
+			}
+			if !apiequality.Semantic.DeepEqual(saved.Spec.Lifecycle, tc.lifecycle) {
+				t.Fatal("claim's spec was changed")
 			}
 		})
 	}
@@ -223,8 +214,12 @@ func TestIndependentDefaultLifecycleExplicitPrecedence(t *testing.T) {
 func TestIndependentDefaultLifecycleLegacyBindingAndMissingPool(t *testing.T) {
 	for _, mode := range []string{"status", "annotation", "label", "owned sandbox", "unbound"} {
 		t.Run(mode, func(t *testing.T) {
-			claim, _ := independentDefaultFixture()
-			var extra []client.Object
+			claim, pool := independentDefaultFixture()
+			pool.Spec.ClaimDefaults = independentTTL(60)
+			extra := []client.Object{pool}
+			if mode == "unbound" {
+				extra = nil
+			}
 			switch mode {
 			case "status":
 				claim.Status.SandboxStatus.Name = "existing"
@@ -240,19 +235,10 @@ func TestIndependentDefaultLifecycleLegacyBindingAndMissingPool(t *testing.T) {
 			r := &SandboxClaimReconciler{Client: c, APIReader: c}
 			_, err := r.initializeDefaultLifecycle(context.Background(), claim)
 			saved := independentReadClaim(t, c)
-			if mode == "unbound" {
-				if !errors.Is(err, ErrWarmPoolNotFound) {
-					t.Fatalf("missing pool error: %v", err)
-				}
-				if saved.Status.DefaultLifecycle != nil {
-					t.Fatal("missing pool must remain retryable")
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if saved.Status.DefaultLifecycle == nil || saved.Status.DefaultLifecycle.ShutdownTime != nil {
+			if saved.Status.DefaultShutdownTime != nil {
 				t.Fatal("legacy binding acquired TTL")
 			}
 		})
@@ -268,7 +254,8 @@ func TestIndependentDefaultLifecycleAuthoritativeClaimWins(t *testing.T) {
 			if mode == "replacement UID" {
 				fresh.UID = "replacement-uid"
 			} else {
-				fresh.Status.DefaultLifecycle = &ext.Lifecycle{}
+				deadline := metav1.NewTime(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+				fresh.Status.DefaultShutdownTime = &deadline
 			}
 			c := independentClient(t, fresh, pool)
 			r := &SandboxClaimReconciler{Client: c, APIReader: c}
@@ -278,11 +265,63 @@ func TestIndependentDefaultLifecycleAuthoritativeClaimWins(t *testing.T) {
 			}
 			saved := independentReadClaim(t, c)
 			if mode == "replacement UID" {
-				if saved.UID != "replacement-uid" || saved.Status.DefaultLifecycle != nil {
+				if saved.UID != "replacement-uid" || saved.Status.DefaultShutdownTime != nil {
 					t.Fatal("stale reconcile mutated replacement claim")
 				}
-			} else if saved.Status.DefaultLifecycle == nil || saved.Status.DefaultLifecycle.ShutdownTime != nil {
-				t.Fatal("stale reconcile overwrote initialized no-default decision")
+			} else if !saved.Status.DefaultShutdownTime.Equal(fresh.Status.DefaultShutdownTime) {
+				t.Fatal("stale reconcile overwrote initialized deadline")
+			}
+		})
+	}
+}
+
+func TestPoolShutdownPolicyIsFrozenOnlyForClaimsWithoutLifecycle(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name                      string
+		poolPolicy                ext.ShutdownPolicy
+		claimLifecycle            *ext.Lifecycle
+		wantFrozen, wantEffective ext.ShutdownPolicy
+	}{
+		{name: "Retain by default"},
+		{name: "pool Delete", poolPolicy: ext.ShutdownPolicyDelete, wantFrozen: ext.ShutdownPolicyDelete, wantEffective: ext.ShutdownPolicyDelete},
+		{name: "pool DeleteForeground", poolPolicy: ext.ShutdownPolicyDeleteForeground, wantFrozen: ext.ShutdownPolicyDeleteForeground, wantEffective: ext.ShutdownPolicyDeleteForeground},
+		{name: "Claim Retain", poolPolicy: ext.ShutdownPolicyDelete, claimLifecycle: &ext.Lifecycle{ShutdownPolicy: ext.ShutdownPolicyRetain}, wantEffective: ext.ShutdownPolicyRetain},
+		{name: "Claim Delete", poolPolicy: ext.ShutdownPolicyRetain, claimLifecycle: &ext.Lifecycle{ShutdownPolicy: ext.ShutdownPolicyDelete}, wantEffective: ext.ShutdownPolicyDelete},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim, pool := independentDefaultFixture()
+			pool.Spec.ClaimDefaults = independentTTL(60)
+			pool.Spec.ClaimDefaults.ShutdownPolicy = tc.poolPolicy
+			claim.Spec.Lifecycle = tc.claimLifecycle
+			c := independentClient(t, claim, pool)
+			r := &SandboxClaimReconciler{Client: c, APIReader: c}
+			if stop, err := r.initializeDefaultLifecycle(ctx, claim); stop || err != nil {
+				t.Fatalf("initialize: stop=%v err=%v", stop, err)
+			}
+			saved := independentReadClaim(t, c)
+			if saved.Status.DefaultShutdownTime == nil || saved.Status.DefaultShutdownPolicy != tc.wantFrozen {
+				t.Fatalf("unexpected snapshot: %+v", saved.Status)
+			}
+			if effective := claimLifecycle(saved); effective.ShutdownPolicy != tc.wantEffective {
+				t.Fatalf("effective policy=%q want %q", effective.ShutdownPolicy, tc.wantEffective)
+			}
+			pool.Spec.ClaimDefaults.ShutdownPolicy = ext.ShutdownPolicyDeleteForeground
+			if err := c.Update(ctx, pool); err != nil {
+				t.Fatal(err)
+			}
+			if stop, err := r.initializeDefaultLifecycle(ctx, saved); stop || err != nil {
+				t.Fatalf("after edit: stop=%v err=%v", stop, err)
+			}
+			changed := independentReadClaim(t, c)
+			if !changed.Status.DefaultShutdownTime.Equal(saved.Status.DefaultShutdownTime) || changed.Status.DefaultShutdownPolicy != tc.wantFrozen {
+				t.Fatalf("pool edit changed resolved values: %+v", changed.Status)
+			}
+			if tc.claimLifecycle != nil {
+				changed.Spec.Lifecycle = nil
+				if effective := claimLifecycle(changed); effective.ShutdownPolicy != "" {
+					t.Fatalf("removing a Claim-specific override exposed destructive pool policy %q", effective.ShutdownPolicy)
+				}
 			}
 		})
 	}

@@ -21,7 +21,7 @@ package v1beta1
 //
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpecApplyConfiguration struct {
-	// claimDefaults applies only to claims without an explicit lifecycle.
+	// claimDefaults applies only to claims without an explicit shutdownTime.
 	// Existing assigned claims are not retroactively given a deadline.
 	ClaimDefaults *SandboxClaimDefaultsApplyConfiguration `json:"claimDefaults,omitempty"`
 	// replicas is the desired number of sandboxes in the pool.

@@ -319,11 +319,10 @@ Lifecycle defines the lifecycle management for the SandboxClaim.
 
 _Appears in:_
 - [SandboxClaimSpec](#sandboxclaimspec)
-- [SandboxClaimStatus](#sandboxclaimstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the SandboxClaim expires.<br />This time governs the lifecycle of the claim. It is not propagated to the<br />underlying Sandbox. Instead, the SandboxClaim controller enforces this<br />expiration by deleting the Sandbox resources when the time is reached.<br />If this field is omitted or set to nil, the SandboxClaim does not expire at a<br />scheduled time. It can still expire through ttlSecondsAfterFinished.<br />This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported. |  | Format: date-time <br />Optional: \{\} <br /> |
+| `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time when the SandboxClaim expires.<br />This time governs the lifecycle of the claim. It is not propagated to the<br />underlying Sandbox. Instead, the SandboxClaim controller enforces this<br />expiration by deleting the Sandbox resources when the time is reached.<br />If omitted, a configured warm pool TTL can supply a scheduled time. The<br />claim can also expire through ttlSecondsAfterFinished.<br />This implies unsetting a Sandbox's ShutdownTime via SandboxClaim isn't supported. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `ttlSecondsAfterFinished` _integer_ | ttlSecondsAfterFinished is how long after its Sandbox finishes the claim<br />expires. The shutdownPolicy decides whether expiry deletes the claim.<br />The timer starts from the mirrored Finished condition's LastTransitionTime. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the SandboxClaim object when it<br />expires, either at shutdownTime or after ttlSecondsAfterFinished, whichever<br />comes first. The controller always deletes the underlying Sandbox on expiry.<br />  - Retain (default): the controller keeps the SandboxClaim and sets its Ready<br />    condition to False with reason ClaimExpired.<br />  - Delete: the controller deletes the SandboxClaim.<br />  - DeleteForeground: like Delete, but uses foreground cascading deletion.<br />This field has no effect while the SandboxClaim cannot expire. | Retain | Enum: [Delete DeleteForeground Retain] <br />Optional: \{\} <br /> |
 
@@ -398,7 +397,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated limits claim lifetime from its creation time.<br />The controller snapshots this default before provisioning a claim without<br />an explicit lifecycle. Later pool changes do not affect that claim.<br />Expiration retains only the claim record and deletes its backing resources,<br />including Sandbox-owned persistent volume claims and their data where<br />the storage reclaim policy deletes the volume. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `ttlSecondsAfterCreated` _integer_ | ttlSecondsAfterCreated limits claim lifetime from its creation time.<br />The controller snapshots this default before provisioning a claim without<br />an explicit shutdownTime. Later pool changes do not modify this deadline.<br />Expiration deletes the backing resources, including Sandbox-owned<br />persistent volume claims and their data where<br />the storage reclaim policy deletes the volume. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy controls whether expiry also deletes the Claim record.<br />It requires ttlSecondsAfterCreated and defaults to Retain.<br />A Claim with its own lifecycle uses that lifecycle's shutdownPolicy<br />instead, which the Claim API defaults to Retain.<br />The controller freezes this pool policy together with the deadline. |  | Enum: [Delete DeleteForeground Retain] <br />Optional: \{\} <br /> |
 
 
 #### SandboxClaimSpec
@@ -434,7 +434,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `defaultLifecycle` _[Lifecycle](#lifecycle)_ | defaultLifecycle is the pool default frozen before provisioning.<br />An empty object records that no default applied. An absent object means<br />the controller has not resolved defaults yet. Explicit spec.lifecycle<br />always takes precedence. Pool changes never modify this snapshot. |  | Optional: \{\} <br /> |
+| `defaultShutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | defaultShutdownTime is the absolute deadline resolved from the warm pool<br />TTL before provisioning. It is absent when no deadline was resolved.<br />A claim's explicit shutdownTime takes precedence. |  | Optional: \{\} <br /> |
+| `defaultShutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | defaultShutdownPolicy is a non-Retain pool policy frozen with<br />defaultShutdownTime when the Claim has no lifecycle at resolution.<br />Its absence means Retain. A Claim's own lifecycle policy takes precedence. |  | Enum: [Delete DeleteForeground Retain] <br />Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#condition-v1-meta) array_ | conditions represent the latest available observations of a Sandbox's current state. |  | Optional: \{\} <br /> |
 | `sandbox` _[SandboxStatus](#sandboxstatus)_ | sandbox defines the state of Sandbox |  | Optional: \{\} <br /> |
 
@@ -566,7 +567,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `claimDefaults` _[SandboxClaimDefaults](#sandboxclaimdefaults)_ | claimDefaults applies only to claims without an explicit lifecycle.<br />Existing assigned claims are not retroactively given a deadline. |  | Optional: \{\} <br /> |
+| `claimDefaults` _[SandboxClaimDefaults](#sandboxclaimdefaults)_ | claimDefaults applies only to claims without an explicit shutdownTime.<br />Existing assigned claims are not retroactively given a deadline. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of sandboxes in the pool.<br />This field is controlled by an HPA if specified. | 1 | Minimum: 0 <br />Optional: \{\} <br /> |
 | `sandboxTemplateRef` _[SandboxTemplateRef](#sandboxtemplateref)_ | sandboxTemplateRef - name of the SandboxTemplate to be used for creating a Sandbox<br />Warning: Any change to the json tag "sandboxTemplateRef" must be synchronized with the TemplateRefField constant. |  | Required: \{\} <br /> |
 | `updateStrategy` _[SandboxWarmPoolUpdateStrategy](#sandboxwarmpoolupdatestrategy)_ | updateStrategy controls how the pool replaces its stale sandboxes. A sandbox is<br />considered stale when the effective SandboxBlueprint derived from the referenced<br />SandboxTemplate (or the sandboxTemplateRef name) changes; metadata-only edits<br />(annotations or labels) do not make a sandbox stale and never trigger replacement.<br />It applies only to sandboxes still owned by the pool (i.e. unclaimed). Once a sandbox<br />is claimed by a SandboxClaim, ownership transfers to the claim and the pool no longer<br />manages or replaces it.<br />Defaults to OnReplenish. |  | Optional: \{\} <br /> |
@@ -638,6 +639,8 @@ _Validation:_
 
 _Appears in:_
 - [Lifecycle](#lifecycle)
+- [SandboxClaimDefaults](#sandboxclaimdefaults)
+- [SandboxClaimStatus](#sandboxclaimstatus)
 
 | Field | Description |
 | --- | --- |

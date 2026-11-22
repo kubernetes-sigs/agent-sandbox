@@ -42,6 +42,22 @@ spec:
             type: object
           spec:
             properties:
+              claimDefaults:
+                properties:
+                  shutdownPolicy:
+                    enum:
+                    - Delete
+                    - DeleteForeground
+                    - Retain
+                    type: string
+                  ttlSecondsAfterCreated:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: shutdownPolicy requires ttlSecondsAfterCreated
+                  rule: '!has(self.shutdownPolicy) || has(self.ttlSecondsAfterCreated)'
               readinessGracePeriodSeconds:
                 format: int32
                 minimum: 30

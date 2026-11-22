@@ -47,6 +47,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
+	"sigs.k8s.io/agent-sandbox/internal/rawpatch"
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
@@ -409,12 +410,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		r.recreateBackoff.clear(req.NamespacedName)
 	}
 
+	// The annotation patch can advance the resource version used to lock status writes.
+	r.ensureSandboxTraceContext(ctx, sandbox)
 	oldStatus := sandbox.Status.DeepCopy()
 	oldResourceVersion := sandbox.ResourceVersion
-
-	// Initialize the optional trace-context annotation. Best-effort: patch
-	// failures must not stall reconcile.
-	r.ensureSandboxTraceContext(ctx, sandbox)
 
 	r.startSandboxStageMetrics(ctx, sandbox)
 
@@ -2500,22 +2499,25 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 func (r *SandboxReconciler) ensureSandboxTraceContext(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
 	logger := log.FromContext(ctx)
 	tc := r.Tracer.GetTraceContext(ctx)
-	if tc == "" || (sandbox.Annotations != nil && sandbox.Annotations[asmetrics.TraceContextAnnotation] != "") {
+	if tc == "" || sandbox.Annotations[asmetrics.TraceContextAnnotation] != "" {
 		return
 	}
 
-	statusCopy := sandbox.Status.DeepCopy()
-	patch := client.MergeFrom(sandbox.DeepCopy())
-	if sandbox.Annotations == nil {
-		sandbox.Annotations = make(map[string]string)
-	}
-	sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
-	if err := r.Patch(ctx, sandbox, patch); err != nil {
-		logger.Error(err, "failed to patch sandbox trace context annotation; will retry")
-		sandbox.Status = *statusCopy
+	patch, err := rawpatch.Annotations(map[string]string{asmetrics.TraceContextAnnotation: tc})
+	if err != nil {
+		logger.Error(err, "failed to build sandbox trace context annotation patch")
 		return
 	}
-	sandbox.Status = *statusCopy
+
+	// Decode into a fresh object so fields omitted by the server cannot retain cached values.
+	updated := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace},
+	}
+	if err := r.Patch(ctx, updated, patch); err != nil {
+		logger.Error(err, "failed to patch sandbox trace context annotation")
+		return
+	}
+	*sandbox = *updated
 }
 
 // sandboxStageMetrics exists only for new watch events in this controller run.

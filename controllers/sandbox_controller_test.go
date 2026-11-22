@@ -6889,6 +6889,7 @@ func TestSandboxCreationMetricsStatusRetry(t *testing.T) {
 
 type mockTracer struct {
 	asmetrics.Instrumenter
+	traceContext  string
 	capturedAttrs map[string]string
 	events        []mockTracerEvent
 }
@@ -6906,7 +6907,7 @@ func (m *mockTracer) StartSpan(ctx context.Context, _ metav1.Object, _ string, a
 }
 
 func (m *mockTracer) GetTraceContext(_ context.Context) string {
-	return ""
+	return m.traceContext
 }
 
 func (m *mockTracer) IsRecording(_ context.Context) bool {
@@ -6960,6 +6961,33 @@ func TestReconcile_TracingNormalization(t *testing.T) {
 
 	require.NotNil(t, mt.capturedAttrs)
 	require.Equal(t, "unknown", mt.capturedAttrs[sandboxv1beta1.CreatedByLabel], "created-by label must be normalized in span attributes")
+}
+
+func TestReconcilePersistsStatusAfterAddingTraceContext(t *testing.T) {
+	const traceContext = `{"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"}`
+	expired := metav1.NewTime(time.Now().Add(-time.Hour))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "expired-sandbox", Namespace: "default"},
+	}
+	sandbox.Spec.ShutdownTime = &expired
+	c := newFakeClient(sandbox)
+	r := &SandboxReconciler{
+		Client: c,
+		Scheme: Scheme,
+		Tracer: &mockTracer{traceContext: traceContext},
+	}
+	key := client.ObjectKeyFromObject(sandbox)
+
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, c.Get(t.Context(), key, live))
+	require.Equal(t, traceContext, live.Annotations[asmetrics.TraceContextAnnotation])
+	ready := meta.FindStatusCondition(live.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready, "the first reconcile must persist the Ready condition")
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, ready.Reason)
 }
 
 func TestNameHash_Correctness(t *testing.T) {

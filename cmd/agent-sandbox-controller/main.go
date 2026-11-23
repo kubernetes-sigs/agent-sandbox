@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -56,6 +57,15 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mint-router-token" {
+		err := mintRouterToken(context.Background(), os.Args[2:], os.Stdout, os.Stderr)
+		if err != nil && !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	var metricsAddr string
 	var enableLeaderElection bool
 	var leaderElectionNamespace string

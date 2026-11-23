@@ -386,7 +386,28 @@ An exact v2 token authorizes the bound Sandbox UID, method, port, and path until
 
 `authz.MintScopedTokenV2Sandbox` mints a sandbox-scoped token instead. It authorizes every port, method, and path of the bound Sandbox UID until expiry, including sidecar ports, so keep its TTL short. Use it for clients that send one token on every call, such as the Python SDK's router mode. Routers without sandbox-scope support reject these tokens with 403, so upgrade every router replica before issuers mint them.
 
-The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
+To issue a sandbox-scoped v2 token, run the controller binary as a one-shot
+command from a trusted environment. Use a kubeconfig with permission to
+`get` the target Sandbox, and a PEM file containing its issuer's PKCS#8
+Ed25519 private key. Configure the router with the corresponding public key
+and key ID before issuing tokens. From a source checkout,
+`make build-controller` builds the binary at `bin/manager`.
+
+```sh
+agent-sandbox-controller mint-router-token \
+  --namespace team-a --signing-key-file signing-key.pem --key-id current box-a
+```
+
+The command reads the live Sandbox UID from Kubernetes and writes the bearer
+token to stdout. The default lifetime is five minutes. Use `--ttl` to choose
+a different lifetime. When issuing for a SandboxClaim, wait until the claim
+binds and pass its `.status.sandbox.name` in the claim's namespace. Deliver the
+token through a channel restricted to the intended recipient. Keep the signing
+key with the issuer because it can sign tokens for any Sandbox served by a
+router that trusts the corresponding public key.
+
+The command runs on demand. Automatic controller issuance and credential
+delivery are discussed in [#2384](https://github.com/kubernetes-sigs/agent-sandbox/issues/2384).
 
 ### Browser-session credentials
 

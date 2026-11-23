@@ -498,6 +498,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	logger := log.FromContext(ctx)
 
 	poolKey := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
+	expectationKey := warmPoolKey{NamespacedName: poolKey, UID: warmPool.UID}
 	var requeueAfter time.Duration
 
 	// Compute hash of the warm pool name for the pool label
@@ -578,9 +579,9 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
-			r.exp().ExpectDeletion(poolKey, sb.UID)
+			r.exp().ExpectDeletion(expectationKey, sb.UID)
 			if err := r.Delete(ctx, &sb); err != nil {
-				r.exp().DeletionObserved(poolKey, sb.UID)
+				r.exp().DeletionObserved(expectationKey, sb.UID)
 				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
 				// The sandbox still exists; keep counting it as active so the
@@ -709,7 +710,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// creating against it would overshoot the target (the #1215 runaway),
 			// so we skip and let the watch (or a fallback requeue) retrigger us.
 			// The granted tokens are refunded: no POST was issued for them.
-			case !r.exp().TryExpectCreations(poolKey, int(sandboxesToCreate)):
+			case !r.exp().TryExpectCreations(expectationKey, int(sandboxesToCreate)):
 				logger.Info("Skipping sandbox creation: waiting for in-flight creates/deletes to be observed",
 					"poolName", warmPool.Name)
 				r.refundRefillTokens(poolKey, sandboxesToCreate)
@@ -727,7 +728,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// successes); the > 0 guard only skips a no-op tracker call on
 				// the everything-succeeded path.
 				if lower := int(sandboxesToCreate) - successes; lower > 0 {
-					r.exp().LowerCreations(poolKey, lower)
+					r.exp().LowerCreations(expectationKey, lower)
 				}
 				r.noteReplenishCreates(poolKey, int32(successes))
 				if createErr != nil {
@@ -743,7 +744,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// expectations are unsatisfied: a stale list could otherwise show a
 	// phantom surplus and delete healthy sandboxes.
 	if currentReplicas > desiredReplicas {
-		if !r.exp().SatisfiedExpectations(poolKey) {
+		if !r.exp().SatisfiedExpectations(expectationKey) {
 			logger.Info("Skipping excess sandbox deletion: waiting for in-flight creates/deletes to be observed",
 				"poolName", warmPool.Name)
 			requeueAfter = minNonZeroDuration(requeueAfter, expectationsPendingRequeueDelay)
@@ -769,7 +770,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// Parallel sandbox deletion with adaptive slow-start batching (starts with 1 and doubles on success)
 			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
 				sb := &activeSandboxes[idx]
-				r.exp().ExpectDeletion(poolKey, sb.UID)
+				r.exp().ExpectDeletion(expectationKey, sb.UID)
 				err := r.Delete(ctx, sb)
 				if err == nil {
 					return nil
@@ -781,7 +782,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				// the pool is not blocked until the expectations timeout —
 				// the same recovery kube's ReplicaSet controller applies to
 				// failed deletes.
-				r.exp().DeletionObserved(poolKey, sb.UID)
+				r.exp().DeletionObserved(expectationKey, sb.UID)
 				if k8serrors.IsNotFound(err) {
 					// Not an error for the batch: the desired outcome
 					// (sandbox gone) already holds.
@@ -1009,6 +1010,7 @@ func setWarmLaunchTypeLabelIfNeeded(sb *sandboxv1beta1.Sandbox) bool {
 // count them against spec.replicas (#1215).
 func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, poolKey types.NamespacedName, warmPool *extensionsv1beta1.SandboxWarmPool, sandboxes []sandboxv1beta1.Sandbox, template *extensionsv1beta1.SandboxTemplate, currentSandboxBlueprintHash string, tmplErr error) ([]sandboxv1beta1.Sandbox, int32, error) {
 	logger := log.FromContext(ctx)
+	expectationKey := warmPoolKey{NamespacedName: poolKey, UID: warmPool.UID}
 	var activeSandboxes []sandboxv1beta1.Sandbox
 	inactiveReplicas := int32(0)
 	var allErrors error
@@ -1043,7 +1045,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		// A sandbox this controller already deleted may still show up in the
 		// (lagging) cache without a deletion timestamp; treat it as
 		// terminating, not active.
-		if isControlledByPool && r.exp().IsPendingDeletion(poolKey, sb.UID) {
+		if isControlledByPool && r.exp().IsPendingDeletion(expectationKey, sb.UID) {
 			inactiveReplicas++
 			continue
 		}
@@ -1060,11 +1062,11 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				// watch handler can only map owned delete events back to the
 				// pool, and only owned sandboxes count against the target.
 				if isControlledByPool {
-					r.exp().ExpectDeletion(poolKey, sb.UID)
+					r.exp().ExpectDeletion(expectationKey, sb.UID)
 				}
 				if err := r.Delete(ctx, &sb); err != nil {
 					if isControlledByPool {
-						r.exp().DeletionObserved(poolKey, sb.UID)
+						r.exp().DeletionObserved(expectationKey, sb.UID)
 					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
@@ -1403,16 +1405,19 @@ func sandboxTemplateRefNameIndexer(obj client.Object) []string {
 }
 
 // warmPoolControllerKey resolves the SandboxWarmPool that controls obj, if any.
-func warmPoolControllerKey(obj client.Object) (types.NamespacedName, bool) {
+func warmPoolControllerKey(obj client.Object) (warmPoolKey, bool) {
 	controllerRef := metav1.GetControllerOf(obj)
 	if controllerRef == nil {
-		return types.NamespacedName{}, false
+		return warmPoolKey{}, false
 	}
 	gv, err := schema.ParseGroupVersion(controllerRef.APIVersion)
 	if err != nil || gv.Group != extensionsv1beta1.GroupVersion.Group || controllerRef.Kind != "SandboxWarmPool" {
-		return types.NamespacedName{}, false
+		return warmPoolKey{}, false
 	}
-	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: controllerRef.Name}, true
+	return warmPoolKey{
+		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: controllerRef.Name},
+		UID:            controllerRef.UID,
+	}, true
 }
 
 // warmPoolSandboxEventHandler wraps the standard enqueue-for-owner handler so

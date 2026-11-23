@@ -24,8 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func expKey(name string) types.NamespacedName {
-	return types.NamespacedName{Namespace: "default", Name: name}
+func expKey(name string) warmPoolKey {
+	return warmPoolKey{NamespacedName: types.NamespacedName{Namespace: "default", Name: name}, UID: types.UID(name)}
 }
 
 func TestWarmPoolExpectations_CreateLifecycle(t *testing.T) {
@@ -164,9 +164,36 @@ func TestWarmPoolExpectations_Forget(t *testing.T) {
 	require.True(t, e.TryExpectCreations(key, 3))
 	e.ExpectDeletion(other, "uid-1")
 
-	e.Forget(key)
+	e.Forget(key.NamespacedName)
 	require.True(t, e.SatisfiedExpectations(key))
 	require.False(t, e.SatisfiedExpectations(other), "Forget must only drop the given pool")
+}
+
+func TestWarmPoolExpectations_PoolUID(t *testing.T) {
+	e := newWarmPoolExpectations()
+	old := expKey("pool-a")
+	replacement := old
+	replacement.UID = "replacement-uid"
+
+	e.ExpectDeletion(old, "old-member")
+	require.False(t, e.SatisfiedExpectations(old))
+	require.False(t, e.IsPendingDeletion(replacement, "old-member"))
+	require.True(t, e.TryExpectCreations(replacement, 2))
+	require.Len(t, e.pools, 1, "new expectations replace the old pool's record")
+	e.LowerCreations(old, 2)
+	e.CreationObserved(old)
+	require.False(t, e.SatisfiedExpectations(replacement))
+	e.CreationObserved(replacement)
+	require.False(t, e.SatisfiedExpectations(replacement))
+	e.CreationObserved(replacement)
+	require.True(t, e.SatisfiedExpectations(replacement))
+
+	require.True(t, e.TryExpectCreations(old, 1))
+	e.ExpectDeletion(replacement, "member")
+	e.DeletionObserved(old, "member")
+	require.True(t, e.IsPendingDeletion(replacement, "member"))
+	e.DeletionObserved(replacement, "member")
+	require.True(t, e.SatisfiedExpectations(replacement), "old creations must not carry into the new deletion record")
 }
 
 // TestWarmPoolExpectations_ConcurrentTryExpect asserts the check-and-record in
@@ -200,7 +227,7 @@ func TestWarmPoolExpectations_ConcurrentTryExpect(t *testing.T) {
 // asserted only loosely (no deadlock, satisfied after a final Forget).
 func TestWarmPoolExpectations_ConcurrentMixedOps(t *testing.T) {
 	e := newWarmPoolExpectations()
-	keys := []types.NamespacedName{expKey("pool-a"), expKey("pool-b"), expKey("pool-c")}
+	keys := []warmPoolKey{expKey("pool-a"), expKey("pool-b"), expKey("pool-c")}
 
 	var wg sync.WaitGroup
 	for i := range 16 {
@@ -230,7 +257,7 @@ func TestWarmPoolExpectations_ConcurrentMixedOps(t *testing.T) {
 	wg.Wait()
 
 	for _, key := range keys {
-		e.Forget(key)
+		e.Forget(key.NamespacedName)
 		require.True(t, e.SatisfiedExpectations(key))
 	}
 }

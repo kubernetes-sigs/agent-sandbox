@@ -175,7 +175,7 @@ func TestReconcilePool_NoOverCreationWithStaleCache(t *testing.T) {
 		h.Create(ctx, event.CreateEvent{Object: &created.Items[i]}, nil)
 	}
 	poolKey := types.NamespacedName{Namespace: warmPool.Namespace, Name: warmPool.Name}
-	require.True(t, r.exp().SatisfiedExpectations(poolKey),
+	require.True(t, r.exp().SatisfiedExpectations(warmPoolKey{NamespacedName: poolKey, UID: warmPool.UID}),
 		"watch-observed adds must satisfy the recorded expectations")
 
 	// Further reconciles are steady-state: no additional creates.
@@ -339,7 +339,7 @@ func TestReconcilePool_OrphanTerminatingCountsAgainstTarget(t *testing.T) {
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: poolKey})
 	require.NoError(t, err)
-	require.True(t, r.exp().SatisfiedExpectations(poolKey))
+	require.True(t, r.exp().SatisfiedExpectations(warmPoolKey{NamespacedName: poolKey, UID: warmPool.UID}))
 
 	var sandboxes sandboxv1beta1.SandboxList
 	require.NoError(t, r.List(context.Background(), &sandboxes, client.InNamespace(poolNamespace)))
@@ -495,7 +495,7 @@ func TestReconcilePool_FailedMemberMutationKeepsPopulation(t *testing.T) {
 
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: poolKey})
 			require.ErrorIs(t, err, operationErr)
-			require.True(t, r.exp().SatisfiedExpectations(poolKey),
+			require.True(t, r.exp().SatisfiedExpectations(warmPoolKey{NamespacedName: poolKey, UID: warmPool.UID}),
 				"failed mutations must not leave a deletion expectation for an orphan")
 
 			var sandboxes sandboxv1beta1.SandboxList
@@ -1058,9 +1058,9 @@ func TestReconcilePool_ExcessDeleteNotFoundLowersExpectation(t *testing.T) {
 
 	// The deletion expectation must be lowered synchronously: no watch event
 	// will ever arrive for the phantom.
-	require.True(t, r.exp().SatisfiedExpectations(poolKey),
+	require.True(t, r.exp().SatisfiedExpectations(warmPoolKey{NamespacedName: poolKey, UID: warmPool.UID}),
 		"NotFound delete must lower its expectation immediately, not wait for the 5m timeout")
-	require.False(t, r.exp().IsPendingDeletion(poolKey, phantom.UID))
+	require.False(t, r.exp().IsPendingDeletion(warmPoolKey{NamespacedName: poolKey, UID: warmPool.UID}, phantom.UID))
 
 	// All real sandboxes survived.
 	for _, name := range []string{real1.Name, real2.Name, real3.Name} {
@@ -1614,7 +1614,7 @@ func TestWarmPoolSandboxEventHandler_ObservesOwnedEvents(t *testing.T) {
 	e := newWarmPoolExpectations()
 	h := &warmPoolSandboxEventHandler{EventHandler: handler.Funcs{}, expectations: e}
 	ctx := context.Background()
-	poolKey := types.NamespacedName{Namespace: "default", Name: "test-pool"}
+	poolKey := warmPoolKey{NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-pool"}, UID: "warmpool-uid"}
 
 	controller := true
 	owned := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
@@ -1635,17 +1635,119 @@ func TestWarmPoolSandboxEventHandler_ObservesOwnedEvents(t *testing.T) {
 	foreign := owned.DeepCopy()
 	foreign.OwnerReferences[0].Kind = "ReplicaSet"
 	foreign.OwnerReferences[0].APIVersion = "apps/v1"
+	previousOwner := owned.DeepCopy()
+	previousOwner.OwnerReferences[0].UID = "previous-pool-uid"
 
 	require.True(t, e.TryExpectCreations(poolKey, 1))
 	h.Create(ctx, event.CreateEvent{Object: orphan}, nil)
 	h.Create(ctx, event.CreateEvent{Object: foreign}, nil)
+	h.Create(ctx, event.CreateEvent{Object: previousOwner}, nil)
 	require.False(t, e.SatisfiedExpectations(poolKey), "unowned/foreign adds must not lower expectations")
 	h.Create(ctx, event.CreateEvent{Object: owned}, nil)
 	require.True(t, e.SatisfiedExpectations(poolKey))
 
 	e.ExpectDeletion(poolKey, owned.UID)
 	h.Delete(ctx, event.DeleteEvent{Object: orphan}, nil)
+	h.Delete(ctx, event.DeleteEvent{Object: previousOwner}, nil)
 	require.False(t, e.SatisfiedExpectations(poolKey))
 	h.Delete(ctx, event.DeleteEvent{Object: owned}, nil)
 	require.True(t, e.SatisfiedExpectations(poolKey))
+}
+
+func TestReconcilePool_RecreatedPoolExpectations(t *testing.T) {
+	for _, recreate := range []bool{false, true} {
+		name := "same_pool"
+		if recreate {
+			name = "recreated_pool"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			pool, template := newOverCreationFixture(0)
+			member := createPoolSandbox(pool.Name, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), template, "-retiring")
+			member.UID = "retiring-member-uid"
+			member.Finalizers = []string{"test.agents.x-k8s.io/retain"}
+			scheme := newTestScheme()
+			require.NoError(t, ctrl.SetControllerReference(pool, member, scheme))
+			c := newLaggingClient(newFakeClient(scheme, pool, template, member))
+			r := SandboxWarmPoolReconciler{Client: c, Scheme: scheme, MaxBatchSize: sandboxCreateDeleteMaxBatchSize}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
+			_, err := r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			require.True(t, r.exp().IsPendingDeletion(warmPoolKey{NamespacedName: request.NamespacedName, UID: pool.UID}, member.UID))
+
+			if recreate {
+				require.NoError(t, c.Delete(ctx, pool))
+				pool, _ = newOverCreationFixture(1)
+				pool.UID = "replacement-pool-uid"
+				require.NoError(t, c.Create(ctx, pool))
+			} else {
+				require.NoError(t, c.Get(ctx, request.NamespacedName, pool))
+				pool.Spec.Replicas = new(int32(1))
+				require.NoError(t, c.Update(ctx, pool))
+			}
+
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(member), member))
+			require.False(t, member.DeletionTimestamp.IsZero())
+			wantCreates := 0
+			if recreate {
+				wantCreates = 1
+			}
+			require.Equal(t, wantCreates, c.createCount())
+		})
+	}
+}
+
+func TestReconcilePool_RecreatedPoolLateAdd(t *testing.T) {
+	for _, previousOwner := range []bool{true, false} {
+		name := "current_owner"
+		if previousOwner {
+			name = "previous_owner"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			pool, template := newOverCreationFixture(1)
+			scheme := newTestScheme()
+			c := newLaggingClient(newFakeClient(scheme, pool, template))
+			r := SandboxWarmPoolReconciler{Client: c, Scheme: scheme, MaxBatchSize: sandboxCreateDeleteMaxBatchSize}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
+			_, err := r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			members := &sandboxv1beta1.SandboxList{}
+			require.NoError(t, c.WithWatch.List(ctx, members))
+			require.Len(t, members.Items, 1)
+			observed := members.Items[0].DeepCopy()
+
+			require.NoError(t, c.Delete(ctx, pool))
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			pool, _ = newOverCreationFixture(1)
+			pool.UID = "replacement-pool-uid"
+			require.NoError(t, c.Create(ctx, pool))
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			require.Equal(t, 2, c.createCount())
+
+			if !previousOwner {
+				require.NoError(t, c.WithWatch.List(ctx, members))
+				for i := range members.Items {
+					if metav1.IsControlledBy(&members.Items[i], pool) {
+						observed = members.Items[i].DeepCopy()
+						break
+					}
+				}
+				require.True(t, metav1.IsControlledBy(observed, pool))
+			}
+			// Informers update their cache before delivering the callback.
+			c.mu.Lock()
+			delete(c.hidden, observed.Namespace+"/"+observed.Name)
+			c.mu.Unlock()
+			h := &warmPoolSandboxEventHandler{EventHandler: handler.Funcs{}, expectations: r.exp()}
+			h.Create(ctx, event.CreateEvent{Object: observed}, nil)
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			require.Equal(t, 2, c.createCount(), "old owner events must preserve the replacement's creation gate")
+		})
+	}
 }

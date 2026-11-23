@@ -694,11 +694,10 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			logger.V(1).Info("Cached claim is behind the API server; skipping cold create", "claim", claim.Name)
 			return nil, fmt.Errorf("%w: claim %s is already assigned", errSandboxAlreadyExists, claim.Name)
 		case fresh.Status.SandboxStatus.Name != "":
-			// API claim still names a Sandbox. Return it if it exists, fall
-			// through to create if it is gone, or restore and error if the
-			// lookup fails.
+			// API claim still names a Sandbox. Confirm on the API server so a
+			// cached 404 cannot orphan a live Sandbox under a different name.
 			named := &v1beta1.Sandbox{}
-			getErr := r.Get(ctx, client.ObjectKey{Namespace: fresh.Namespace, Name: fresh.Status.SandboxStatus.Name}, named)
+			getErr := r.authoritativeReader().Get(ctx, client.ObjectKey{Namespace: fresh.Namespace, Name: fresh.Status.SandboxStatus.Name}, named)
 			switch {
 			case getErr == nil:
 				if !metav1.IsControlledBy(named, claim) {

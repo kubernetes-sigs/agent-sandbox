@@ -18,7 +18,7 @@
 
 # The builder runs on the build host's native platform and cross-compiles
 # for the target, which is much faster than emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27.3 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS build
 ARG TARGETARCH
 WORKDIR /src
 # The replaced root module's go.mod must exist for the example module to load.

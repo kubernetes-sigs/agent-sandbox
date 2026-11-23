@@ -320,6 +320,14 @@ def discover_images(args, excluded_dirs):
                 context_dir = "."
                 service_name = "cma-runner"
 
+            # The OpenAI Managed Agents runner builds from the repo root for
+            # the same replace-directive reason; its manifests and README
+            # refer to the image as oma-runner.
+            oma_runner_dir = os.path.join(".", "examples", "managed-agents", "openai-managed-agents")
+            if root == oma_runner_dir:
+                context_dir = "."
+                service_name = "oma-runner"
+
             # The multi-cluster-fleet image copies the Python SDK and the
             # example's python/ tree with repo-root-relative paths, so it
             # too builds from the repo root. Its directory is named after

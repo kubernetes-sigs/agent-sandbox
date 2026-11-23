@@ -15,10 +15,26 @@
 package main
 
 import (
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+// buildMetricsHandlerOpts returns promhttp handler options for the metrics
+// server, explicitly pinning EnableOpenMetrics to the flag value. This keeps
+// behavior stable across controller-runtime versions: v0.26.0+ flips the
+// upstream default to true (kubernetes-sigs/controller-runtime#3595), and
+// setting the option here overrides that default in either direction.
+// Kept in package main so the metrics-docs extractor (which scans
+// internal/metrics) never has to allowlist a promhttp import.
+func buildMetricsHandlerOpts(enableOpenMetrics bool) []func(*promhttp.HandlerOpts) {
+	return []func(*promhttp.HandlerOpts){
+		func(opts *promhttp.HandlerOpts) {
+			opts.EnableOpenMetrics = enableOpenMetrics
+		},
+	}
+}
 
 func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Options, probeAddr string, enableLeaderElection bool, leaderElectionNamespace string) ctrl.Options {
 	return ctrl.Options{

@@ -2,7 +2,7 @@ module sigs.k8s.io/agent-sandbox/examples/managed-agents/claude-managed-agents
 
 go 1.26.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 // This example is its own module so that the Anthropic SDK dependency stays
 // out of the root module. It builds against the in-repo Go SDK via the

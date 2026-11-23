@@ -33,6 +33,8 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 )
 
+const maxRouterTokenTTL = time.Hour
+
 func mintRouterToken(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("mint-router-token", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -42,7 +44,7 @@ func mintRouterToken(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 	keyFile := flags.String("signing-key-file", "", "PEM file containing a PKCS#8 Ed25519 private key (required)")
 	keyID := flags.String("key-id", "", "Signing key ID in the router's verification key set (required)")
-	ttl := flags.Duration("ttl", 5*time.Minute, "Token lifetime (at least 1s)")
+	ttl := flags.Duration("ttl", 5*time.Minute, "Token lifetime (1s to 1h)")
 	namespace := flags.String("namespace", "", "Sandbox namespace (defaults to the kubeconfig context namespace)")
 	kubeconfig := flags.String("kubeconfig", "", "Path to the kubeconfig file")
 	kubeContext := flags.String("context", "", "Name of the kubeconfig context to use")
@@ -55,6 +57,9 @@ func mintRouterToken(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 	if *ttl < time.Second {
 		return fmt.Errorf("--ttl must be at least 1s")
+	}
+	if *ttl > maxRouterTokenTTL {
+		return fmt.Errorf("--ttl must be at most 1h")
 	}
 	key, err := readRouterSigningKey(*keyFile)
 	if err != nil {
@@ -87,7 +92,7 @@ func mintRouterToken(ctx context.Context, args []string, stdout, stderr io.Write
 		return fmt.Errorf("get Sandbox %s/%s: %w", ns, flags.Arg(0), err)
 	}
 	if !sandbox.DeletionTimestamp.IsZero() {
-		return fmt.Errorf("Sandbox %s/%s is being deleted", sandbox.Namespace, sandbox.Name)
+		return fmt.Errorf("sandbox %s/%s is being deleted", sandbox.Namespace, sandbox.Name)
 	}
 	token, err := authz.MintScopedTokenV2Sandbox(key, *keyID, sandbox.Namespace, sandbox.Name, string(sandbox.UID), *ttl)
 	if err != nil {

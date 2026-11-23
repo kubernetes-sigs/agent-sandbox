@@ -22,6 +22,8 @@ COPY cmd/ ./cmd/
 COPY controllers/ ./controllers/
 COPY extensions/ ./extensions/
 COPY internal/ ./internal/
+COPY clients/k8s/ ./clients/k8s/
+COPY sandbox-router/authz/ ./sandbox-router/authz/
 
 # Build the binary with optimizations
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \

@@ -702,9 +702,10 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			case k8errors.IsNotFound(getErr):
 				logger.V(1).Info("Sandbox named by fresh claim status is gone; proceeding with cold create", "claim", claim.Name, "sandbox", fresh.Status.SandboxStatus.Name)
 			default:
-				// An indeterminate check must not release the create: the
-				// assigned Sandbox can be alive under a name the create
-				// AlreadyExists guard does not cover.
+				// Existence unknown: do not create (the binding may be alive
+				// under another name), and keep the fresh status so this pass
+				// does not persist an empty identity.
+				fresh.Status.DeepCopyInto(&claim.Status)
 				return nil, fmt.Errorf("failed to check sandbox %q named by fresh claim status: %w", fresh.Status.SandboxStatus.Name, getErr)
 			}
 		}
@@ -1126,14 +1127,12 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 }
 
 // computeAndSetStatus computes the claim's conditions and mirrors the bound
-// Sandbox's identity into the claim status. originalStatus is the status as
-// read at the start of the pass, used to undo an in-memory stale-binding
-// clear when a cache-lag retry proves the Sandbox is alive (#2379).
+// Sandbox's identity into the claim status. originalStatus is the pass-start
+// status, used to restore a binding cleared after a lagging 404 when
+// AlreadyExists proves the Sandbox exists (#2379).
 func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool, originalStatus *extensionsv1beta1.SandboxClaimStatus) {
 	// Cache-lag retry is a benign look-again: leave the recorded binding and
-	// the conditions untouched instead of wiping them. AlreadyExists proves
-	// the Sandbox exists on the API server, so a pass that cleared the
-	// binding after a lagging 404 restores it here before returning.
+	// the conditions untouched instead of wiping them.
 	if sandbox == nil && errors.Is(err, errSandboxAlreadyExists) {
 		if claim.Status.SandboxStatus.Name == "" {
 			claim.Status.SandboxStatus = originalStatus.SandboxStatus

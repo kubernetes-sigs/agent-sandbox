@@ -10037,4 +10037,12 @@ func TestSandboxClaimColdGuardLookupErrorBlocksCreate(t *testing.T) {
 	var replacement sandboxv1beta1.Sandbox
 	getErr := cachedClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "test-claim"}, &replacement)
 	require.True(t, k8errors.IsNotFound(getErr), "no replacement may be created while the existence check is indeterminate")
+
+	// The binding recorded on the fresh claim must survive the failed pass:
+	// the stale-binding clear earlier in the pass must not be persisted while
+	// the existence of the fresh binding is unknown.
+	var updated extensionsv1beta1.SandboxClaim
+	require.NoError(t, cachedClient.Get(ctx, req.NamespacedName, &updated))
+	require.Equal(t, "sb-2", updated.Status.SandboxStatus.Name,
+		"the fresh binding identity must be kept when the existence check fails")
 }

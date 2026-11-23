@@ -104,8 +104,8 @@ current-context: test
 	select {
 	case path := <-discovery:
 		cancel()
-		<-done
-		t.Fatalf("controller started API discovery at %s instead of issuing a scoped v2 token for an existing Sandbox", path)
+		waitErr := <-done
+		t.Fatalf("controller started API discovery at %s instead of issuing a scoped v2 token for an existing Sandbox (command exit: %v)", path, waitErr)
 	case err := <-done:
 		require.NoError(t, err, stderr.String())
 	}
@@ -133,8 +133,9 @@ current-context: test
 		err  string
 	}{
 		{name: "missing sandbox", args: []string{"missing"}, err: "get Sandbox team-a/missing"},
-		{name: "deleting sandbox in explicit namespace", args: []string{"--namespace", "team-b", "deleting"}, err: "Sandbox team-b/deleting is being deleted"},
+		{name: "deleting sandbox in explicit namespace", args: []string{"--namespace", "team-b", "deleting"}, err: "sandbox team-b/deleting is being deleted"},
 		{name: "subsecond lifetime", args: []string{"--ttl", "500ms", "box"}, err: "--ttl must be at least 1s"},
+		{name: "excessive lifetime", args: []string{"--ttl", "8760h", "box"}, err: "--ttl must be at most 1h"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			args := append([]string{"mint-router-token", "--signing-key-file", keyPath, "--key-id", "current"}, tc.args...)

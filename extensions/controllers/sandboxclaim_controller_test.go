@@ -9901,12 +9901,20 @@ func TestSandboxClaimColdGuardKeepsLiveBinding(t *testing.T) {
 			}},
 		},
 	}
-	// Authoritative view: an earlier pass already rebound the claim to "sb-2".
+	// Authoritative view: an earlier pass already rebound the claim to "sb-2"
+	// and observed it as not ready, newer than the cached Ready=True snapshot.
 	freshClaim := cachedClaim.DeepCopy()
 	freshClaim.Status.SandboxStatus = extensionsv1beta1.SandboxStatus{
 		Name:        "sb-2",
 		ServiceFQDN: "sb-2.default.svc.cluster.local",
 	}
+	meta.SetStatusCondition(&freshClaim.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             "SandboxNotReady",
+		Message:            "Sandbox is not ready",
+		LastTransitionTime: metav1.Now(),
+	})
 	sb2 := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "sb-2",
@@ -9955,7 +9963,78 @@ func TestSandboxClaimColdGuardKeepsLiveBinding(t *testing.T) {
 	require.NoError(t, cachedClient.Get(ctx, req.NamespacedName, &updated))
 	require.Equal(t, "sb-2", updated.Status.SandboxStatus.Name)
 	require.Equal(t, "sb-2.default.svc.cluster.local", updated.Status.SandboxStatus.ServiceFQDN)
+	// Identity and conditions must come from the same fresh snapshot: the
+	// pass must not pair the live binding with the stale cached Ready=True.
 	ready := meta.FindStatusCondition(updated.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
 	require.NotNil(t, ready)
-	require.Equal(t, metav1.ConditionTrue, ready.Status, "Ready must stay untouched while the live binding is kept")
+	require.Equal(t, metav1.ConditionFalse, ready.Status, "the fresh snapshot's conditions must be kept together with its binding")
+	require.Equal(t, "SandboxNotReady", ready.Reason)
+}
+
+// TestSandboxClaimColdGuardLookupErrorBlocksCreate covers the guard's
+// indeterminate existence check: when the authoritative read of the Sandbox
+// named by the fresh claim status fails with a non-NotFound error, the
+// controller must surface the error instead of creating a replacement. The
+// named Sandbox may be alive under a name the create AlreadyExists guard
+// cannot protect against.
+func TestSandboxClaimColdGuardLookupErrorBlocksCreate(t *testing.T) {
+	scheme := newScheme(t)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	// Cached view: bound to "sb-1", which is gone everywhere.
+	cachedClaim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{Name: "sb-1"},
+		},
+	}
+	// Authoritative view: the claim names "sb-2", whose existence check fails.
+	freshClaim := cachedClaim.DeepCopy()
+	freshClaim.Status.SandboxStatus = extensionsv1beta1.SandboxStatus{Name: "sb-2"}
+
+	cachedClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(template, warmPool, cachedClaim).
+		WithStatusSubresource(cachedClaim).
+		Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(freshClaim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, inner client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+					if key.Name == "sb-1" {
+						return k8errors.NewNotFound(schema.GroupResource{Group: sandboxv1beta1.GroupVersion.Group, Resource: "sandboxes"}, key.Name)
+					}
+					return errors.New("etcd unavailable")
+				}
+				return inner.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cachedClaim.Name, Namespace: "default"}}
+	_, err := reconciler.Reconcile(ctx, req)
+	require.Error(t, err, "an indeterminate existence check must surface its error")
+
+	var replacement sandboxv1beta1.Sandbox
+	getErr := cachedClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "test-claim"}, &replacement)
+	require.True(t, k8errors.IsNotFound(getErr), "no replacement may be created while the existence check is indeterminate")
 }

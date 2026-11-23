@@ -694,14 +694,18 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			switch {
 			case getErr == nil:
 				logger.V(1).Info("Cached claim is behind the API server; skipping cold create", "claim", claim.Name)
-				// Restore the live binding this pass cleared in memory, so
-				// computeAndSetStatus leaves it untouched.
-				claim.Status.SandboxStatus = fresh.Status.SandboxStatus
+				// Adopt the fresh status as a whole, so computeAndSetStatus
+				// leaves the live binding untouched and never pairs it with
+				// conditions from the stale cached view.
+				fresh.Status.DeepCopyInto(&claim.Status)
 				return nil, fmt.Errorf("%w: claim %s is already assigned", errSandboxAlreadyExists, claim.Name)
 			case k8errors.IsNotFound(getErr):
 				logger.V(1).Info("Sandbox named by fresh claim status is gone; proceeding with cold create", "claim", claim.Name, "sandbox", fresh.Status.SandboxStatus.Name)
 			default:
-				logger.V(1).Info("Existence check of assigned sandbox failed; creating anyway", "claim", claim.Name, "sandbox", fresh.Status.SandboxStatus.Name, "error", getErr)
+				// An indeterminate check must not release the create: the
+				// assigned Sandbox can be alive under a name the create
+				// AlreadyExists guard does not cover.
+				return nil, fmt.Errorf("failed to check sandbox %q named by fresh claim status: %w", fresh.Status.SandboxStatus.Name, getErr)
 			}
 		}
 	}

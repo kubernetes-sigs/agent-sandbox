@@ -63,6 +63,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(f \*Files\) Move\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Move>)
   - [func \(f \*Files\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Files.Read>)
   - [func \(f \*Files\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Files.ReadTo>)
+  - [func \(f \*Files\) Stat\(ctx context.Context, path string, opts ...CallOption\) \(\*FileEntry, error\)](<#Files.Stat>)
   - [func \(f \*Files\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Files.Write>)
   - [func \(f \*Files\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Files.WriteReader>)
 - [type HTTPError](<#HTTPError>)
@@ -82,9 +83,11 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type ProcessEventType](<#ProcessEventType>)
 - [type ProcessHandle](<#ProcessHandle>)
   - [func \(h \*ProcessHandle\) Close\(\) error](<#ProcessHandle.Close>)
+  - [func \(h \*ProcessHandle\) CloseStdin\(ctx context.Context\) error](<#ProcessHandle.CloseStdin>)
   - [func \(h \*ProcessHandle\) ProcessID\(\) int32](<#ProcessHandle.ProcessID>)
   - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
   - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
+  - [func \(h \*ProcessHandle\) WriteStdin\(ctx context.Context, data \[\]byte\) error](<#ProcessHandle.WriteStdin>)
 - [type ProcessSignal](<#ProcessSignal>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
@@ -115,6 +118,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
+  - [func \(s \*Sandbox\) Stat\(ctx context.Context, path string, opts ...CallOption\) \(\*FileEntry, error\)](<#Sandbox.Stat>)
   - [func \(s \*Sandbox\) Suspend\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Suspend>)
   - [func \(s \*Sandbox\) WatchDir\(ctx context.Context, path string, recursive bool, opts ...CallOption\) \(\<\-chan FileEvent, error\)](<#Sandbox.WatchDir>)
   - [func \(s \*Sandbox\) Watchers\(\) \*Watchers](<#Sandbox.Watchers>)
@@ -812,7 +816,7 @@ Move does not retry unless WithMaxAttempts is set, because a repeat after a lost
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error)
 ```
 
-Read downloads a file from the sandbox and returns its complete contents.
+Read downloads a file from the sandbox and returns its complete contents. With the sandboxd runtime, reading a directory fails with a 409 HTTPError. Reading the sandbox root \("/" or "."\) is the exception: it fails locally before any request, so the error is not an HTTPError.
 
 <a name="Files.ReadTo"></a>
 #### func \(\*Files\) [ReadTo](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -822,6 +826,17 @@ func (f *Files) ReadTo(ctx context.Context, path string, destination io.Writer, 
 ```
 
 ReadTo downloads a file into a caller\-owned destination without buffering the complete response. It returns the number of bytes written. The destination is never closed. If the response exceeds MaxDownloadSize, ReadTo writes at most MaxDownloadSize bytes and returns an error. Data written before an error or context cancellation remains in the destination.
+
+<a name="Files.Stat"></a>
+#### func \(\*Files\) [Stat](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error)
+```
+
+Stat returns the type, size, mode, and modification time of the file or directory at path. "/" names the sandbox root. A missing path fails with a 404 HTTPError.
+
+Only supported by the sandboxd runtime.
 
 <a name="Files.Write"></a>
 #### func \(\*Files\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -1272,6 +1287,15 @@ func (h *ProcessHandle) Close() error
 
 Close cancels only this session and is idempotent. A nil error acknowledges local cleanup, not synchronous remote process termination. For graceful shutdown, send a signal before cancelling the stream instead.
 
+<a name="ProcessHandle.CloseStdin"></a>
+#### func \(\*ProcessHandle\) [CloseStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) CloseStdin(ctx context.Context) error
+```
+
+CloseStdin sends EOF on the process's standard input. The daemon rejects it with FailedPrecondition for a PTY process.
+
 <a name="ProcessHandle.ProcessID"></a>
 #### func \(\*ProcessHandle\) [ProcessID](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
 
@@ -1298,6 +1322,15 @@ func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) er
 ```
 
 SendSignal sends SIGINT, SIGTERM or SIGKILL to this process group using its original connection. Success means the signal was sent, not that the process exited. Its context controls only this RPC; failure does not cancel Start. Keep receiving events to observe the exit and the final RPC status.
+
+<a name="ProcessHandle.WriteStdin"></a>
+#### func \(\*ProcessHandle\) [WriteStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error
+```
+
+WriteStdin sends data to the process's standard input in chunks of at most 1 MiB. Calls on one handle are serialized; a call waiting its turn returns when its context is done. It is not retried: if it fails partway, an unknown prefix of data has already been delivered. The context controls only these RPCs and does not cancel Start.
 
 <a name="ProcessSignal"></a>
 ### type [ProcessSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -1599,6 +1632,15 @@ func (s *Sandbox) ServiceFQDN() string
 ```
 
 ServiceFQDN returns the in\-cluster DNS name of the Sandbox's headless Service, or "" when it has none \(spec.service unset or false\). Not part of the Info interface, which is frozen for backward compatibility.
+
+<a name="Sandbox.Stat"></a>
+#### func \(\*Sandbox\) [Stat](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error)
+```
+
+Stat returns the type, size, mode, and modification time of a file or directory \(sandboxd runtime only\). See Files.Stat.
 
 <a name="Sandbox.Suspend"></a>
 #### func \(\*Sandbox\) [Suspend](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)

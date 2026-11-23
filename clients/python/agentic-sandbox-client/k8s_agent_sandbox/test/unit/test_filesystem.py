@@ -456,7 +456,7 @@ class TestAsyncSandboxdFilesystem(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.fs.read("notes/hello.txt"), b"hello")
         args, _ = self.connector.send_request.call_args
-        self.assertEqual(args[:2], ("GET", "v1/files/notes/hello.txt"))
+        self.assertEqual(args[:2], ("GET", "v1/files/notes/hello.txt?type=file"))
 
     async def test_list_unwraps_sandboxd_directory_listing(self):
         response = MagicMock()
@@ -921,7 +921,7 @@ class TestFilesystemStreamingRead(unittest.TestCase):
         self.assertEqual(written, 8)
         self.assertEqual(destination.getvalue(), b"sandboxd")
         self.connector.send_request.assert_called_once_with(
-            "GET", "v1/files/dir/file.bin", timeout=60, stream=True
+            "GET", "v1/files/dir/file.bin?type=file", timeout=60, stream=True
         )
 
     def test_read_to_invalidates_sandboxd_after_stream_transport_failure(self):
@@ -1158,7 +1158,7 @@ class TestAsyncFilesystemStreamingRead(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(written, 8)
         self.assertEqual(destination.content, b"sandboxd")
         self.connector.send_request.assert_awaited_once_with(
-            "GET", "v1/files/dir/file.bin", timeout=60, stream=True
+            "GET", "v1/files/dir/file.bin?type=file", timeout=60, stream=True
         )
 
     async def test_read_to_rejects_non_success_status(self):

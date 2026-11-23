@@ -20,6 +20,7 @@ from .download_file import download_file
 from .list_files import list_files
 from .file_exists import file_exists
 from .get_sandbox_status import get_sandbox_status
+from .get_sandbox_health import get_sandbox_health
 
 __all__ = [
     'create_sandbox',
@@ -30,4 +31,5 @@ __all__ = [
     'list_files',
     'file_exists',
     'get_sandbox_status',
+    'get_sandbox_health',
 ]

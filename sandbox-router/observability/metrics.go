@@ -82,7 +82,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 
 		UpstreamErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sandbox_router_upstream_errors_total",
-			Help: "Errors connecting to the upstream sandbox, by namespace and reason.",
+			Help: "Failed upstream requests, including client cancels, by namespace and reason.",
 		}, []string{"sandbox_namespace", "reason"}),
 
 		CertReloadsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{

@@ -429,6 +429,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+			// A caller's own cancel is not a sandbox failure. writeProxyError
+			// answers a gRPC caller with codes.Canceled, not the 502 below.
+			if errors.Is(err, context.Canceled) && errReq.Context().Err() != nil {
+				h.recordUpstreamErrorReason(target0.Namespace, reasonClientCanceled)
+				observability.LoggerFromContext(errReq.Context(), h.log).V(1).Info(
+					"client canceled the request",
+					"sandbox", target0.ID,
+					"namespace", target0.Namespace,
+					"source", string(src),
+				)
+				writeProxyError(w, errReq, kind, &Error{
+					Status: http.StatusBadGateway,
+					Detail: "The client canceled the request",
+				})
+				return
+			}
 			h.recordUpstreamErrorReason(target0.Namespace, classifyError(err))
 			// KEP-NNNN: actively invalidate the cache entry when a dial
 			// failure indicates the IP itself is dead (timeout, no
@@ -604,6 +620,10 @@ func (h *Handler) recordUpstreamErrorReason(namespace, reason string) {
 	}
 	h.metrics.UpstreamErrorsTotal.WithLabelValues(namespace, reason).Inc()
 }
+
+// reasonClientCanceled labels a request that its caller canceled before the
+// upstream answered.
+const reasonClientCanceled = "client_canceled"
 
 // classifyError turns an arbitrary RoundTrip error into a low-cardinality
 // label value so the upstream_errors_total counter does not explode.

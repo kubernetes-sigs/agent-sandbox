@@ -29,6 +29,7 @@ from .tools import (
     list_files,
     file_exists,
     get_sandbox_status,
+    get_sandbox_health,
 )
 
 from .resources import (
@@ -77,6 +78,7 @@ def create_mcp_server(settings: Settings | None = None):
     mcp.add_tool(list_files)
     mcp.add_tool(file_exists)
     mcp.add_tool(get_sandbox_status)
+    mcp.add_tool(get_sandbox_health)
 
     mcp.custom_route("/healthz", methods=["GET"])(healthz)
     mcp.custom_route("/readyz", methods=["GET"])(readyz)

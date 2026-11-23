@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -149,6 +150,9 @@ func (s *FileWatcherServer) WatchDir(req *watcherv1.WatchDirRequest, stream watc
 	if err != nil {
 		if errors.Is(err, pathutil.ErrPathEscapes) {
 			return status.Errorf(codes.PermissionDenied, "watch path: %v", err)
+		}
+		if errors.Is(err, syscall.ENOTDIR) {
+			return status.Errorf(codes.NotFound, "watch path does not exist: %s", watchPath)
 		}
 		return status.Errorf(codes.Internal, "watch path: %v", err)
 	}

@@ -1970,6 +1970,61 @@ describe("SandboxdRestClient network behavior", () => {
     await expect(client.read("a.txt", controller.signal)).rejects.toBe(reason);
   });
 
+  it("aborts a stalled body read when fetch() leaves the body open after the abort", async () => {
+    // Node's fetch() has left a response body open after its signal aborted
+    // once headers had arrived. This fetch() never errors the body, so the
+    // read ends only if the client cancels it on the caller's signal.
+    let cancelledWith: unknown;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(streamController) {
+            streamController.enqueue(new TextEncoder().encode("partial"));
+          },
+          cancel(cancelReason) {
+            cancelledWith = cancelReason;
+          },
+        }),
+        { headers: { "Content-Type": "application/octet-stream" } },
+      );
+    try {
+      const client = makeClient("http://127.0.0.1:1");
+      const controller = new AbortController();
+      const reason = new Error("caller timeout");
+      setTimeout(() => controller.abort(reason), 20);
+      await expect(client.read("a.txt", controller.signal)).rejects.toBe(
+        reason,
+      );
+      expect(cancelledWith).toBe(reason);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("aborts a body read when the caller aborted before the read started", async () => {
+    // The caller aborts while fetch() is resolving, so the abort event has
+    // already fired when the body read starts. The body is open and empty,
+    // so the read ends only if the client checks the signal up front.
+    const controller = new AbortController();
+    const reason = new Error("caller timeout");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      controller.abort(reason);
+      return new Response(new ReadableStream<Uint8Array>(), {
+        headers: { "Content-Type": "application/octet-stream" },
+      });
+    };
+    try {
+      const client = makeClient("http://127.0.0.1:1");
+      await expect(client.read("a.txt", controller.signal)).rejects.toBe(
+        reason,
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("wraps a mid-body disconnect (no caller abort) as SandboxConnectionError", async () => {
     activeServer = await startServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/octet-stream" });

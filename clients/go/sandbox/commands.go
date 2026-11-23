@@ -219,7 +219,7 @@ func (c *Commands) Start(ctx context.Context, command string, opts ...CallOption
 	}
 	handle = &ProcessHandle{
 		stream: stream, client: client, pid: init.GetInit().GetProcessId(),
-		ctx: ctx, prefix: prefix, span: span,
+		ctx: ctx, prefix: prefix, span: span, writeSem: make(chan struct{}, 1),
 		cleanup: func() { cancel(); done(); span.End() },
 	}
 	// Cancellation and ClientConn.Close finish the stream even without Recv.

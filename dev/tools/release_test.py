@@ -186,5 +186,26 @@ class CheckInstallManifestDriftTest(unittest.TestCase):
             )
 
 
+class BuildReleaseCreateCmdTest(unittest.TestCase):
+    def test_omits_generate_notes_when_notes_file_provided(self):
+        cmd = release.build_release_create_cmd(
+            "v1.0.12",
+            ["release_assets/sandbox.yaml"],
+            notes_file="release_assets/release_notes.md",
+        )
+        self.assertIn("--notes-file", cmd)
+        self.assertIn("release_assets/release_notes.md", cmd)
+        self.assertNotIn("--generate-notes", cmd)
+
+    def test_falls_back_to_generate_notes_without_notes_file(self):
+        cmd = release.build_release_create_cmd(
+            "v1.0.12",
+            ["release_assets/sandbox.yaml"],
+            notes_file=None,
+        )
+        self.assertNotIn("--notes-file", cmd)
+        self.assertIn("--generate-notes", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

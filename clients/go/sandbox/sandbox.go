@@ -718,6 +718,12 @@ func (s *Sandbox) Extract(ctx context.Context, path string, archive io.Reader, o
 	return s.files.Extract(ctx, path, archive, opts...)
 }
 
+// Stat returns the type, size, mode, and modification time of a file or
+// directory (sandboxd runtime only). See Files.Stat.
+func (s *Sandbox) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error) {
+	return s.files.Stat(ctx, path, opts...)
+}
+
 // Health returns sandboxd's report from GET /v1/health. It returns an
 // HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on
 // the legacy python-runtime. It does not retry unless WithMaxAttempts is set.

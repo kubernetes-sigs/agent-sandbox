@@ -160,12 +160,13 @@ def _sandboxd_read_endpoint(path: str) -> str:
     """Return the sandboxd GET path for a file read.
 
     The sandbox root is a directory. Reject it before the request, as the Go
-    and TypeScript clients do, instead of downloading the directory listing.
+    and TypeScript clients do. For other directories, ``type=file`` makes
+    sandboxd answer 409 instead of returning the directory listing.
     """
     endpoint = _sandboxd_files_endpoint(path)
     if endpoint == "v1/files/":
         raise ValueError(f"read: path {path!r} names the sandbox root")
-    return endpoint
+    return endpoint + "?type=file"
 
 
 class _RuntimeProbe(Protocol):
@@ -505,6 +506,9 @@ class Filesystem:
         A configured ``max_download_size`` is enforced while downloading;
         exceeding it raises ``SandboxResponseTooLargeError`` without returning
         partial content. Downloads remain unlimited when it is unset.
+
+        On the sandboxd runtime, a directory raises ``SandboxRequestError``
+        with status 409, and the root path ``/`` raises ``ValueError``.
         """
         if self._file_config.max_download_size is not None:
             with io.BytesIO() as destination:
@@ -549,6 +553,9 @@ class Filesystem:
         ``SandboxResponseTooLargeError`` (a ``RuntimeError`` subclass). Data
         written before an error remains in the destination. The returned value
         is the number of bytes written.
+
+        On the sandboxd runtime, a directory raises ``SandboxRequestError``
+        with status 409, and the root path ``/`` raises ``ValueError``.
         """
         return self._read_to(path, destination, timeout, allow_unsafe_paths, max_bytes)
 

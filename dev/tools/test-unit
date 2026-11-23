@@ -389,7 +389,7 @@ def run_python_tests(repo_root, artifact_dir):
                 [venv_pip, "install", "--quiet", *extra_packages], env=env)
 
         subprocess.check_call(
-            [venv_pip, "install", "--quiet", "pytest"], env=env)
+            [venv_pip, "install", "--quiet", "pytest", "pytest-cov"], env=env)
 
         if suite["name"] == "k8s-agent-sandbox":
             print(f"\n=== Running mypy type checks: {suite['name']} ===")
@@ -404,12 +404,19 @@ def run_python_tests(repo_root, artifact_dir):
         print(f"\n=== Running Python unit tests: {suite['name']} ===")
         junit_file = os.path.join(
             artifact_dir, f"junit_unit-python-{suite['name']}.xml")
+        coverage_file = os.path.join(
+            artifact_dir, f"coverage_unit-python-{suite['name']}")
+        env["COVERAGE_FILE"] = coverage_file + ".data"
         result = subprocess.run([
             venv_python, "-m", "pytest",
             test_dir,
             f"--junitxml={junit_file}",
+            f"--cov={test_dir}",
+            f"--cov-config={os.path.join(repo_root, 'dev', 'tools', 'python-coverage.ini')}",
+            f"--cov-report=xml:{coverage_file}.xml",
+            "--cov-report=term",
             "-v",
-        ], cwd=test_dir)
+        ], cwd=test_dir, env=env)
 
         if result.returncode != 0:
             returncode = result.returncode

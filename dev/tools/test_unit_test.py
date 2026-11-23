@@ -76,6 +76,42 @@ class RunGoTestsTest(unittest.TestCase):
         ])
 
 
+class RunPythonTestsTest(unittest.TestCase):
+    def test_isolates_coverage_and_continues_after_a_failed_suite(self):
+        # Compatibility suites can exercise the same source with different
+        # dependencies. Their reports must remain independently inspectable.
+        suites = [
+            {"name": "first", "dir": "lib"},
+            {"name": "second", "dir": "lib"},
+        ]
+        with (
+            mock.patch.object(test_unit, "PYTHON_TEST_SUITES", suites),
+            mock.patch.object(test_unit.os.path, "isdir", return_value=True),
+            mock.patch.object(test_unit.os.path, "exists", return_value=False),
+            mock.patch.object(test_unit.subprocess, "check_call") as check_call,
+            mock.patch.object(test_unit.subprocess, "run") as run,
+        ):
+            run.side_effect = [mock.Mock(returncode=1), mock.Mock(returncode=0)]
+            self.assertEqual(test_unit.run_python_tests("/repo", "/artifacts"), 1)
+
+        self.assertEqual(run.call_count, 2)
+        for suite, call in zip(suites, run.call_args_list):
+            command = call.args[0]
+            coverage_file = f"/artifacts/coverage_unit-python-{suite['name']}"
+            self.assertIn("--cov=/repo/lib", command)
+            self.assertIn("--cov-config=/repo/dev/tools/python-coverage.ini", command)
+            self.assertIn(f"--cov-report=xml:{coverage_file}.xml", command)
+            self.assertIn(
+                f"--junitxml=/artifacts/junit_unit-python-{suite['name']}.xml", command)
+            self.assertEqual(call.kwargs["env"]["COVERAGE_FILE"], coverage_file + ".data")
+            self.assertEqual(call.kwargs["cwd"], "/repo/lib")
+        installs = [call.args[0] for call in check_call.call_args_list
+                    if "install" in call.args[0]]
+        self.assertEqual(len(installs), 2)
+        for command in installs:
+            self.assertIn("pytest-cov", command)
+
+
 class RunTypeScriptTestsTest(unittest.TestCase):
     def test_runs_static_checks_before_unit_tests(self):
         repo_root = "/repo"

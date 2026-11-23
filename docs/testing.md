@@ -15,6 +15,13 @@ the JUnit files in `$ARTIFACTS`, or `bin/` locally. View one with:
 ```shell
 go tool cover -html=bin/coverage_unit-go.out
 ```
+
+Python unit tests collect line coverage during the existing pytest run. Each
+suite writes `coverage_unit-python-<suite>.xml` and the corresponding `.data`
+file next to its JUnit report in `$ARTIFACTS`, or `bin/` locally. The terminal
+summary shows coverage for that suite's source directory, including untested
+Python modules. Test files and generated protobuf code are excluded.
+
 ## Running the e2e tests (including benchmarks)
 To run all e2e tests:
 ```shell

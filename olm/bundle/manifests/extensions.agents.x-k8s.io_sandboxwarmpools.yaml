@@ -23,13 +23,13 @@ spec:
     - jsonPath: .spec.replicas
       name: Desired
       type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     - jsonPath: .spec.sandboxTemplateRef.name
       name: Template
       priority: 1
       type: string
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
     name: v1beta1
     schema:
       openAPIV3Schema:

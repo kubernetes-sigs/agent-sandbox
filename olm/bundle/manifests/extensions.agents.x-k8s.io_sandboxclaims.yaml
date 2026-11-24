@@ -204,6 +204,12 @@ spec:
                   rule: self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b,
                     has(b.metadata) && has(b.metadata.name) && b.metadata.name ==
                     a.metadata.name))
+              warmPoolMaxRetries:
+                default: 5
+                format: int32
+                maximum: 10
+                minimum: 1
+                type: integer
               warmPoolRef:
                 properties:
                   name:

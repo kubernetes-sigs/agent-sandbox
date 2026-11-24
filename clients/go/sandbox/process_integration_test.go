@@ -110,6 +110,11 @@ func TestProcessHandle_RealPTYResize(t *testing.T) {
 	}
 	require.Equal(t, "24 80", strings.TrimSpace(initial.String()))
 
+	// The daemon rejects EOF for a PTY process, so CloseStdin fails and the
+	// process keeps running.
+	err = handle.CloseStdin(ctx)
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "%v", err)
+
 	require.NoError(t, handle.ResizeTTY(ctx, 120, 40))
 	require.NoError(t, handle.WriteStdin(ctx, []byte("continue\n")))
 	result := receiveProcessResult(t, handle)

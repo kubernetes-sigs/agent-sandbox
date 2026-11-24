@@ -910,6 +910,23 @@ func TestRun_LegacyRuntimeRejectsEnvAndWorkingDir(t *testing.T) {
 	}
 }
 
+func TestRun_RejectsWithPTY(t *testing.T) {
+	c := newReadySandboxdTestSandbox("http://unused.invalid")
+	svc := &fakeProcessService{response: &processv1.ExecuteResponse{}}
+	startFakeProcessServer(t, c, svc)
+
+	_, err := c.Run(context.Background(), "stty size", WithPTY(120, 40))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Commands.Start") {
+		t.Errorf("expected the error to point at Commands.Start, got: %v", err)
+	}
+	if svc.lastRequest != nil {
+		t.Error("WithPTY must not reach sandboxd")
+	}
+}
+
 func TestSandboxdRun_NonZeroExitCode(t *testing.T) {
 	c := newReadySandboxdTestSandbox("http://unused.invalid")
 	svc := &fakeProcessService{response: &processv1.ExecuteResponse{

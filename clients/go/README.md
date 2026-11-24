@@ -293,12 +293,20 @@ are not guaranteed to be discovered automatically.
 To feed the process input, call `handle.WriteStdin(ctx, data)`, then
 `handle.CloseStdin(ctx)` to send EOF. Writes are sent in chunks of at most 1 MiB
 and serialized per handle. They are not retried, so a failed write may have
-delivered a prefix. The daemon rejects EOF for a PTY process.
+delivered a prefix.
+
+Pass `sandbox.WithPTY(cols, rows)` to `Start` to run the command on a
+pseudo-terminal. Both dimensions must be in `[1, 65535]`, and `Start` rejects
+anything else with `InvalidArgument`. On a PTY, the daemon merges stderr into the
+stdout stream, and `CloseStdin` returns `FailedPrecondition` because the terminal
+ends input with Ctrl-D instead. Call `handle.ResizeTTY(ctx, cols, rows)` to
+update the window size while the process runs. `Run` rejects `WithPTY`; use
+`Start` for interactive programs.
 
 `Start` never retries non-idempotent process creation and rejects
 `WithMaxAttempts(n)` when `n > 1`. Transport attempts before a request reaches
-the service are not a guarantee of repeated command execution. PTY,
-reattachment, and automatic process recreation are not provided by this API.
+the service are not a guarantee of repeated command execution. Reattachment and
+automatic process recreation are not provided by this API.
 
 ### 5. Custom TLS / Transport
 

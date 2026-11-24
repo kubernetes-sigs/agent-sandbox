@@ -19,8 +19,10 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
       initContainers:
-        # The gateway rewrites its config on startup, so copy the read-only
-        # ConfigMap into a writable volume first.
+        # The gateway rewrites its config on startup, so write the read-only
+        # ConfigMap into a writable volume first. The init container also
+        # generates a random gateway token there, so no token lives in this
+        # manifest and each Pod gets its own.
         - name: init-config
           image: ghcr.io/openclaw/openclaw:2026.3.28
           securityContext:
@@ -30,7 +32,14 @@ spec:
           command:
             - sh
             - -c
-            - cp /etc/openclaw-readonly/openclaw.json /etc/openclaw/openclaw.json
+            - |
+              node -e '
+                const fs = require("fs");
+                const crypto = require("crypto");
+                const config = JSON.parse(fs.readFileSync("/etc/openclaw-readonly/openclaw.json", "utf8"));
+                config.gateway = config.gateway || {};
+                config.gateway.auth = { mode: "token", token: crypto.randomBytes(32).toString("hex") };
+                fs.writeFileSync("/etc/openclaw/openclaw.json", JSON.stringify(config, null, 2), { mode: 0o600 });'
           volumeMounts:
             - name: cm-volume
               mountPath: /etc/openclaw-readonly
@@ -58,8 +67,6 @@ spec:
               cpu: "2"
               memory: 4Gi
           env:
-            - name: OPENCLAW_GATEWAY_TOKEN
-              value: "dummy-token-for-sandbox"
             - name: OPENCLAW_CONFIG_PATH
               value: "/etc/openclaw/openclaw.json"
             - name: HOME

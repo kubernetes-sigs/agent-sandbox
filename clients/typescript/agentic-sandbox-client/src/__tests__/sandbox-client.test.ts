@@ -1208,9 +1208,9 @@ describe("SandboxClient (registry)", () => {
 
     it("returns the registered handle when the same claim is created again", async () => {
       mockCreateNamespacedCustomObject
-        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(claim())
         .mockRejectedValueOnce(conflict());
-      mockSandboxReadyFlow("sb");
+      mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-1" });
       mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-1" });
 
       const client = new SandboxClient();
@@ -1294,6 +1294,53 @@ describe("SandboxClient (registry)", () => {
   });
 
   // ===== getSandbox =====
+
+  describe("cached resource identity", () => {
+    it.each([
+      ["createSandbox", "claim"],
+      ["createSandbox", "sandbox"],
+      ["getSandbox", "claim"],
+      ["getSandbox", "sandbox"],
+    ])("%s refreshes an active handle when the %s UID changes", async (method, resource) => {
+      let claimUid = "claim-original";
+      let sandboxUid = "sandbox-original";
+      const claim = () => ({
+        metadata: { uid: claimUid },
+        spec: { warmPoolRef: { name: "tpl" } },
+        status: { sandbox: { name: "sb" } },
+      });
+      mockCreateNamespacedCustomObject
+        .mockImplementationOnce(async () => claim())
+        .mockRejectedValue(
+          Object.assign(new Error("AlreadyExists"), { code: 409 }),
+        );
+      mockGetNamespacedCustomObject.mockImplementation(async ({ plural }) =>
+        plural === CLAIM_PLURAL_NAME
+          ? claim()
+          : {
+              metadata: { name: "sb", uid: sandboxUid },
+              status: { conditions: [{ type: "Ready", status: "True" }] },
+            },
+      );
+
+      const client = new SandboxClient();
+      const options = { claimName: "my-claim", adoptExisting: true };
+      const original = await client.createSandbox("tpl", "default", options);
+      const attach = () =>
+        method === "createSandbox"
+          ? client.createSandbox("tpl", "default", options)
+          : client.getSandbox(options.claimName);
+      expect(await attach()).toBe(original);
+      if (resource === "claim") claimUid = "claim-replacement";
+      else sandboxUid = "sandbox-replacement";
+      const replacement = await attach();
+
+      expect(replacement).not.toBe(original);
+      expect(replacement.isActive).toBe(true);
+      expect(original.isActive).toBe(false);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+  });
 
   describe("getSandbox()", () => {
     it("returns cached handle when still active", async () => {

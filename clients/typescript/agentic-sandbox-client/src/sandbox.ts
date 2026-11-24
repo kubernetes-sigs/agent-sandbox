@@ -469,6 +469,11 @@ interface ConnectionGeneration {
   abortController: AbortController;
 }
 
+interface ClaimDeletion {
+  promise: Promise<void>;
+  accepted: boolean;
+}
+
 /**
  * Internal initialisation bag passed from SandboxClient to Sandbox constructor.
  * Not part of the public API.
@@ -537,10 +542,9 @@ export class Sandbox {
   private connectionEpoch = 0;
   private invalidationPromise: Promise<void> | null = null;
   private releaseLocalPromise: Promise<void> | null = null;
-  private deletionPromise: Promise<void> | null = null;
+  private claimDeletion?: ClaimDeletion;
   private readonly claimUid?: string;
   private readonly sandboxUid?: string;
-  private terminationPodNames?: Set<string>;
   private lifecycleTail: Promise<unknown> = Promise.resolve();
   private lastModePatch: Promise<unknown> = Promise.resolve();
   private lifecycleUid?: string;
@@ -1068,6 +1072,16 @@ export class Sandbox {
     await this.releaseLocal();
   }
 
+  /** @internal Used by SandboxClient to validate cached handles. */
+  matchesClaimUid(uid?: string): boolean {
+    return this.claimUid === uid;
+  }
+
+  /** @internal Used by SandboxClient to validate cached handles. */
+  matchesSandboxUid(uid?: string): boolean {
+    return this.sandboxUid === uid;
+  }
+
   /**
    * Closes the handle and deletes the SandboxClaim. With
    * `waitForTermination: true`, requests foreground deletion and waits for
@@ -1111,7 +1125,13 @@ export class Sandbox {
     if (timeoutMs !== undefined && this.claimUid && this.sandboxUid) {
       await this.waitForTermination(this.claimUid, this.sandboxUid, timeoutMs);
     } else if (this.claimName) {
-      await this.requestClaimDeletion();
+      const attempt = this.requestClaimDeletion();
+      await raceWithTimeout(attempt.promise, CLEANUP_TIMEOUT_MS, () => {
+        this.forgetPendingDeletion(attempt);
+        throw new SandboxError(
+          `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
+        );
+      });
     }
   }
 
@@ -1144,49 +1164,22 @@ export class Sandbox {
   ): Promise<void> {
     const controller = new AbortController();
     const { signal } = controller;
-    this.terminationPodNames ??= new Set([this.podName]);
-    const podNames = this.terminationPodNames;
     const pods = this.kubeConfig.makeApiClient(CoreV1Api);
-    const readSandbox = async () => {
-      const obj = await this.readSandboxObject();
-      const metadata = obj?.metadata as k8s.V1ObjectMeta | undefined;
-      if (!obj || metadata?.uid !== sandboxUid) return false;
-      // The Pod may have been replaced since the handle was opened.
-      podNames.add(podNameOf(obj) ?? this.sandboxName);
-      return true;
-    };
-    const podExists = async (name: string) => {
-      try {
-        const pod = await pods.readNamespacedPod({
-          name,
-          namespace: this.namespace,
-        });
-        return pod.metadata?.ownerReferences?.some(
-          (owner) => owner.uid === sandboxUid,
-        );
-      } catch (err) {
-        if (isK8s404(err)) return false;
-        throw new SandboxError(`Failed to read Pod '${name}'.`, { cause: err });
-      }
-    };
+    const attempt = this.requestClaimDeletion(claimUid);
 
     const observe = async () => {
-      // Remember the last Pod name before foreground deletion can remove the
-      // Sandbox. Keep checking the Pod even after its owner disappears.
-      await readSandbox();
-      signal.throwIfAborted();
-      await this.requestClaimDeletion(claimUid);
+      await attempt.promise;
       while (!signal.aborted) {
-        const [claim, sandboxExists] = await Promise.all([
+        const [claim, sandbox] = await Promise.all([
           this.readClaim(),
-          readSandbox(),
+          this.readSandboxObject(),
         ]);
         signal.throwIfAborted();
-        const activePods = await Promise.all([...podNames].map(podExists));
+        const metadata = sandbox?.metadata as k8s.V1ObjectMeta | undefined;
         if (
           claim?.metadata?.uid !== claimUid &&
-          !sandboxExists &&
-          !activePods.some(Boolean)
+          metadata?.uid !== sandboxUid &&
+          !(await this.hasOwnedPods(pods, sandboxUid, signal))
         ) {
           return;
         }
@@ -1196,6 +1189,7 @@ export class Sandbox {
 
     try {
       await raceWithTimeout(observe(), timeoutMs, () => {
+        this.forgetPendingDeletion(attempt);
         throw new SandboxTimeoutError(
           `SandboxClaim '${this.claimName}' and its Sandbox and Pod did not finish deleting within ${timeoutMs}ms.`,
         );
@@ -1205,42 +1199,89 @@ export class Sandbox {
     }
   }
 
-  private requestClaimDeletion(foregroundUid?: string): Promise<void> {
-    this.deletionPromise ??= this.deleteClaim(foregroundUid).catch(
-      (err: unknown) => {
-        this.deletionPromise = null;
-        throw err;
+  private async hasOwnedPods(
+    pods: k8s.CoreV1Api,
+    sandboxUid: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    // Pod names and labels are not an ownership test. A Pod can outlive
+    // its Sandbox even when the handle never saw that Pod's name.
+    let nextPage: string | undefined;
+    do {
+      signal.throwIfAborted();
+      let page: k8s.V1PodList;
+      try {
+        page = await pods.listNamespacedPod({
+          namespace: this.namespace,
+          limit: 250,
+          _continue: nextPage,
+        });
+      } catch (err) {
+        throw new SandboxError(
+          `Failed to list Pods in namespace '${this.namespace}'.`,
+          {
+            cause: err,
+          },
+        );
+      }
+      if (
+        page.items.some((pod) =>
+          pod.metadata?.ownerReferences?.some(
+            (owner) => owner.uid === sandboxUid,
+          ),
+        )
+      ) {
+        return true;
+      }
+      nextPage = page.metadata?._continue;
+    } while (nextPage);
+    return false;
+  }
+
+  private requestClaimDeletion(foregroundUid?: string): ClaimDeletion {
+    if (this.claimDeletion) return this.claimDeletion;
+    const attempt = {
+      promise: this.deleteClaim(foregroundUid),
+      accepted: false,
+    };
+    this.claimDeletion = attempt;
+    // Share the request, but give each caller its own timeout. Once deletion
+    // is accepted, later callers only need to wait for the resources to go.
+    void attempt.promise.then(
+      () => {
+        attempt.accepted = true;
+      },
+      () => {
+        this.forgetPendingDeletion(attempt);
       },
     );
-    return this.deletionPromise;
+    return attempt;
+  }
+
+  private forgetPendingDeletion(attempt: ClaimDeletion): void {
+    if (this.claimDeletion === attempt && !attempt.accepted) {
+      this.claimDeletion = undefined;
+    }
   }
 
   private async deleteClaim(foregroundUid?: string): Promise<void> {
     this.logger.info(`Deleting SandboxClaim: ${this.claimName}`);
     try {
-      await raceWithTimeout(
-        this.customObjectsApi.deleteNamespacedCustomObject({
-          group: CLAIM_API_GROUP,
-          version: CLAIM_API_VERSION,
-          namespace: this.namespace,
-          plural: CLAIM_PLURAL_NAME,
-          name: this.claimName,
-          ...(foregroundUid
-            ? {
-                body: {
-                  propagationPolicy: "Foreground",
-                  preconditions: { uid: foregroundUid },
-                },
-              }
-            : {}),
-        }),
-        CLEANUP_TIMEOUT_MS,
-        () => {
-          throw new SandboxError(
-            `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
-          );
-        },
-      );
+      await this.customObjectsApi.deleteNamespacedCustomObject({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: this.namespace,
+        plural: CLAIM_PLURAL_NAME,
+        name: this.claimName,
+        ...(foregroundUid
+          ? {
+              body: {
+                propagationPolicy: "Foreground",
+                preconditions: { uid: foregroundUid },
+              },
+            }
+          : {}),
+      });
     } catch (err: unknown) {
       if (isK8s404(err)) {
         return;

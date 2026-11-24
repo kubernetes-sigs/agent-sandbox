@@ -62,7 +62,9 @@ Claim, Sandbox, and Pod, request foreground deletion:
 await sandbox.close({ waitForTermination: true, timeoutMs: 60_000 });
 ```
 
-The option requires permission to read the Claim, Sandbox, and Pod. The timeout
+The option requires permission to get the Claim and Sandbox and list Pods in
+their namespace. The SDK checks Pod owner references so it can find a Pod even
+if the Sandbox has already been deleted. The timeout
 defaults to 180,000 ms and covers the Kubernetes deletion and wait after local
 cleanup. A timeout rejects with `SandboxTimeoutError`. If Kubernetes already
 accepted deletion, it can continue after the timeout. Call `close()` with the

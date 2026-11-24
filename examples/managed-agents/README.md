@@ -76,6 +76,7 @@ and the **manifests** (`SandboxTemplate` + `SandboxWarmPool`).
 | :--- | :--- | :--- |
 | [claude-managed-agents](./claude-managed-agents/) | [Claude Managed Agents self-hosted sandboxes](https://platform.claude.com/docs/en/managed-agents/self-hosted-sandboxes) | poll → ack → heartbeat lease hand-off to the in-sandbox worker |
 | [openai-managed-agents](./openai-managed-agents/) | [OpenAI Agents API self-hosted sandboxes](https://developers.openai.com/api/docs/guides/agents-api/environments/self-hosted) | poll session required actions → start the platform's `codex exec-server` in-sandbox; it connects outbound (WSS), no lease — the connection's lifetime is the state |
+| [bedrock-managed-agents](./bedrock-managed-agents/) | [Amazon Bedrock Managed Agents (powered by OpenAI) self-hosted environments](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-managed-agents-openai.html) | keep the session's `codex exec-server` attached in-sandbox (AWS SigV4 over WSS); no connection signal — the controller re-asserts attachment and reads turn state from the session status |
 
 ## Shared prerequisites
 

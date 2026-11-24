@@ -382,6 +382,7 @@ type WatchPassResult<V> =
 /** What a Ready Sandbox object tells us about how to reach it. */
 interface ReadySandbox {
   sandboxName: string;
+  sandboxUid?: string;
   podName: string;
   /** True when podName came from the pod-name annotation. */
   podNameFromAnnotation: boolean;
@@ -417,6 +418,7 @@ function readSandbox(
   const podIPs = Array.isArray(status.podIPs) ? status.podIPs : [];
   return {
     sandboxName,
+    sandboxUid: typeof metadata.uid === "string" ? metadata.uid : undefined,
     podName: podNameAnnotation || sandboxName,
     podNameFromAnnotation: Boolean(podNameAnnotation),
     podIP: selectPodIP(podIPs),
@@ -657,13 +659,13 @@ export class SandboxClient {
       await this.beginSandboxTracing();
 
     let ready: ReadySandbox;
+    let expectedUid: string | undefined;
     const named = opts?.claimName !== undefined;
     let swept = false;
 
     try {
       const traceContextStr =
         sandboxTracingManager?.getTraceContextJson() ?? "";
-      let expectedUid: string | undefined;
       try {
         const created = await this.createClaim(
           claimName,
@@ -744,7 +746,13 @@ export class SandboxClient {
       throw err;
     }
 
-    const init = this.sandboxInit(claimName, ns, ready, sandboxTracingManager);
+    const init = this.sandboxInit(
+      claimName,
+      ns,
+      ready,
+      sandboxTracingManager,
+      expectedUid,
+    );
 
     // A repeated create of a named claim finds its handle already registered.
     // Keep it, so its connections survive, unless the claim now has a new Sandbox.
@@ -910,15 +918,17 @@ export class SandboxClient {
       this.registry.delete(key);
     }
 
-    // Verify the claim exists in Kubernetes
+    // Verify the claim exists in Kubernetes and pin the handle to its UID.
+    let claimUid: string | undefined;
     try {
-      await this.customObjectsApi.getNamespacedCustomObject({
+      const claim = (await this.customObjectsApi.getNamespacedCustomObject({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
         namespace: ns,
         plural: CLAIM_PLURAL_NAME,
         name: claimName,
-      });
+      })) as { metadata?: { uid?: string } };
+      claimUid = claim?.metadata?.uid;
     } catch (err) {
       // Distinguish 404 (not found) from other K8s errors.
       if (isK8s404(err)) {
@@ -949,6 +959,7 @@ export class SandboxClient {
           ? opts.resolveTimeout * 1000
           : undefined,
         opts?.waitForReady ?? true,
+        claimUid,
       );
     } catch (err) {
       sandboxTracingManager?.endLifecycleSpan();
@@ -956,7 +967,7 @@ export class SandboxClient {
     }
 
     const sandbox = new Sandbox(
-      this.sandboxInit(claimName, ns, ready, sandboxTracingManager),
+      this.sandboxInit(claimName, ns, ready, sandboxTracingManager, claimUid),
     );
 
     this.registry.set(key, sandbox);
@@ -1384,10 +1395,13 @@ export class SandboxClient {
     namespace: string,
     ready: ReadySandbox,
     tracingManager: TracerManager | null,
+    claimUid?: string,
   ): SandboxInit {
     return {
       claimName,
+      claimUid,
       sandboxName: ready.sandboxName,
+      sandboxUid: ready.sandboxUid,
       podName: ready.podName,
       podIP: ready.podIP,
       serviceFQDN: ready.serviceFQDN,

@@ -52,6 +52,23 @@ This method requires sandboxd support for `GET /v1/files/{path}?stat=true`.
 Older servers that return file contents or directory listings fail response
 validation.
 
+### Waiting for sandbox deletion
+
+`sandbox.close()` closes the local handle and returns when the API server
+accepts deletion of the SandboxClaim. To wait until Kubernetes has removed the
+Claim, Sandbox, and Pod, request foreground deletion:
+
+```typescript
+await sandbox.close({ waitForTermination: true, timeoutMs: 60_000 });
+```
+
+The option requires permission to read the Claim, Sandbox, and Pod. The timeout
+defaults to 180,000 ms and covers the Kubernetes deletion and wait after local
+cleanup. A timeout rejects with `SandboxTimeoutError`. If Kubernetes already
+accepted deletion, it can continue after the timeout. Call `close()` with the
+option again to resume waiting. Handles opened directly with
+`getSandboxByName()` release local resources only.
+
 ### Automatic expiration
 
 Set `shutdownAfterSeconds` when creating a sandbox to have the controller delete

@@ -149,7 +149,8 @@ func WithWorkingDir(dir string) CallOption {
 }
 
 // WithPTY allocates a pseudo-terminal for Commands.Start and merges stderr into
-// stdout. Both dimensions must be in [1, 65535]. Other operations ignore it.
+// stdout. Both dimensions must be in [1, 65535]. Run rejects the option; other
+// operations ignore it.
 func WithPTY(cols, rows uint32) CallOption {
 	return func(o *callOptions) {
 		o.pty = &processv1.PTY{Cols: cols, Rows: rows}

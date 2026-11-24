@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
@@ -60,6 +61,8 @@ type Commands struct {
 //
 // WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime
 // returns ErrUnsupportedByRuntime rather than silently ignoring them.
+// Run rejects WithPTY with an InvalidArgument error because Execute has no
+// terminal; use Start to run a command on a pseudo-terminal.
 func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error) {
 	defer c.trackOp()()
 	co := resolveCallOpts(opts)
@@ -69,6 +72,13 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 	ctx = withLifecycleSpan(ctx, c.lifecycleCtx())
 	ctx, span := startSpan(ctx, c.tracer, c.svcName, "run", AttrCommandExecutable.String(commandExecutable(command)))
 	defer func() { span.End() }()
+
+	if co.pty != nil {
+		err := fmt.Errorf("%s: run: %w", c.errPrefix(),
+			status.Error(codes.InvalidArgument, "WithPTY is not supported by Run; use Commands.Start"))
+		recordError(span, err)
+		return nil, err
+	}
 
 	if c.runtime == RuntimeSandboxd {
 		// The legacy path gets RequestTimeout from SendRequest. Apply it

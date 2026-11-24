@@ -268,7 +268,7 @@ WithMaxDepth limits how many directory levels a recursive Files.List descends, w
 func WithPTY(cols, rows uint32) CallOption
 ```
 
-WithPTY allocates a pseudo\-terminal for Commands.Start and merges stderr into stdout. Both dimensions must be in \[1, 65535\]. Other operations ignore it.
+WithPTY allocates a pseudo\-terminal for Commands.Start and merges stderr into stdout. Both dimensions must be in \[1, 65535\]. Run rejects the option; other operations ignore it.
 
 <a name="WithRecursive"></a>
 #### func [WithRecursive](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -408,7 +408,7 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 
 WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run issues a single gRPC Execute regardless of the configured attempts.
 
-WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them.
+WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them. Run rejects WithPTY with an InvalidArgument error because Execute has no terminal; use Start to run a command on a pseudo\-terminal.
 
 <a name="Commands.Start"></a>
 #### func \(\*Commands\) [Start](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)

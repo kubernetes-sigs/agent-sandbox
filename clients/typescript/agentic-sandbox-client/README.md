@@ -395,7 +395,7 @@ await sandbox.resume({ timeoutMs: 60_000 });
 console.log((await sandbox.commands.run("cat", ["/workspace/note.txt"])).stdout);
 ```
 
-Data on a persistent volume survives. Processes, memory, and `emptyDir` volumes do not. Both methods reject on failure and take `timeoutMs` (180000 by default) and `signal`. A call that times out or is aborted stops waiting at once, but a Kubernetes request already sent is not cancelled, so a late `patch` can still take effect. The next call waits for that `patch` to settle before it reads the Sandbox. The credentials need `get` and `patch` on `sandboxes`. With `watch` as well, the methods watch the Sandbox for the change, as the Go and Python clients do. Without it they read the Sandbox every 500 ms.
+Data on a persistent volume survives. Processes, memory, and `emptyDir` volumes do not. Both methods reject on failure and take `timeoutMs` (180000 by default) and `signal`. A call that times out or is aborted stops waiting at once, but a Kubernetes request already sent is not cancelled, so a late `patch` can still take effect. The next call waits for that `patch` to settle before it reads the Sandbox. `suspend()` and `resume()` watch the Sandbox and need `get`, `patch`, and `watch` on `sandboxes`.
 
 ### Interactive processes
 

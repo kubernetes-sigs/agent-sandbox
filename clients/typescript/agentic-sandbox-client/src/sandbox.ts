@@ -1029,11 +1029,10 @@ export class Sandbox {
    * Waits until `done` accepts the Sandbox. Rejects with a
    * SandboxTimeoutError once the budget runs out.
    *
-   * Every error that ends the wait comes from a GET, which reports a
-   * deleted, terminating, or replaced Sandbox. Between GETs a watch reports
-   * changes as they happen, as in the Go and Python clients. When the watch
-   * fails, for example because the credentials lack the `watch` verb, the
-   * wait reads the Sandbox at a fixed interval for the rest of the call.
+   * A GET reports a deleted, terminating, or replaced Sandbox. Between GETs
+   * a watch reports changes as they happen, as in the Go and Python clients.
+   * Rejects with the watch's error when the watch fails, for example because
+   * the credentials lack the `watch` verb.
    */
   private async waitForSandbox(
     description: string,
@@ -1042,7 +1041,6 @@ export class Sandbox {
     signal: AbortSignal,
     done: (obj: Record<string, unknown>) => boolean,
   ): Promise<Record<string, unknown>> {
-    let watchUsable = true;
     while (true) {
       if (signal.aborted) throw signal.reason;
       const obj = await this.abortable(signal, this.readLiveSandbox(uid));
@@ -1054,46 +1052,44 @@ export class Sandbox {
           `Sandbox '${this.sandboxName}' did not ${description} within ${budget.timeoutMs}ms.`,
         );
       }
-      if (watchUsable) {
-        const metadata = obj.metadata as Record<string, unknown>;
-        const result = await watchSandboxOnce<
-          { obj: Record<string, unknown> } | "recheck" | "closed" | "failed"
-        >({
-          kubeConfig: this.kubeConfig,
-          namespace: this.namespace,
-          sandboxName: this.sandboxName,
-          resourceVersion: metadata.resourceVersion as string | undefined,
-          remainingMs: remaining,
-          signal,
-          closed: "closed",
-          failed: () => "failed",
-          onEvent: (type, event) => {
-            if (type !== "ADDED" && type !== "MODIFIED" && type !== "DELETED") {
-              return undefined;
-            }
-            const eventMetadata =
-              (event?.metadata as Record<string, unknown>) ?? {};
-            // The next GET reports a deleted, replaced, or terminating Sandbox.
-            if (
-              type === "DELETED" ||
-              eventMetadata.uid !== uid ||
-              eventMetadata.deletionTimestamp
-            ) {
-              return "recheck";
-            }
-            return done(event) ? { obj: event } : undefined;
-          },
-        });
-        if (typeof result === "object") return result.obj;
-        if (result === "recheck") continue;
-        if (result === "failed") {
-          watchUsable = false;
-          this.logger.info(
-            `Could not watch Sandbox '${this.sandboxName}'; reading it every ${LIFECYCLE_POLL_INTERVAL_MS}ms instead.`,
-          );
-        }
+      const metadata = obj.metadata as Record<string, unknown>;
+      const result = await watchSandboxOnce<
+        | { obj: Record<string, unknown> }
+        | { error: Error }
+        | "recheck"
+        | "closed"
+      >({
+        kubeConfig: this.kubeConfig,
+        namespace: this.namespace,
+        sandboxName: this.sandboxName,
+        resourceVersion: metadata.resourceVersion as string | undefined,
+        remainingMs: remaining,
+        signal,
+        closed: "closed",
+        failed: (error) => ({ error }),
+        onEvent: (type, event) => {
+          if (type !== "ADDED" && type !== "MODIFIED" && type !== "DELETED") {
+            return undefined;
+          }
+          const eventMetadata =
+            (event?.metadata as Record<string, unknown>) ?? {};
+          // The next GET reports a deleted, replaced, or terminating Sandbox.
+          if (
+            type === "DELETED" ||
+            eventMetadata.uid !== uid ||
+            eventMetadata.deletionTimestamp
+          ) {
+            return "recheck";
+          }
+          return done(event) ? { obj: event } : undefined;
+        },
+      });
+      if (result === "recheck") continue;
+      if (result !== "closed") {
+        if ("obj" in result) return result.obj;
+        throw result.error;
       }
-      // Also spaces out the GETs when the API server keeps closing the watch.
+      // Spaces out the GETs when the API server keeps closing the watch.
       await this.sleep(
         Math.min(LIFECYCLE_POLL_INTERVAL_MS, budget.deadline - Date.now()),
         signal,

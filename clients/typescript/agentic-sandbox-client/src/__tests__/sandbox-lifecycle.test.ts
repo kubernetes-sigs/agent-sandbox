@@ -128,9 +128,15 @@ function openWatch() {
 describe("Sandbox suspend/resume", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Without a watch the wait polls, which most cases here exercise.
+    // A watch that closes at once makes the wait read the Sandbox again
+    // every 500ms, which most cases here exercise.
     mockWatch.mockReset();
-    mockWatch.mockRejectedValue(new Error("watch is forbidden"));
+    mockWatch.mockImplementation(
+      async (_path, _params, _event, done: WatchDone) => {
+        done(null);
+        return new AbortController();
+      },
+    );
     mockCreateStrategy.mockImplementation((connectivity: string) => ({
       connectivity,
       open: vi.fn(),
@@ -513,24 +519,19 @@ describe("Sandbox suspend/resume", () => {
       expect(mockWatch).toHaveBeenCalledTimes(2);
     });
 
-    it("polls for the rest of the call once the watch fails", async () => {
-      vi.useFakeTimers();
-      mockGet
-        .mockResolvedValueOnce(sandboxObj({ mode: "Running" }))
-        .mockResolvedValueOnce(suspending)
-        .mockResolvedValueOnce(suspending)
-        .mockResolvedValueOnce(suspended);
+    it("rejects with the watch's error when the watch fails", async () => {
+      mockGet.mockResolvedValue(sandboxObj({ mode: "Running" }));
       const watch = openWatch();
+      const forbidden = Object.assign(new Error("forbidden"), {
+        statusCode: 403,
+      });
 
       const done = new Sandbox(createInit()).suspend();
-      (await watch.started).done(
-        Object.assign(new Error("forbidden"), { statusCode: 403 }),
-      );
-      await vi.advanceTimersByTimeAsync(1000);
-      await done;
+      (await watch.started).done(forbidden);
 
+      await expect(done).rejects.toBe(forbidden);
       expect(mockWatch).toHaveBeenCalledTimes(1);
-      expect(mockGet).toHaveBeenCalledTimes(4);
+      expect(watch.abort.signal.aborted).toBe(true);
     });
 
     it("ends the watch when the caller aborts", async () => {

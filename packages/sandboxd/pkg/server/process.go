@@ -325,7 +325,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// grandchild still holds the slave side).
 		waitForExit(cmd.Process.Pid)
 		sends.childExited(s.streamChunkSize)
-		waitForReaders(&streamWg, sends, func() { _ = proc.ClosePTY() })
+		waitForReaders(&streamWg, sends, time.After, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
 		stopCancelKill()
 		waitErr = cmd.Wait()
@@ -336,7 +336,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 		waitForExit(cmd.Process.Pid)
 		sends.childExited(s.streamChunkSize)
-		waitForReaders(&streamWg, sends, func() { closeAll(stdoutR, stderrR) })
+		waitForReaders(&streamWg, sends, time.After, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
 		stopCancelKill()
 		waitErr = cmd.Wait()
@@ -1007,6 +1007,16 @@ func (t *sendTracker) notifyLocked() {
 	t.changed = make(chan struct{})
 }
 
+// expire reports whether the grace may end: no reader is sending output
+// written before the child exited. It takes mu, as begin does, so a send that
+// begin counted before the check holds the grace open, and one counted after
+// it started after the grace ended.
+func (t *sendTracker) expire() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.active == 0
+}
+
 // state reports whether any reader is sending output written before the
 // child exited, and returns a channel that is closed at the next change.
 func (t *sendTracker) state() (bool, <-chan struct{}) {
@@ -1027,8 +1037,8 @@ func (t *sendTracker) state() (bool, <-chan struct{}) {
 // descendant that keeps writing ends the stream as before. A reader that is
 // sending cannot be stopped by forceClose anyway, so pausing the grace does
 // not let a stalled client hold the stream open any longer than it already
-// could.
-func waitForReaders(wg *sync.WaitGroup, sends *sendTracker, forceClose func()) {
+// could. after starts the grace timer; Start passes time.After.
+func waitForReaders(wg *sync.WaitGroup, sends *sendTracker, after func(time.Duration) <-chan time.Time, forceClose func()) {
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -1045,19 +1055,23 @@ func waitForReaders(wg *sync.WaitGroup, sends *sendTracker, forceClose func()) {
 				continue
 			}
 		}
-		paused := time.Now()
-		timer := time.NewTimer(remaining)
+		started := time.Now()
 		select {
 		case <-done:
-			timer.Stop()
 			return
-		case <-timer.C:
+		case <-after(remaining):
+			// A reader may have begun a counted send since state, and
+			// select picks at random when changed is ready too. Wait for
+			// that send before closing the readers.
+			if !sends.expire() {
+				remaining = 0
+				continue
+			}
 			forceClose()
 			<-done
 			return
 		case <-changed:
-			timer.Stop()
-			remaining = max(0, remaining-time.Since(paused))
+			remaining = max(0, remaining-time.Since(started))
 		}
 	}
 }

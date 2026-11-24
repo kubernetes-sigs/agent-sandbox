@@ -732,6 +732,44 @@ func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
 	}
 }
 
+// TestWaitForReadersWaitsForASendThatBeginsAsTheGraceEnds guards against the
+// grace closing the readers while a reader sends output written before the
+// child exited. The reader begins its send after waitForReaders last checked
+// for one, just as the grace runs out, so the timer and the tracker's change
+// are both ready. select picks between them at random, so the case repeats.
+func TestWaitForReadersWaitsForASendThatBeginsAsTheGraceEnds(t *testing.T) {
+	t.Parallel()
+	for range 64 {
+		sends := newSendTracker()
+		out := sends.track(nil, 1<<20)
+		sends.childExited(0)
+		var readers sync.WaitGroup
+		readers.Add(1)
+
+		timers := 0
+		after := func(time.Duration) <-chan time.Time {
+			timers++
+			if timers == 1 {
+				counted := sends.begin(out, 1)
+				require.True(t, counted, "output written before the exit pauses the grace")
+				go func() {
+					time.Sleep(time.Millisecond)
+					sends.end(counted)
+				}()
+			}
+			expired := make(chan time.Time, 1)
+			expired <- time.Now()
+			return expired
+		}
+		var closedWhileSending bool
+		waitForReaders(&readers, sends, after, func() {
+			closedWhileSending, _ = sends.state()
+			readers.Done()
+		})
+		require.False(t, closedWhileSending, "the grace closed the readers during a counted send")
+	}
+}
+
 // TestStartWithPTY_InitialSizeVisibleImmediately guards against the requested
 // window size being applied after the child started, so a child that queries
 // it right away saw 0x0.

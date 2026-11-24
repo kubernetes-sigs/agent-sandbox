@@ -58,6 +58,14 @@ func mapCommandError(err error, msg string) error {
 // delivered after the child exits when the queued byte count is unavailable.
 const defaultPipeCapacity = 64 * 1024
 
+// ptyQueueBound bounds the output a PTY can still hold when the child exits.
+// The queued byte count cannot be read for a PTY: TIOCINQ on the master
+// counts only the line discipline's 4 KiB read buffer, not the flip buffer
+// behind it. Linux limits a PTY's flip buffer to 8 KiB of buffers but can
+// overshoot by one buffer, so a PTY holds 10 to 19 KiB in all on 4 KiB pages,
+// depending on the write size. The bound leaves room for larger pages.
+const ptyQueueBound = 256 * 1024
+
 // defaultStreamChunkSize is the default read buffer size for stdout/stderr
 // streaming, overridable via the --stream-chunk-size daemon flag. Timing
 // constants (pipeDrainGrace, ...) are collected in one block in server.go.
@@ -308,7 +316,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	var waitErr error
 	if usePTY {
 		streamWg.Add(1)
-		go streamOutput(sends.track(ptyFile), false)
+		go streamOutput(sends.track(ptyFile, ptyQueueBound), false)
 		// For a PTY the reader unblocks with EIO once the child exits and
 		// the kernel's buffered output is drained. Closing the master right
 		// after Wait would discard that buffer, dropping the output of a
@@ -323,8 +331,8 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		waitErr = cmd.Wait()
 	} else {
 		streamWg.Add(2)
-		go streamOutput(sends.track(stdoutR), false)
-		go streamOutput(sends.track(stderrR), true)
+		go streamOutput(sends.track(stdoutR, -1), false)
+		go streamOutput(sends.track(stderrR, -1), true)
 
 		waitForExit(cmd.Process.Pid)
 		sends.childExited(s.streamChunkSize)
@@ -927,6 +935,9 @@ type sendTracker struct {
 // limit are guarded by sendTracker.mu.
 type trackedOutput struct {
 	file *os.File
+	// queueBound bounds the bytes file can hold, or is -1 to ask the
+	// kernel how many bytes it holds.
+	queueBound int64
 	// read counts the bytes read from file so far.
 	read int64
 	// limit is the read offset past which output was written after the
@@ -939,23 +950,29 @@ func newSendTracker() *sendTracker {
 }
 
 // track registers an output reader. Call it before the reader starts.
-func (t *sendTracker) track(file *os.File) *trackedOutput {
+// queueBound bounds the bytes file can hold; pass -1 for a pipe, whose queued
+// byte count the kernel reports.
+func (t *sendTracker) track(file *os.File, queueBound int64) *trackedOutput {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := &trackedOutput{file: file, limit: -1}
+	out := &trackedOutput{file: file, queueBound: queueBound, limit: -1}
 	t.outputs = append(t.outputs, out)
 	return out
 }
 
 // childExited sets each reader's limit to the output it has read plus what
-// is still queued in its pipe or PTY. A read in progress has already taken
-// its bytes from the queue but not yet counted them, so the limit allows one
-// extra chunk.
+// is still queued in its pipe or PTY, or the bound on that. A read in progress
+// has already taken its bytes from the queue but not yet counted them, so the
+// limit allows one extra chunk.
 func (t *sendTracker) childExited(chunk int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, out := range t.outputs {
-		out.limit = out.read + queuedOutputBytes(out.file) + int64(chunk)
+		queued := out.queueBound
+		if queued < 0 {
+			queued = queuedOutputBytes(out.file)
+		}
+		out.limit = out.read + queued + int64(chunk)
 	}
 }
 

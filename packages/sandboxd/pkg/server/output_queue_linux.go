@@ -20,9 +20,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// queuedOutputBytes returns how many bytes are waiting to be read from file.
-// TIOCINQ (FIONREAD) reports this for a pipe and for a PTY master. If the
-// call fails, the pipe capacity stands in. SyscallConn is used instead of Fd
+// queuedOutputBytes returns how many bytes are waiting to be read from the
+// pipe file. TIOCINQ (FIONREAD) reports this for a pipe. It does not for a
+// PTY master, where it counts only the line discipline's read buffer, so the
+// PTY uses ptyQueueBound instead. If the call fails, the pipe capacity stands
+// in. SyscallConn is used instead of Fd
 // because Fd puts the file in blocking mode, and then closing it would no
 // longer unblock a pending Read.
 func queuedOutputBytes(file *os.File) int64 {

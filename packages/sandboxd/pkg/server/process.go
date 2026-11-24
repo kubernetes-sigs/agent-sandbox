@@ -80,6 +80,9 @@ type ProcessServer struct {
 	streamChunkSize int
 	executionPolicy ExecutionPolicy
 	log             logr.Logger
+	// afterChildExited, if set, runs once Start has recorded the child's
+	// exit for the output readers. Tests use it to act after that point.
+	afterChildExited func()
 }
 
 // NewProcessServer builds a ProcessServer rooted at rootDir. rootDir must be
@@ -281,6 +284,12 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	var streamWg sync.WaitGroup
 	var sendMu sync.Mutex
 	sends := newSendTracker()
+	childExited := func() {
+		sends.childExited(s.streamChunkSize)
+		if s.afterChildExited != nil {
+			s.afterChildExited()
+		}
+	}
 
 	// streamOutput copies out.file into stdout/stderr stream events until the
 	// file is exhausted (EOF on pipes, EIO/ErrClosed on a PTY).
@@ -324,7 +333,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// Closing the PTY only on timeout unblocks a straggling read (e.g. a
 		// grandchild still holds the slave side).
 		waitForExit(cmd.Process.Pid)
-		sends.childExited(s.streamChunkSize)
+		childExited()
 		waitForReaders(&streamWg, sends, time.After, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
 		stopCancelKill()
@@ -335,7 +344,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		go streamOutput(sends.track(stderrR, -1), true)
 
 		waitForExit(cmd.Process.Pid)
-		sends.childExited(s.streamChunkSize)
+		childExited()
 		waitForReaders(&streamWg, sends, time.After, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
 		stopCancelKill()

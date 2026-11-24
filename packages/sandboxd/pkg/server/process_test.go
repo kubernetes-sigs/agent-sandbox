@@ -362,13 +362,20 @@ func TestStartEndsWhenADetachedChildHoldsTheOutputPipe(t *testing.T) {
 		readDelay  time.Duration
 		pty        bool
 		wantPrefix string
+		// slack is how long past pipeDrainGrace the stream may stay open.
+		// Through a PTY the client first reads up to ptyQueueBound of
+		// output at its own pace, which takes seconds on a busy runner.
+		slack time.Duration
 	}{
-		{name: "silent", background: "sleep 30", wantPrefix: "before"},
-		{name: "writing to a slow client", background: "yes", readDelay: 2 * time.Millisecond, wantPrefix: "beforey\n"},
+		{name: "silent", background: "sleep 30", wantPrefix: "before", slack: 5 * time.Second},
+		{
+			name: "writing to a slow client", background: "yes",
+			readDelay: 2 * time.Millisecond, wantPrefix: "beforey\n", slack: 5 * time.Second,
+		},
 		// The child ignores the SIGHUP the session leader's exit sends it.
 		{
 			name: "writing to a slow client through a PTY", background: "trap '' HUP; yes",
-			readDelay: 2 * time.Millisecond, pty: true, wantPrefix: "beforey\r\n",
+			readDelay: 2 * time.Millisecond, pty: true, wantPrefix: "beforey\r\n", slack: 15 * time.Second,
 		},
 	}
 	for _, tc := range tests {
@@ -389,7 +396,7 @@ func TestStartEndsWhenADetachedChildHoldsTheOutputPipe(t *testing.T) {
 
 			// The deadline is well past the bound, so a stream the child
 			// keeps open fails here rather than at the test timeout.
-			ctx, cancel := context.WithTimeout(context.Background(), pipeDrainGrace+15*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), pipeDrainGrace+tc.slack+10*time.Second)
 			defer cancel()
 			started := time.Now()
 			req := &processv1.StartRequest{
@@ -419,7 +426,7 @@ func TestStartEndsWhenADetachedChildHoldsTheOutputPipe(t *testing.T) {
 			}
 			require.Equal(t, int32(0), *exit)
 			require.True(t, strings.HasPrefix(head.String(), tc.wantPrefix), "stdout starts %q", head.String())
-			require.Less(t, time.Since(started), pipeDrainGrace+5*time.Second,
+			require.Less(t, time.Since(started), pipeDrainGrace+tc.slack,
 				"the background child's open pipe must not hold the stream open")
 		})
 	}
@@ -652,8 +659,10 @@ func (s *gatedStartStream) Send(resp *processv1.StartResponse) error {
 // TestStartDeliversOutputTailToASlowConsumer guards against Start discarding
 // output the child wrote before it exited when the client reads slowly. The
 // reader takes one chunk and blocks in Send, the rest of the output stays in
-// the pipe or PTY, and the child exits. The client then stays idle, or stalls
-// partway through the tail, for longer than pipeDrainGrace. Start must still
+// the pipe or PTY, and the child exits. The first output event is released
+// only after Start has recorded the exit, so the post-exit limit applies. The
+// client then stays idle, or stalls partway through the tail, for longer than
+// pipeDrainGrace. Start must still
 // deliver every byte before the ExitEvent.
 func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
 	const chunk = 64
@@ -664,8 +673,8 @@ func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
 		// waits, so the child exits. One page is the smallest pipe Linux
 		// grants, even to a user over pipe-user-pages-soft.
 		total int
-		// idle is how long the first output event waits after the child
-		// exits.
+		// idle is how long the first output event waits after Start
+		// records the child's exit.
 		idle time.Duration
 		// stallAt and stall make the client stall again partway through the
 		// tail.
@@ -692,12 +701,14 @@ func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			srv := NewProcessServer(root, processmanager.NewProcessRegistry(), chunk, logr.Discard())
+			exited := make(chan struct{})
+			srv.afterChildExited = func() { close(exited) }
 			stream := &gatedStartStream{
 				ctx: testCtx(t), release: make(chan struct{}), stallAt: tc.stallAt, stall: tc.stall,
 			}
 			req := &processv1.StartRequest{
 				Config: &processv1.ProcessConfig{Command: []string{
-					"sh", "-c", "head -c " + strconv.Itoa(tc.total) + " /dev/zero; touch exited",
+					"head", "-c", strconv.Itoa(tc.total), "/dev/zero",
 				}},
 			}
 			if tc.pty {
@@ -716,10 +727,11 @@ func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
 				<-finished
 			})
 
-			require.Eventually(t, func() bool {
-				_, err := os.Stat(filepath.Join(root, "exited"))
-				return err == nil
-			}, 10*time.Second, 10*time.Millisecond, "child never finished writing")
+			select {
+			case <-exited:
+			case <-time.After(10 * time.Second):
+				t.Fatal("child never finished writing")
+			}
 			time.Sleep(tc.idle)
 			release()
 			<-finished

@@ -47,7 +47,6 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
-	"sigs.k8s.io/agent-sandbox/internal/rawpatch"
 	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
@@ -410,8 +409,20 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		r.recreateBackoff.clear(req.NamespacedName)
 	}
 
-	// The annotation patch can advance the resource version used to lock status writes.
-	r.ensureSandboxTraceContext(ctx, sandbox)
+	// Initialize trace ID for active resources missing an ID (inline, no re-reconcile).
+	tc := r.Tracer.GetTraceContext(ctx)
+	if tc != "" && (sandbox.Annotations == nil || sandbox.Annotations[asmetrics.TraceContextAnnotation] == "") {
+		patch := client.MergeFrom(sandbox.DeepCopy())
+		if sandbox.Annotations == nil {
+			sandbox.Annotations = make(map[string]string)
+		}
+		sandbox.Annotations[asmetrics.TraceContextAnnotation] = tc
+
+		if err := r.Patch(ctx, sandbox, patch); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	oldStatus := sandbox.Status.DeepCopy()
 	oldResourceVersion := sandbox.ResourceVersion
 
@@ -2493,33 +2504,6 @@ func (r *SandboxReconciler) SetupWithManager(mgr ctrl.Manager, concurrentWorkers
 		Complete(r)
 }
 
-// ensureSandboxTraceContext stamps the optional W3C trace-context annotation.
-// Annotation persistence is best-effort: patch failures are logged and do not
-// fail reconcile.
-func (r *SandboxReconciler) ensureSandboxTraceContext(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) {
-	logger := log.FromContext(ctx)
-	tc := r.Tracer.GetTraceContext(ctx)
-	if tc == "" || sandbox.Annotations[asmetrics.TraceContextAnnotation] != "" {
-		return
-	}
-
-	patch, err := rawpatch.Annotations(map[string]string{asmetrics.TraceContextAnnotation: tc})
-	if err != nil {
-		logger.Error(err, "failed to build sandbox trace context annotation patch")
-		return
-	}
-
-	// Decode into a fresh object so fields omitted by the server cannot retain cached values.
-	updated := &sandboxv1beta1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace},
-	}
-	if err := r.Patch(ctx, updated, patch); err != nil {
-		logger.Error(err, "failed to patch sandbox trace context annotation")
-		return
-	}
-	*sandbox = *updated
-}
-
 // sandboxStageMetrics exists only for new watch events in this controller run.
 // A zero baseline preserves eligibility while an initially suspended Sandbox waits
 // to become active. Completed entries are removed with creation metric eligibility.
@@ -2577,7 +2561,7 @@ func emitStageLatencies(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pe
 	labels := asmetrics.LabelsFromSandbox(sandbox)
 	for _, p := range pending {
 		asmetrics.RecordStageLatency(p.latency, labels.Namespace, labels.LaunchType, labels.OwnedBy, p.stage)
-		logger.V(4).Info("Recorded sandbox stage latency", "stage", p.stage, "latencyMs", p.latency.Milliseconds())
+		logger.V(4).Info("Recorded sandbox stage latency", "stage", p.stage, "latencySeconds", p.latency.Seconds())
 	}
 }
 

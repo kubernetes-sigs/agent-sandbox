@@ -96,7 +96,7 @@ func TestExtractControllerMetrics(t *testing.T) {
 			Labels: []string{"namespace", "sandbox_template", "owned_by", "result"},
 		},
 		{
-			Name:   "agent_sandbox_stage_latency_ms",
+			Name:   "agent_sandbox_stage_latency_seconds",
 			Type:   typeHistogram,
 			Labels: []string{"namespace", "launch_type", "owned_by", "stage"},
 		},

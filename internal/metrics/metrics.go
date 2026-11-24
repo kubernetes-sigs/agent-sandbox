@@ -39,7 +39,7 @@ const (
 	OwnedBySandboxClaim    = extensionsv1beta1.SandboxClaimKind
 	OwnedBySandboxWarmPool = extensionsv1beta1.SandboxWarmPoolKind
 
-	// Stage names for agent_sandbox_stage_latency_ms.
+	// Stage names for agent_sandbox_stage_latency_seconds.
 	StagePodCreated   = "pod_created"
 	StagePodScheduled = "pod_scheduled"
 	StagePodRunning   = "pod_running"
@@ -106,8 +106,11 @@ const (
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )
 
-// creationLatencyBuckets are shared by SandboxCreationLatency and SandboxStageLatency.
+// creationLatencyBuckets are for SandboxCreationLatency, which records milliseconds.
 var creationLatencyBuckets = []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000}
+
+// stageLatencyBuckets are whole-second boundaries for SandboxStageLatency.
+var stageLatencyBuckets = []float64{1, 2, 5, 10, 30, 60, 120, 240, 300, 600}
 
 var (
 	// ClaimStartupLatency measures the time from the webhook first observing the SandboxClaim to SandboxClaim Ready state.
@@ -190,11 +193,11 @@ var (
 	// sandbox_template is omitted: template names are unbounded user input.
 	SandboxStageLatency = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name: "agent_sandbox_stage_latency_ms",
-			Help: "Latency from the first active Sandbox reconcile to each Ready-path stage in milliseconds. " +
+			Name: "agent_sandbox_stage_latency_seconds",
+			Help: "Latency from the first active Sandbox reconcile to each Ready-path stage in seconds. " +
 				"Baseline and stage timestamps are truncated to whole seconds, including controller-observed PVC binding; stages in the baseline's second record zero. " +
 				"Sandboxes in the initial informer inventory and stages reached before the baseline are omitted. Tracking is in memory, so startups spanning controller restarts may be omitted. Each stage is recorded at most once; readiness flaps do not record another sample.",
-			Buckets: creationLatencyBuckets,
+			Buckets: stageLatencyBuckets,
 		},
 		[]string{"namespace", "launch_type", "owned_by", "stage"},
 	)
@@ -349,6 +352,7 @@ var (
 	// - launch_type: "warm" | "cold"
 	// - sandbox_template: the SandboxTemplateRef, or "unknown" when the Sandbox carries no
 	//   template annotation.
+	//   This differs from the "__unknown__" sentinel used by SandboxClaim metrics.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	// - created_by: the component that created the sandbox (e.g. "go-client", "python-client", "controller", "unknown").
 	AgentSandboxesDesc = prometheus.NewDesc(
@@ -451,7 +455,7 @@ func RecordStageLatency(duration time.Duration, namespace, launchType, ownedBy, 
 		launchType,
 		ownedBy,
 		NormalizeStage(stage),
-	).Observe(float64(duration.Milliseconds()))
+	).Observe(duration.Seconds())
 }
 
 // RecordChildReconcileError increments the child reconcile error counter.

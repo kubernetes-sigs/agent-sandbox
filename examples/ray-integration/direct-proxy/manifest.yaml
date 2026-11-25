@@ -8,7 +8,8 @@ spec:
   networkPolicyManagement: Unmanaged
   podTemplate:
     spec:
-      automountServiceAccountToken: true
+      # The sandbox runs untrusted code, so it gets no Kubernetes API token.
+      automountServiceAccountToken: false
       runtimeClassName: gvisor
       containers:
       - name: runtime

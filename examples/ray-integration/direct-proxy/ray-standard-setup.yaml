@@ -21,6 +21,7 @@ spec:
         dashboard-host: 0.0.0.0
       template:
         spec:
+          serviceAccountName: ray-sandbox-manager
           containers:
           - image: rayproject/ray:2.49.0-py310
             name: ray-head
@@ -79,6 +80,7 @@ spec:
       rayStartParams: {}
       template:
         spec:
+          serviceAccountName: ray-sandbox-manager
           containers:
           - image: rayproject/ray:2.49.0-py310
             name: ray-worker

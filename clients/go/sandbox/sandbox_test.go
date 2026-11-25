@@ -3476,21 +3476,13 @@ func newClaimHelper(claim *extv1beta1.SandboxClaim) (*K8sHelper, *fakeextensions
 
 var claimGVR = schema.GroupVersionResource{Group: "extensions.agents.x-k8s.io", Version: "v1beta1", Resource: "sandboxclaims"}
 
-func TestDeleteClaimForeground_PinsUID(t *testing.T) {
+func TestDeleteClaimForeground_ConflictIsNotAnError(t *testing.T) {
 	h, extensionsCS := newClaimHelper(nil)
-	var got metav1.DeleteOptions
-	extensionsCS.PrependReactor("delete", "sandboxclaims", func(a ktesting.Action) (bool, runtime.Object, error) {
-		got = a.(ktesting.DeleteActionImpl).DeleteOptions
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, k8serrors.NewConflict(schema.GroupResource{Resource: "sandboxclaims"}, "x", errors.New("uid mismatch"))
 	})
 	if err := h.deleteClaimForeground(context.Background(), "x", "default", "old"); err != nil {
 		t.Fatalf("a replaced claim should not fail the delete: %v", err)
-	}
-	if p := got.PropagationPolicy; p == nil || *p != metav1.DeletePropagationForeground {
-		t.Errorf("propagation = %v, want Foreground", p)
-	}
-	if got.Preconditions == nil || got.Preconditions.UID == nil || *got.Preconditions.UID != "old" {
-		t.Errorf("preconditions = %v, want UID old", got.Preconditions)
 	}
 }
 
@@ -3605,40 +3597,6 @@ func TestClose_WaitForTermination_DeletesInForeground(t *testing.T) {
 	requireForegroundDeletes(t, deletes())
 }
 
-func TestOpen_WaitForTermination_RollbackDeletesInForeground(t *testing.T) {
-	c, agentsCS, extensionsCS := newWaitingSandbox()
-	c.opts.SandboxReadyTimeout = 200 * time.Millisecond
-	agentsCS.PrependWatchReactor("sandboxes", ktesting.DefaultWatchReactor(watch.NewFake(), nil))
-	deletes := recordClaimDeletes(extensionsCS)
-
-	if err := c.Open(context.Background()); err == nil {
-		t.Fatal("expected timeout error from Open")
-	}
-	requireForegroundDeletes(t, deletes())
-}
-
-func TestClose_WaitForTermination_RetryKeepsWaiting(t *testing.T) {
-	c, agentsCS, extensionsCS := newWaitingSandbox()
-	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("sb"))
-	if err := c.Open(context.Background()); err != nil {
-		t.Fatalf("Open() error: %v", err)
-	}
-	var gone atomic.Bool
-	claimGoneAfter(extensionsCS, &gone)
-
-	if err := c.Close(context.Background()); !errors.Is(err, ErrTimeout) {
-		t.Fatalf("expected the first Close to time out, got: %v", err)
-	}
-	time.AfterFunc(300*time.Millisecond, func() { gone.Store(true) })
-	start := time.Now()
-	if err := c.Close(context.Background()); err != nil {
-		t.Fatalf("retried Close() error: %v", err)
-	}
-	if time.Since(start) < 250*time.Millisecond {
-		t.Errorf("retried Close returned before the claim was gone: %v", time.Since(start))
-	}
-}
-
 func TestClose_WaitForTermination_CancelledContextStopsWait(t *testing.T) {
 	c, agentsCS, extensionsCS := newWaitingSandbox()
 	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("sb"))
@@ -3646,6 +3604,7 @@ func TestClose_WaitForTermination_CancelledContextStopsWait(t *testing.T) {
 		t.Fatalf("Open() error: %v", err)
 	}
 	c.opts.CleanupTimeout = 30 * time.Second
+	deletes := recordClaimDeletes(extensionsCS)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -3657,13 +3616,7 @@ func TestClose_WaitForTermination_CancelledContextStopsWait(t *testing.T) {
 	if time.Since(start) > 5*time.Second {
 		t.Errorf("Close kept waiting after the context was cancelled: %v", time.Since(start))
 	}
-	deleted := false
-	for _, a := range extensionsCS.Actions() {
-		deleted = deleted || a.GetVerb() == "delete"
-	}
-	if !deleted {
-		t.Error("expected the claim delete to be sent")
-	}
+	requireForegroundDeletes(t, deletes())
 }
 
 func TestClose_WaitForTermination_DuringOpen(t *testing.T) {

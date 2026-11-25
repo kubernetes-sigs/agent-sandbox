@@ -455,10 +455,6 @@ web service) while keeping the sandbox warm. `Close()` deletes the claim;
 Set `Options.WaitForTermination` to make `Close()` return only after the claim
 is gone. Foreground deletion holds the claim only for dependents the garbage
 collector has already seen, so this does not promise the Pod has stopped.
-Raise `CleanupTimeout` above the Pod's termination grace period. Cancelling
-the context passed to `Close()` stops the wait. The caller needs `get` on
-SandboxClaims. `Client.DeleteSandbox` on a claim the client does not track does
-not wait.
 
 ## Suspend and Resume
 

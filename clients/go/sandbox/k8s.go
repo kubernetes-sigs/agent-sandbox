@@ -244,9 +244,9 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 	return h.deleteClaimWithOptions(ctx, name, namespace, metav1.DeleteOptions{})
 }
 
-// deleteClaimForeground deletes a SandboxClaim with foreground propagation, so
-// the claim stays until its dependents are gone. A non-empty uid makes the
-// delete a no-op if a same-name claim has replaced the original.
+// deleteClaimForeground deletes a SandboxClaim with foreground propagation. A
+// non-empty uid makes the delete a no-op if a same-name claim has replaced the
+// original.
 func (h *K8sHelper) deleteClaimForeground(ctx context.Context, name, namespace string, uid types.UID) error {
 	foreground := metav1.DeletePropagationForeground
 	opts := metav1.DeleteOptions{PropagationPolicy: &foreground}

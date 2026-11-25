@@ -481,13 +481,11 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	s.mu.Unlock()
 
 	var cleanupErr error
-	deleted := false
 	if s.opts.ClaimName == "" {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), s.opts.CleanupTimeout)
 		defer cancel()
 
 		cleanupErr = s.deleteClaim(cleanupCtx, name, uid)
-		deleted = cleanupErr == nil
 	}
 
 	s.mu.Lock()
@@ -500,7 +498,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 		s.claimName = ""
 		s.claimUID = ""
 		// A Close that interrupted this Open waits for the deletion started here.
-		if deleted && s.opts.WaitForTermination {
+		if s.opts.ClaimName == "" && s.opts.WaitForTermination {
 			s.terminatingClaim = claimRef{name, uid}
 		}
 	}
@@ -593,6 +591,7 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	cleanupCtx, cancel := context.WithDeadline(context.Background(), closeDeadline)
 	defer cancel()
 	err := s.deleteClaim(cleanupCtx, name, uid)
+	deleteSent := err == nil
 	if err == nil && s.opts.WaitForTermination {
 		// The delete above ignores ctx so a cancelled caller still cleans
 		// up. Only the wait stops when ctx is done.
@@ -618,7 +617,11 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	// would hand out this closed one from GetSandbox.
 	s.suspended = false
 	if err != nil && s.claimName != "" {
-		s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
+		if deleteSent {
+			s.log.Error(err, "claim is still terminating after Close; retry Close() to wait again", "claim", s.claimName)
+		} else {
+			s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
+		}
 	} else {
 		s.claimName = ""
 		s.claimUID = ""

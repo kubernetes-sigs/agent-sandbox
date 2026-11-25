@@ -295,17 +295,25 @@ func (c *Client) closeTracked(ctx context.Context, keepNamed bool) {
 	c.registry = make(map[Key]*Sandbox)
 	c.mu.Unlock()
 
+	// Close concurrently so a slow WaitForTermination wait on one claim cannot
+	// delay the deletes of the rest.
+	var wg sync.WaitGroup
 	for _, t := range snapshot {
-		var err error
-		if t.keep {
-			err = t.sb.Disconnect(ctx)
-		} else {
-			err = t.sb.Close(ctx)
-		}
-		if err != nil {
-			c.log.Error(err, "cleanup failed", "claim", t.key.ClaimName, "namespace", t.key.Namespace)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if t.keep {
+				err = t.sb.Disconnect(ctx)
+			} else {
+				err = t.sb.Close(ctx)
+			}
+			if err != nil {
+				c.log.Error(err, "cleanup failed", "claim", t.key.ClaimName, "namespace", t.key.Namespace)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // EnableAutoCleanup deletes tracked sandboxes on SIGINT/SIGTERM. Claims

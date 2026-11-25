@@ -10,6 +10,7 @@ If your cluster still has `v1alpha1`-serialized resources in etcd or if you are 
 2. **Run the v0.5 migration**: Follow the [v0.5.x API migration guide](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.2/docs/api-migration-guide.md) to migrate all existing resources to `v1beta1` and prune legacy `storedVersions`.
 3. **Rewrite `v1alpha1` owner references**: The storage migration rewrites each resource, but not the `ownerReferences` that other objects hold to it. Pods, Services, PersistentVolumeClaims, and NetworkPolicies that the controller created on `v0.4.x` still name their owning `Sandbox` or `SandboxTemplate` with `apiVersion: agents.x-k8s.io/v1alpha1` or `extensions.agents.x-k8s.io/v1alpha1`. So do `Sandbox` objects that a `SandboxClaim` adopted. After the upgrade, the Kubernetes garbage collector cannot resolve a `v1alpha1` owner (see [kubernetes/kubernetes#102641](https://github.com/kubernetes/kubernetes/issues/102641)). Deleting a pre-upgrade `SandboxClaim` with `--cascade=foreground` then leaves it in `foregroundDeletion`, and its `Sandbox` and Pod are never collected. With the default background deletion, the claim may disappear while its Sandbox and Pod remain orphaned. Automatic rewriting is proposed in [#2129](https://github.com/kubernetes-sigs/agent-sandbox/pull/2129); do not assume that a `v1.0.x` release includes it. Unless the target release explicitly documents that it refreshes these references, the manual rewrite below is **required** while `v0.5.x` is still running. The `test` operation makes each patch fail rather than touch a reference that changed in the meantime:
    ```bash
+   set -euo pipefail
    STALE='^(extensions\.)?agents\.x-k8s\.io/v1alpha1$'
    for kind in pods services persistentvolumeclaims networkpolicies \
        sandboxes.agents.x-k8s.io sandboxclaims.extensions.agents.x-k8s.io \
@@ -29,6 +30,7 @@ If your cluster still has `v1alpha1`-serialized resources in etcd or if you are 
    ```
 4. **Pre-upgrade check**: Before upgrading from `v0.5.x` to `v1.0.0`, verify that every agent-sandbox CustomResourceDefinition reports only `v1beta1` in `status.storedVersions`:
    ```bash
+   set -euo pipefail
    for crd in \
        sandboxes.agents.x-k8s.io \
        sandboxclaims.extensions.agents.x-k8s.io \
@@ -43,6 +45,7 @@ If your cluster still has `v1alpha1`-serialized resources in etcd or if you are 
 
    After the manual rewrite in step 3, also verify that no object still names a `v1alpha1` owner. The following command prints nothing when the rewrite is complete:
    ```bash
+   set -euo pipefail
    for kind in pods services persistentvolumeclaims networkpolicies \
        sandboxes.agents.x-k8s.io sandboxclaims.extensions.agents.x-k8s.io \
        sandboxwarmpools.extensions.agents.x-k8s.io sandboxtemplates.extensions.agents.x-k8s.io; do
@@ -82,7 +85,7 @@ If your cluster still has `v1alpha1`-serialized resources in etcd or if you are 
    docker exec kind-control-plane sh -c 'crictl stop $(crictl ps -q --name kube-controller-manager)'
    ```
    On OpenShift, set `spec.forceRedeploymentReason` on the `kubecontrollermanager/cluster` resource. Managed control planes may need a request to the provider.
-7. **Verify**: Delete a `SandboxClaim` that existed before the upgrade using foreground deletion so that unresolved dependents keep the claim visible:
+7. **Verify**: Select a **disposable** `SandboxClaim` that existed before the upgrade and whose Sandbox can safely be deleted. Back up or otherwise protect any required data first: cascading deletion can remove owned PVCs and their data, depending on the storage reclaim policy. Delete this claim using foreground deletion so that unresolved dependents keep the claim visible:
    ```bash
    kubectl delete sandboxclaim <name> -n <namespace> --cascade=foreground --wait=false
    ```

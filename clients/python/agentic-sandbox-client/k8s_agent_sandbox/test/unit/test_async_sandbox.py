@@ -626,6 +626,25 @@ class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
         await sandbox.terminate()
         self.assertEqual(helper.delete_sandbox_claim.await_count, 1)
 
+    async def test_terminate_wait_uses_the_waiting_delete(self):
+        sandbox, helper = self._build_sandbox()
+        helper.delete_sandbox_claim_and_wait = AsyncMock()
+
+        await sandbox.terminate(wait=True, timeout=7)
+
+        helper.delete_sandbox_claim_and_wait.assert_awaited_once_with("my-claim", "demo", 7)
+        helper.delete_sandbox_claim.assert_not_awaited()
+        self.assertIsNone(sandbox.claim_name)
+
+    async def test_terminate_wait_timeout_preserves_claim_name_for_retry(self):
+        sandbox, helper = self._build_sandbox()
+        helper.delete_sandbox_claim_and_wait = AsyncMock(side_effect=TimeoutError("still there"))
+
+        with self.assertRaises(TimeoutError):
+            await sandbox.terminate(wait=True)
+
+        self.assertEqual(sandbox.claim_name, "my-claim")
+
     async def test_failed_terminate_preserves_claim_name_for_retry(self):
         sandbox, helper = self._build_sandbox()
 

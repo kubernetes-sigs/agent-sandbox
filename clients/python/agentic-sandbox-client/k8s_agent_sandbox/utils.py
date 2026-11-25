@@ -142,6 +142,30 @@ def construct_sandbox_claim_lifecycle_spec(
     return lifecycle
 
 
+def claim_uid(claim: Mapping[str, Any] | None) -> str | None:
+    """Returns the UID of a SandboxClaim object, or ``None`` if it is missing."""
+    if not claim:
+        return None
+    uid = (claim.get("metadata") or {}).get("uid")
+    return uid if isinstance(uid, str) and uid else None
+
+
+def claim_delete_options(
+    expected_uid: str | None, foreground: bool, *, options: Callable[..., Any], preconditions: Callable[..., Any],
+) -> Any | None:
+    """Builds the delete body for a SandboxClaim, or ``None`` when no option is set.
+
+    The sync and async Kubernetes clients ship separate ``V1DeleteOptions`` and
+    ``V1Preconditions`` classes, so the caller passes in the ones it uses.
+    """
+    kwargs: dict[str, Any] = {}
+    if expected_uid is not None:
+        kwargs["preconditions"] = preconditions(uid=expected_uid)
+    if foreground:
+        kwargs["propagation_policy"] = "Foreground"
+    return options(**kwargs) if kwargs else None
+
+
 def select_pod_ip(ips: Sequence[object] | None) -> str | None:
     """Selects a prioritized and normalized Pod IP address from a list of IPs.
 

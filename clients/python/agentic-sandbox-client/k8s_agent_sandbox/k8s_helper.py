@@ -23,6 +23,8 @@ import urllib3.exceptions
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .models import AdditionalPodMetadata
 from .utils import (
+    claim_delete_options,
+    claim_uid,
     construct_sandbox_claim_env_spec,
     current_not_ready,
     is_valid_gateway_hostname,
@@ -33,6 +35,7 @@ from .constants import (
     CLAIM_API_GROUP,
     CLAIM_API_VERSION,
     CLAIM_PLURAL_NAME,
+    CLAIM_DELETE_POLL_INTERVAL,
     TERMINAL_CLAIM_READY_REASONS,
     CLIENT_REQUEST_TIME_ANNOTATION,
     GATEWAY_API_GROUP,
@@ -377,7 +380,7 @@ class K8sHelper:
 
     def delete_sandbox_claim(
         self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None,
-        *, expected_uid: str | None = None,
+        *, expected_uid: str | None = None, foreground: bool = False,
     ) -> None:
         """Deletes a SandboxClaim custom resource.
 
@@ -385,12 +388,16 @@ class K8sHelper:
             _request_timeout: Optional timeout (seconds, or a ``(connect, read)``
                 pair) forwarded to the underlying urllib3-based request.
             expected_uid: If provided, delete only the Claim with this UID.
+            foreground: Delete with foreground propagation, so the Claim stays
+                until the dependents the garbage collector knows about are gone.
         """
         delete_kwargs: dict[str, Any] = {}
-        if expected_uid is not None:
-            delete_kwargs["body"] = client.V1DeleteOptions(
-                preconditions=client.V1Preconditions(uid=expected_uid)
-            )
+        body = claim_delete_options(
+            expected_uid, foreground,
+            options=client.V1DeleteOptions, preconditions=client.V1Preconditions,
+        )
+        if body is not None:
+            delete_kwargs["body"] = body
         try:
             self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -406,6 +413,29 @@ class K8sHelper:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
+
+    def delete_sandbox_claim_and_wait(self, name: str, namespace: str, timeout: float) -> None:
+        """Deletes a SandboxClaim in the foreground and waits until it is gone.
+
+        Raises ``TimeoutError`` if the Claim still exists after ``timeout``
+        seconds. The Claim stays in place so the caller can retry.
+        """
+        deadline = time.monotonic() + timeout
+        claim = self.get_sandbox_claim(name, namespace)
+        uid = claim_uid(claim)
+        if uid is None:
+            return
+        try:
+            self.delete_sandbox_claim(name, namespace, expected_uid=uid, foreground=True)
+        except client.ApiException as e:
+            if e.status == 409:
+                # The UID precondition failed, so a new Claim replaced the one we meant to delete.
+                return
+            raise
+        while claim_uid(self.get_sandbox_claim(name, namespace)) == uid:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"SandboxClaim '{name}' was not deleted within {timeout} seconds.")
+            time.sleep(CLAIM_DELETE_POLL_INTERVAL)
 
     def patch_sandbox_operating_mode(
         self, name: str, namespace: str, mode: str, uid: str,

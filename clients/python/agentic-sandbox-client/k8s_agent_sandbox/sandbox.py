@@ -320,7 +320,7 @@ class Sandbox:
         self._is_closed = True
         logger.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
-    def terminate(self) -> None:
+    def terminate(self, *, wait: bool = False, timeout: float = 180) -> None:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 
@@ -328,6 +328,12 @@ class Sandbox:
         cleared so later calls are a local no-op and do not issue another DELETE.
         If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
         404 as success rather than raising.
+
+        Args:
+            wait: Delete the claim in the foreground and wait until it is gone.
+                Needs ``get`` on SandboxClaims.
+            timeout: Seconds to wait. On expiry, raises ``TimeoutError`` and
+                keeps ``claim_name`` so you can retry.
         """
         # Close the client side connection and trace manager lifecycle
         self.close_connection()
@@ -336,7 +342,10 @@ class Sandbox:
             # Already deleted (or never successfully created a claim).
             return
 
-        self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+        if wait:
+            self.k8s_helper.delete_sandbox_claim_and_wait(self.claim_name, self.namespace, timeout)
+        else:
+            self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
         # The client stops tracking the handle here because its claim is gone. Call
         # _on_terminated before clearing claim_name, because that name is the client's key.

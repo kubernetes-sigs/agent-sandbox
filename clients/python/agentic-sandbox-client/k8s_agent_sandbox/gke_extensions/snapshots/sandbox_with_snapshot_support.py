@@ -577,7 +577,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 error_code=ERROR_CODE,
             )
 
-    def terminate(self) -> None:
+    def terminate(self, *, wait: bool = False, timeout: float = 180) -> None:
         """
         Cleans up the manually generated trigger resources and terminates the Sandbox.
         """
@@ -585,5 +585,5 @@ class SandboxWithSnapshotSupport(Sandbox):
             if self._snapshots:
                 self._snapshots.delete_manual_triggers()
         finally:
-            super().terminate()
+            super().terminate(wait=wait, timeout=timeout)
             self._snapshots = None

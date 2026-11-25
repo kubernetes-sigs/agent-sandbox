@@ -536,6 +536,24 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
         sandbox.terminate()
         self.assertEqual(helper.delete_sandbox_claim.call_count, 1)
 
+    def test_terminate_wait_uses_the_waiting_delete(self):
+        sandbox, helper = self._build_sandbox()
+
+        sandbox.terminate(wait=True, timeout=7)
+
+        helper.delete_sandbox_claim_and_wait.assert_called_once_with("my-claim", "demo", 7)
+        helper.delete_sandbox_claim.assert_not_called()
+        self.assertIsNone(sandbox.claim_name)
+
+    def test_terminate_wait_timeout_preserves_claim_name_for_retry(self):
+        sandbox, helper = self._build_sandbox()
+        helper.delete_sandbox_claim_and_wait.side_effect = TimeoutError("still there")
+
+        with self.assertRaises(TimeoutError):
+            sandbox.terminate(wait=True)
+
+        self.assertEqual(sandbox.claim_name, "my-claim")
+
     def test_failed_terminate_preserves_claim_name_for_retry(self):
         """When delete_sandbox_claim raises, claim_name must NOT be cleared —
         otherwise a transient 5xx / network blip would hide the error and

@@ -875,6 +875,18 @@ seconds, 180 by default. `AsyncSandbox` provides the same methods with `await`.
 For snapshot-backed suspension on GKE, use the
 [GKE snapshot extension](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/python/agentic-sandbox-client/k8s_agent_sandbox/gke_extensions/snapshots/README.md).
 
+## Waiting for deletion
+
+`terminate()` returns once the API server accepts the delete. To wait until the
+SandboxClaim is gone, pass `wait=True`. The claim is deleted in the foreground.
+
+```python
+sandbox.terminate(wait=True, timeout=60)
+```
+
+This needs `get` on SandboxClaims. On timeout it raises `TimeoutError` and keeps
+the handle, so you can call it again. `AsyncSandbox` works the same with `await`.
+
 ## Testing
 
 A test script is included to verify the full lifecycle (Creation -> Execution -> File I/O -> Cleanup).

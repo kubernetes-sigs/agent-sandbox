@@ -577,6 +577,52 @@ class TestAsyncK8sHelperDeleteSandboxClaim(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status, 403)
 
 
+class TestAsyncK8sHelperDeleteSandboxClaimAndWait(unittest.IsolatedAsyncioTestCase):
+
+    async def asyncSetUp(self):
+        self.helper = AsyncK8sHelper()
+        self.helper._initialized = True
+        self.helper.custom_objects_api = MagicMock()
+        self.helper.custom_objects_api.delete_namespaced_custom_object = AsyncMock()
+        sleep = patch("k8s_agent_sandbox.async_k8s_helper.asyncio.sleep", new_callable=AsyncMock)
+        self.sleep = sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def _gets(self, *results):
+        self.helper.custom_objects_api.get_namespaced_custom_object = AsyncMock(side_effect=list(results))
+
+    async def test_deletes_in_foreground_by_uid_and_waits_until_gone(self):
+        self._gets({"metadata": {"uid": "u1"}}, {"metadata": {"uid": "u1"}}, client.ApiException(status=404))
+        await self.helper.delete_sandbox_claim_and_wait("claim", "default", 30)
+
+        body = self.helper.custom_objects_api.delete_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body.propagation_policy, "Foreground")
+        self.assertEqual(body.preconditions.uid, "u1")
+        self.assertEqual(self.sleep.await_count, 1)
+
+    async def test_replacement_with_same_name_ends_the_wait(self):
+        self._gets({"metadata": {"uid": "u1"}}, {"metadata": {"uid": "u2"}})
+        await self.helper.delete_sandbox_claim_and_wait("claim", "default", 30)
+        self.sleep.assert_not_awaited()
+
+    async def test_missing_claim_is_not_deleted(self):
+        self._gets(client.ApiException(status=404))
+        await self.helper.delete_sandbox_claim_and_wait("claim", "default", 30)
+        self.helper.custom_objects_api.delete_namespaced_custom_object.assert_not_awaited()
+
+    async def test_uid_conflict_means_claim_was_replaced(self):
+        self._gets({"metadata": {"uid": "u1"}})
+        self.helper.custom_objects_api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        await self.helper.delete_sandbox_claim_and_wait("claim", "default", 30)
+        self.helper.custom_objects_api.get_namespaced_custom_object.assert_awaited_once()
+
+    async def test_times_out_while_claim_remains(self):
+        self.helper.custom_objects_api.get_namespaced_custom_object = AsyncMock(
+            return_value={"metadata": {"uid": "u1"}})
+        with self.assertRaises(TimeoutError):
+            await self.helper.delete_sandbox_claim_and_wait("claim", "default", 0)
+
+
 class TestAsyncK8sHelperWaitForGatewayIP(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):

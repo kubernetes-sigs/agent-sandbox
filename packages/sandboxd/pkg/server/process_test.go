@@ -26,6 +26,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -347,6 +348,90 @@ func TestStartClosesOutputPipes(t *testing.T) {
 	require.Equal(t, before, pipeCount(), "completed streams must close both output readers")
 }
 
+// TestStartEndsWhenADetachedChildHoldsTheOutputPipe guards the reason
+// pipeDrainGrace exists: a background child that inherits stdout, or the PTY,
+// and keeps it open past the command's exit must not hold the stream open,
+// whether it is silent or keeps writing to a client that reads more slowly
+// than it writes.
+func TestStartEndsWhenADetachedChildHoldsTheOutputPipe(t *testing.T) {
+	tests := []struct {
+		name       string
+		background string
+		// readDelay paces the client after each message; 2 ms per 4 KiB
+		// chunk is about 2 MB/s, slower than yes writes.
+		readDelay  time.Duration
+		pty        bool
+		wantPrefix string
+		// slack is how long past pipeDrainGrace the stream may stay open.
+		// Through a PTY the client first reads up to ptyQueueBound of
+		// output at its own pace, which takes seconds on a busy runner.
+		slack time.Duration
+	}{
+		{name: "silent", background: "sleep 30", wantPrefix: "before", slack: 5 * time.Second},
+		{
+			name: "writing to a slow client", background: "yes",
+			readDelay: 2 * time.Millisecond, wantPrefix: "beforey\n", slack: 5 * time.Second,
+		},
+		// The child ignores the SIGHUP the session leader's exit sends it.
+		{
+			name: "writing to a slow client through a PTY", background: "trap '' HUP; yes",
+			readDelay: 2 * time.Millisecond, pty: true, wantPrefix: "beforey\r\n", slack: 15 * time.Second,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			client := newProcessClient(t, root)
+			pidFile := filepath.Join(root, "child.pid")
+			t.Cleanup(func() {
+				data, err := os.ReadFile(pidFile)
+				if err != nil {
+					return
+				}
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+					_ = syscall.Kill(pid, syscall.SIGKILL)
+				}
+			})
+
+			// The deadline is well past the bound, so a stream the child
+			// keeps open fails here rather than at the test timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), pipeDrainGrace+tc.slack+10*time.Second)
+			defer cancel()
+			started := time.Now()
+			req := &processv1.StartRequest{
+				Config: &processv1.ProcessConfig{Command: []string{
+					"sh", "-c", "printf before; " + tc.background + " & echo $! > child.pid; exit 0",
+				}},
+			}
+			if tc.pty {
+				req.Pty = &processv1.PTY{Cols: 80, Rows: 24}
+			}
+			stream, err := client.Start(ctx, req)
+			require.NoError(t, err)
+
+			var head bytes.Buffer
+			var exit *int32
+			for exit == nil {
+				msg, err := stream.Recv()
+				require.NoError(t, err, "stream still open after %v", time.Since(started))
+				if out := msg.GetStdout(); head.Len() < 64 {
+					head.Write(out)
+				}
+				if e := msg.GetExit(); e != nil {
+					code := e.GetExitCode()
+					exit = &code
+				}
+				time.Sleep(tc.readDelay)
+			}
+			require.Equal(t, int32(0), *exit)
+			require.True(t, strings.HasPrefix(head.String(), tc.wantPrefix), "stdout starts %q", head.String())
+			require.Less(t, time.Since(started), pipeDrainGrace+tc.slack,
+				"the background child's open pipe must not hold the stream open")
+		})
+	}
+}
+
 func TestWriteStdinAndEOF(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 	ctx := testCtx(t)
@@ -535,6 +620,165 @@ func TestStartWithPTY_DeliversAllOutputOfShortLivedProcess(t *testing.T) {
 			lines := strings.Split(strings.TrimRight(res.stdout.String(), "\r\n"), "\r\n")
 			require.Len(t, lines, 2000, "last line: %q", lines[len(lines)-1])
 		})
+	}
+}
+
+// gatedStartStream is a Start stream that models a client that stops reading.
+// The first output event waits for release. Once stallAt bytes of output have
+// been delivered, the next output event waits for stall. Init and Exit events
+// pass through.
+type gatedStartStream struct {
+	grpc.ServerStream
+	ctx     context.Context
+	release chan struct{}
+	stallAt int
+	stall   time.Duration
+	stalled bool
+	stdout  bytes.Buffer
+	exit    *int32
+}
+
+func (s *gatedStartStream) Context() context.Context { return s.ctx }
+
+func (s *gatedStartStream) Send(resp *processv1.StartResponse) error {
+	if out := resp.GetStdout(); out != nil {
+		<-s.release
+		if s.stall > 0 && !s.stalled && s.stdout.Len() >= s.stallAt {
+			s.stalled = true
+			time.Sleep(s.stall)
+		}
+		s.stdout.Write(out)
+	}
+	if exit := resp.GetExit(); exit != nil {
+		code := exit.GetExitCode()
+		s.exit = &code
+	}
+	return nil
+}
+
+// TestStartDeliversOutputTailToASlowConsumer guards against Start discarding
+// output the child wrote before it exited when the client reads slowly. The
+// reader takes one chunk and blocks in Send, the rest of the output stays in
+// the pipe or PTY, and the child exits. The first output event is released
+// only after Start has recorded the exit, so the post-exit limit applies. The
+// client then stays idle, or stalls partway through the tail, for longer than
+// pipeDrainGrace. Start must still
+// deliver every byte before the ExitEvent.
+func TestStartDeliversOutputTailToASlowConsumer(t *testing.T) {
+	const chunk = 64
+	tests := []struct {
+		name string
+		pty  bool
+		// total stays within what the pipe or PTY holds while the reader
+		// waits, so the child exits. One page is the smallest pipe Linux
+		// grants, even to a user over pipe-user-pages-soft.
+		total int
+		// idle is how long the first output event waits after Start
+		// records the child's exit.
+		idle time.Duration
+		// stallAt and stall make the client stall again partway through the
+		// tail.
+		stallAt   int
+		stall     time.Duration
+		linuxOnly bool
+	}{
+		{name: "pipe", total: 4096, idle: pipeDrainGrace + 2*time.Second},
+		// 1 KiB fits in the PTY on Linux and macOS.
+		{name: "PTY", pty: true, total: 1024, idle: pipeDrainGrace + 2*time.Second},
+		// 8 KiB is more than the line discipline's 4 KiB read buffer, which
+		// is all that TIOCINQ counts. The rest waits in the PTY's flip buffer
+		// (a Linux PTY holds 10 to 19 KiB in all, depending on the write
+		// size). The client stalls at 6 KiB, past what the line discipline
+		// held.
+		{name: "PTY past the line discipline buffer", pty: true, total: 8 * 1024,
+			stallAt: 6 * 1024, stall: pipeDrainGrace + 2*time.Second, linuxOnly: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.linuxOnly && runtime.GOOS != "linux" {
+				t.Skip("sized for the Linux PTY buffers")
+			}
+			t.Parallel()
+			root := t.TempDir()
+			srv := NewProcessServer(root, processmanager.NewProcessRegistry(), chunk, logr.Discard())
+			exited := make(chan struct{})
+			srv.afterChildExited = func() { close(exited) }
+			stream := &gatedStartStream{
+				ctx: testCtx(t), release: make(chan struct{}), stallAt: tc.stallAt, stall: tc.stall,
+			}
+			req := &processv1.StartRequest{
+				Config: &processv1.ProcessConfig{Command: []string{
+					"head", "-c", strconv.Itoa(tc.total), "/dev/zero",
+				}},
+			}
+			if tc.pty {
+				req.Pty = &processv1.PTY{Cols: 80, Rows: 24}
+			}
+
+			finished := make(chan struct{})
+			var startErr error
+			go func() {
+				defer close(finished)
+				startErr = srv.Start(req, stream)
+			}()
+			release := sync.OnceFunc(func() { close(stream.release) })
+			t.Cleanup(func() {
+				release()
+				<-finished
+			})
+
+			select {
+			case <-exited:
+			case <-time.After(10 * time.Second):
+				t.Fatal("child never finished writing")
+			}
+			time.Sleep(tc.idle)
+			release()
+			<-finished
+
+			require.NoError(t, startErr)
+			require.NotNil(t, stream.exit, "no ExitEvent")
+			require.Equal(t, int32(0), *stream.exit)
+			require.Equal(t, tc.total, stream.stdout.Len(), "Start reported exit 0 with part of the output missing")
+		})
+	}
+}
+
+// TestWaitForReadersWaitsForASendThatBeginsAsTheGraceEnds guards against the
+// grace closing the readers while a reader sends output written before the
+// child exited. The reader begins its send after waitForReaders last checked
+// for one, just as the grace runs out, so the timer and the tracker's change
+// are both ready. select picks between them at random, so the case repeats.
+func TestWaitForReadersWaitsForASendThatBeginsAsTheGraceEnds(t *testing.T) {
+	t.Parallel()
+	for range 64 {
+		sends := newSendTracker()
+		out := sends.track(nil, 1<<20)
+		sends.childExited(0)
+		var readers sync.WaitGroup
+		readers.Add(1)
+
+		timers := 0
+		after := func(time.Duration) <-chan time.Time {
+			timers++
+			if timers == 1 {
+				counted := sends.begin(out, 1)
+				require.True(t, counted, "output written before the exit pauses the grace")
+				go func() {
+					time.Sleep(time.Millisecond)
+					sends.end(counted)
+				}()
+			}
+			expired := make(chan time.Time, 1)
+			expired <- time.Now()
+			return expired
+		}
+		var closedWhileSending bool
+		waitForReaders(&readers, sends, after, func() {
+			closedWhileSending, _ = sends.state()
+			readers.Done()
+		})
+		require.False(t, closedWhileSending, "the grace closed the readers during a counted send")
 	}
 }
 

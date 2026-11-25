@@ -35,44 +35,49 @@ Examples:
 EOF
 }
 
-# parse arguments in case statement and include argument -i or --sandbox-router-image to specify custom image for sandbox-router
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -h|--help) usage; exit 0 ;;
-        -i|--sandbox-router-image) SANDBOX_ROUTER_IMAGE="$2"; shift ;;
+        -i|--sandbox-router-image)
+            if [[ "$#" -lt 2 || -z "$2" || "$2" == -* ]]; then
+                echo "$1 requires an image value." >&2
+                usage
+                exit 1
+            fi
+            SANDBOX_ROUTER_IMAGE="$2"
+            shift
+            ;;
         *) echo "Unknown parameter passed: $1"; usage; exit 1 ;;
     esac
     shift
 done
 
-# if sandbox-router-image is not set, exit with error
-if [[ -z "$SANDBOX_ROUTER_IMAGE" ]]; then
-    echo "No sandbox-router image specified."
-    usage;
+if [[ -z "${SANDBOX_ROUTER_IMAGE:-}" ]]; then
+    echo "No sandbox-router image specified." >&2
+    usage
     exit 1
 fi
 
-# get root directory of this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-export KUBECONFIG="${SCRIPT_DIR}/kubeconfig"
+# az-provision.sh writes this kubeconfig. Preserve an explicit cluster selection.
+export KUBECONFIG="${KUBECONFIG:-${SCRIPT_DIR}/kubeconfig}"
 
-# install agent sandbox
-export VERSION="v1.0.0"
+VERSION="${VERSION:-v1.0.12}"
 
 # install only the core components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml
+kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml"
 
 # install the extensions components:
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml
+kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml"
 
-# install sandbox-router
-pushd ../../../clients/python/agentic-sandbox-client/sandbox-router
-# substitute the router image placeholder
-ROUTER_IMAGE="${SANDBOX_ROUTER_IMAGE}" envsubst '$ROUTER_IMAGE' < ./sandbox_router.yaml | kubectl apply -f -
-popd
+ROUTER_DIR="${REPO_ROOT}/sandbox-router/deploy"
+kubectl apply -f "${ROUTER_DIR}/serviceaccount.yaml" \
+    -f "${ROUTER_DIR}/rbac.yaml" \
+    -f "${ROUTER_DIR}/service.yaml"
+# Set the image before applying so the deployment never pulls the placeholder tag.
+kubectl set image --local -f "${ROUTER_DIR}/deployment.yaml" \
+    "sandbox-router=${SANDBOX_ROUTER_IMAGE}" -o yaml | kubectl apply -f -
 
-# install vscode-sandbox with kata-mshv overlay
-pushd ../../vscode-sandbox
-kubectl apply -k ./overlays/kata-mshv
-popd
+kubectl apply -k "${SCRIPT_DIR}/../overlays/kata-mshv"

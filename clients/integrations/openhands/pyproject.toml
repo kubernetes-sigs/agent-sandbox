@@ -33,6 +33,10 @@ dependencies = [
     # imported directly so the advisory version check can narrow its error
     # handling to transport/HTTP failures.
     "httpx",
+    # openhands-sdk 1.63.1 and later import authlib in `openhands.sdk.llm.auth`
+    # without declaring it, so `import openhands.sdk` fails in a clean install.
+    # Drop this once the SDK declares the dependency itself.
+    "authlib",
 ]
 
 [project.urls]

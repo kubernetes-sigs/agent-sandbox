@@ -434,10 +434,11 @@ type stuckBackoffState struct {
 	// period of it belong to the same round: a replacement created at or after
 	// it cannot be judged stuck sooner than one grace period later.
 	roundStart time.Time
-	// lastBusy is the last time the pool had a member that was not Ready, or
-	// the last time it replaced one. The history is forgotten only after the
-	// pool has been idle for a long while; a replacement that waits to be
-	// scheduled or created for longer than one round keeps the pool busy.
+	// lastBusy is the last time the pool had a member that was not Ready past
+	// its grace period, or the last time it replaced one. The history is
+	// forgotten only after the pool has been idle for a long while; a
+	// replacement that waits to be scheduled for longer than one round keeps the
+	// pool busy, while a young member still warming up does not.
 	lastBusy time.Time
 }
 
@@ -479,8 +480,11 @@ func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName
 		delete(r.stuckBackoff, key)
 		return 0, 0
 	}
+	// Only a member past its grace period counts as busy. One that is still
+	// warming is normal: a pool whose Ready members are claimed within seconds
+	// always has a young replacement, and must still reach idle.
 	for i := range members {
-		if !isSandboxReady(&members[i]) {
+		if !isSandboxReady(&members[i]) && !members[i].CreationTimestamp.IsZero() && now.Sub(readinessGraceStart(&members[i])) > grace {
 			st.lastBusy = now
 			break
 		}

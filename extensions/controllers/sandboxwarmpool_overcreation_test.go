@@ -1692,14 +1692,26 @@ func TestObserveStuckBackoff(t *testing.T) {
 	// A replacement that waits hours for a node keeps the pool busy, so the
 	// history survives until it is stuck. The pool is idle only after it has
 	// had no non-Ready member for a while.
-	notReady := []sandboxv1beta1.Sandbox{{Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
-		Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
-	}}}}}
+	notReadySince := func(created time.Time) []sandboxv1beta1.Sandbox {
+		return []sandboxv1beta1.Sandbox{{
+			ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.Time{Time: created}},
+			Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+			}}},
+		}}
+	}
+	later := base.Add(3 * time.Hour)
 	r := seed()
-	require.Equal(t, 2, observe(r, "hash-a", notReady, base.Add(3*time.Hour)),
-		"a non-Ready member means the pool is not idle")
-	require.Equal(t, 2, observe(r, "hash-a", nil, base.Add(3*time.Hour+time.Minute)))
+	require.Equal(t, 2, observe(r, "hash-a", notReadySince(base.Add(time.Hour)), later),
+		"a member that is not Ready past its grace period means the pool is not idle")
+	require.Equal(t, 2, observe(r, "hash-a", nil, later.Add(time.Minute)))
 	require.Equal(t, 0, observe(r, "hash-a", nil, base.Add(4*time.Hour)), "idle for long enough")
+
+	// A member still inside its grace period is normal warm-up, not a sign of
+	// trouble. A pool whose Ready members are claimed within seconds always has
+	// one, and must still go idle.
+	require.Equal(t, 0, observe(seed(), "hash-a", notReadySince(later.Add(-10*time.Second)), later),
+		"a young member does not keep the failure history alive")
 
 	// A replacement that only just turned Ready keeps the history and asks for a recheck.
 	r = seed()

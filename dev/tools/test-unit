@@ -477,7 +477,8 @@ def main():
 
     # junit_ prefix + $ARTIFACTS: prow spyglass only renders junit files
     # matching artifacts/junit*.xml. Local runs fall back to bin/.
-    artifact_dir = os.getenv("ARTIFACTS") or os.path.join(repo_root, "bin")
+    artifact_dir = os.path.abspath(
+        os.getenv("ARTIFACTS") or os.path.join(repo_root, "bin"))
     os.makedirs(artifact_dir, exist_ok=True)
 
     go_rc = run_go_tests(repo_root, artifact_dir)

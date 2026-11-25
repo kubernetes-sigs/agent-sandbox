@@ -3529,3 +3529,131 @@ func TestReconcileFlushesStatusOnReconcilePoolError(t *testing.T) {
 		require.Zero(t, statusPatches.Load(), "updateStatus must be a no-op when reconcilePool fails before mutating status")
 	})
 }
+
+// A SandboxClaim can adopt a pool member after the pool listed it. The pool's
+// delete of that member must then fail instead of deleting the claim's workload.
+func TestReconcilePool_SkipsDeleteOfSandboxAdoptedAfterList(t *testing.T) {
+	type member struct {
+		suffix      string
+		age         time.Duration
+		ready       bool
+		oldTemplate bool
+	}
+	testCases := []struct {
+		name     string
+		recreate bool
+		members  []member
+		victim   string
+		survivor string
+	}{
+		{
+			name:     "excess scale-down",
+			members:  []member{{suffix: "-a", age: 10 * time.Minute, ready: true}, {suffix: "-b", age: 5 * time.Minute, ready: true}},
+			victim:   "test-pool-b",
+			survivor: "test-pool-a",
+		},
+		{
+			name:     "stuck past readiness grace",
+			members:  []member{{suffix: "-s", age: 10 * time.Minute}, {suffix: "-y", age: time.Minute}},
+			victim:   "test-pool-s",
+			survivor: "test-pool-y",
+		},
+		{
+			name:     "stale under Recreate",
+			recreate: true,
+			members:  []member{{suffix: "-x", age: 10 * time.Minute, ready: true, oldTemplate: true}, {suffix: "-f", age: 5 * time.Minute, ready: true}},
+			victim:   "test-pool-x",
+			survivor: "test-pool-f",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := newTestScheme()
+			const poolName = "test-pool"
+			const poolNamespace = "default"
+			poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+			warmPool := newTestPool(poolName, "test-template", 1)
+			if tc.recreate {
+				warmPool.Spec.UpdateStrategy = &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+					Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+				}
+			}
+			oldTemplate := createTemplate(poolNamespace)
+			template := oldTemplate.DeepCopy()
+			if tc.recreate {
+				template.Spec.PodTemplate.Spec.Containers[0].Image = "test-image-v2"
+			}
+
+			objs := []runtime.Object{warmPool, template}
+			for _, m := range tc.members {
+				src := template
+				if m.oldTemplate {
+					src = oldTemplate
+				}
+				sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, src, m.suffix)
+				sb.UID = types.UID("uid" + m.suffix)
+				sb.CreationTimestamp = metav1.Time{Time: time.Now().Add(-m.age)}
+				sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] = sandboxv1beta1.SandboxLaunchTypeWarm
+				sb.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: extensionsv1beta1.GroupVersion.String(),
+					Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+					Name:       poolName,
+					UID:        warmPool.UID,
+					Controller: new(true),
+				}}
+				if m.ready {
+					sb.Status.Conditions = []metav1.Condition{{
+						Type:   string(sandboxv1beta1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					}}
+				}
+				objs = append(objs, sb)
+			}
+
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: poolNamespace, UID: "claim-uid"},
+				Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: poolName}},
+			}
+			var adopted atomic.Bool
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+				WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+				WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+				WithRuntimeObjects(objs...).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						if obj.GetName() == tc.victim && adopted.CompareAndSwap(false, true) {
+							live := &sandboxv1beta1.Sandbox{}
+							if err := c.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+								return err
+							}
+							if err := (&SandboxClaimReconciler{Client: c, Scheme: scheme}).completeAdoption(ctx, claim, live); err != nil {
+								return err
+							}
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				}).
+				Build()
+
+			r := &SandboxWarmPoolReconciler{
+				Client:       c,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			}
+			poolKey := types.NamespacedName{Namespace: poolNamespace, Name: poolName}
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: poolKey})
+			require.NoError(t, err)
+
+			victim := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, c.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: tc.victim}, victim))
+			require.True(t, metav1.IsControlledBy(victim, claim), "the claim must keep the adopted sandbox")
+			require.True(t, r.exp().SatisfiedExpectations(poolKey), "a failed delete must roll back its expectation")
+			require.Equal(t, []string{tc.survivor}, poolSandboxNames(ctx, t, c, poolNamespace, poolNameHash))
+		})
+	}
+}

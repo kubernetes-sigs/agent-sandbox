@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -317,4 +319,51 @@ func TestLegacyOwnerRefreshBypassesPodWriteBehind(t *testing.T) {
 	live := &corev1.Pod{}
 	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), live))
 	require.Equal(t, sandboxv1beta1.GroupVersion.String(), live.OwnerReferences[0].APIVersion)
+}
+
+func TestExpiredSandboxDeleteWaitsForPVCOwnerRepair(t *testing.T) {
+	ctx := t.Context()
+	past := metav1.NewTime(time.Now().Add(-time.Hour))
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: sandboxUID},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "workspace"}}}},
+			Lifecycle:        sandboxv1beta1.Lifecycle{ShutdownTime: &past, ShutdownPolicy: new(sandboxv1beta1.ShutdownPolicyDelete)},
+		},
+	}
+	setSandboxExpiredCondition(sandbox)
+	owner := sandboxControllerRef(sandbox.Name)
+	owner.APIVersion = "agents.x-k8s.io/v1alpha1"
+	metadata := metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace, OwnerReferences: []metav1.OwnerReference{owner}}
+	pod := &corev1.Pod{ObjectMeta: *metadata.DeepCopy()}
+	service := &corev1.Service{ObjectMeta: *metadata.DeepCopy()}
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: *metadata.DeepCopy()}
+	pvc.Name = "workspace-" + sandbox.Name
+	raw := newFakeClient(sandbox, pod, service, pvc)
+	failRepair := true
+	c := interceptor.NewClient(raw, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*corev1.PersistentVolumeClaim); ok && failRepair {
+				return k8errors.NewConflict(schema.GroupResource{Resource: "persistentvolumeclaims"}, obj.GetName(), errors.New("concurrent owner change"))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), Recorder: events.NewFakeRecorder(10)}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)}
+	_, err := r.Reconcile(ctx, request)
+	require.True(t, k8errors.IsConflict(err), "the repair failure must trigger retry: %v", err)
+	require.NoError(t, raw.Get(ctx, request.NamespacedName, &sandboxv1beta1.Sandbox{}), "retain the owner until its PVC references can be repaired")
+	require.True(t, k8errors.IsNotFound(raw.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})), "Pod cleanup must still proceed")
+	require.True(t, k8errors.IsNotFound(raw.Get(ctx, client.ObjectKeyFromObject(service), &corev1.Service{})), "Service cleanup must still proceed")
+	livePVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(pvc), livePVC))
+	require.Equal(t, "agents.x-k8s.io/v1alpha1", livePVC.OwnerReferences[0].APIVersion)
+
+	failRepair = false
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.True(t, k8errors.IsNotFound(raw.Get(ctx, request.NamespacedName, &sandboxv1beta1.Sandbox{})), "delete the owner once repair succeeds")
+	require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(pvc), livePVC))
+	require.Equal(t, sandboxv1beta1.GroupVersion.String(), livePVC.OwnerReferences[0].APIVersion)
 }

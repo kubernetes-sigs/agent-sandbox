@@ -470,9 +470,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 
 		logger.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
-		var expiryErr error
-		sandboxDeleted, expiryErr = r.handleSandboxExpiry(ctx, sandbox)
-		err = errors.Join(err, expiryErr)
+		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox, err)
 	} else {
 		// Per-pass deferral view for the recoverable pod metadata patch
 		// (--sandbox-write-behind-window > 0). The pod patch bound caps the
@@ -2420,9 +2418,9 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 }
 
 // handles sandbox expiry by deleting child resources and the sandbox itself if needed.
-func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (bool, error) {
+func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, ownerRefreshErr error) (bool, error) {
 	logger := log.FromContext(ctx)
-	var allErrors error
+	allErrors := ownerRefreshErr
 
 	// Delete pod only if owned by this sandbox
 	podName := resolvePodName(sandbox)
@@ -2471,7 +2469,9 @@ func (r *SandboxReconciler) handleSandboxExpiry(ctx context.Context, sandbox *sa
 		}
 	}
 
-	if sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1beta1.ShutdownPolicyDelete {
+	// Keep the owner available for retries until its PVC references are repaired.
+	// Pod and Service cleanup above still proceeds on a repair failure.
+	if ownerRefreshErr == nil && sandbox.Spec.ShutdownPolicy != nil && *sandbox.Spec.ShutdownPolicy == sandboxv1beta1.ShutdownPolicyDelete {
 		if err := r.Delete(ctx, sandbox); err != nil && !k8serrors.IsNotFound(err) {
 			allErrors = errors.Join(allErrors, fmt.Errorf("failed to delete sandbox: %w", err))
 		} else {

@@ -579,13 +579,17 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
 			r.exp().ExpectDeletion(poolKey, sb.UID)
-			if err := r.Delete(ctx, &sb); err != nil {
+			if err := r.deleteSandboxWithPreconditions(ctx, &sb); err != nil {
 				r.exp().DeletionObserved(poolKey, sb.UID)
 				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
-				// The sandbox still exists; keep counting it as active so the
-				// create path cannot overshoot spec.replicas.
-				healthySandboxes = append(healthySandboxes, sb)
+				if k8serrors.IsConflict(err) {
+					// The Sandbox may have left the pool. Count it only against
+					// creation until the next reconcile refreshes membership.
+					inactiveReplicas++
+				} else {
+					healthySandboxes = append(healthySandboxes, sb)
+				}
 				continue
 			}
 			// Successfully deleted: it now occupies capacity as terminating
@@ -770,7 +774,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
 				sb := &activeSandboxes[idx]
 				r.exp().ExpectDeletion(poolKey, sb.UID)
-				err := r.Delete(ctx, sb)
+				err := r.deleteSandboxWithPreconditions(ctx, sb)
 				if err == nil {
 					return nil
 				}
@@ -830,6 +834,15 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	}
 
 	return requeueAfter, allErrors
+}
+
+func (r *SandboxWarmPoolReconciler) deleteSandboxWithPreconditions(ctx context.Context, sb *sandboxv1beta1.Sandbox) error {
+	// A claim can take ownership after the pool lists the Sandbox.
+	// A conflict triggers a rate-limited retry through Reconcile.
+	return r.Delete(ctx, sb, client.Preconditions{
+		UID:             &sb.UID,
+		ResourceVersion: &sb.ResourceVersion,
+	})
 }
 
 // minNonZeroDuration returns the smaller of two requeue delays, treating zero
@@ -1062,21 +1075,20 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				if isControlledByPool {
 					r.exp().ExpectDeletion(poolKey, sb.UID)
 				}
-				if err := r.Delete(ctx, &sb); err != nil {
+				if err := r.deleteSandboxWithPreconditions(ctx, &sb); err != nil {
 					if isControlledByPool {
 						r.exp().DeletionObserved(poolKey, sb.UID)
 					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
-					if isControlledByPool {
+					if isControlledByPool && !k8serrors.IsConflict(err) {
 						// The delete failed, so the owned Sandbox still uses
 						// capacity. Keep it in active accounting so later
 						// delete paths can consume their expectations.
 						activeSandboxes = append(activeSandboxes, sb)
 					} else {
-						// Orphan deletes cannot be mapped back to the pool.
-						// Count the failed orphan as capacity, but keep it out
-						// of active paths that register deletion expectations.
+						// Count orphans and members with uncertain ownership
+						// against creation until the next reconcile.
 						inactiveReplicas++
 					}
 				} else {

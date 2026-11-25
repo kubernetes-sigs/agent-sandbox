@@ -37,6 +37,7 @@ explicit `X-Sandbox-Port`; see [Native gRPC](#native-grpc) and
 | `X-Sandbox-Namespace` | no | `default` | Must be ASCII letters / digits / hyphens, with at least one alphanumeric. |
 | `X-Sandbox-Port` | no | `8888` | Numeric. |
 | `X-Sandbox-Pod-IP` | no | — | When set, bypasses both cache and DNS and dials this IP directly. |
+| `X-Sandbox-Timeout` | no | `--proxy-timeout` | Per-request upstream deadline in decimal seconds, sent by the Go and Python SDKs from the caller's remaining request budget. The router caps it at `--proxy-timeout` and never extends the operator's limit. A non-numeric, non-finite, or non-positive value falls back to `--proxy-timeout`. Ignored for protocol upgrades and for native gRPC / gRPC-Web, which use `grpc-timeout` and `--grpc-proxy-timeout`. |
 
 Resolution priority (first match wins):
 
@@ -87,7 +88,8 @@ When the target sandbox can't be dialed (DNS doesn't resolve, or the pod isn't l
 Defaults: 3 retries (4 attempts total), 200 ms → 400 ms → 800 ms backoff. Tunable via `--upstream-max-retries`, `--upstream-retry-initial-delay`, `--upstream-retry-max-delay`. Set retries to `0` to disable.
 
 The HTTP retry budget never exceeds `--proxy-timeout`; the per-request context cuts
-it short. Native gRPC and gRPC-Web do not use this retry wrapper.
+it short, and a caller's `X-Sandbox-Timeout` can shorten it further. Native gRPC
+and gRPC-Web do not use this retry wrapper.
 
 ## Native gRPC
 
@@ -229,7 +231,7 @@ each other in the same browser profile.
 
 Two carve-outs that matter in practice:
 
-- **`--proxy-timeout` does NOT apply to upgraded connections.** A WebSocket is long-lived by design, so we cancel only the per-request context for non-upgraded HTTP; once the `101 Switching Protocols` response has gone back to the client, the connection's TCP keepalive is the liveness signal. Without this carve-out, the 180s default would tear down a healthy WebSocket at the 3-minute mark and the client would see WebSocket close `1006`.
+- **`--proxy-timeout` and `X-Sandbox-Timeout` do NOT apply to upgraded connections.** A WebSocket is long-lived by design, so we cancel only the per-request context for non-upgraded HTTP; once the `101 Switching Protocols` response has gone back to the client, the connection's TCP keepalive is the liveness signal. Without this carve-out, the 180s default would tear down a healthy WebSocket at the 3-minute mark and the client would see WebSocket close `1006`.
 - **`Origin` is stripped from upgrade requests.** Many WebSocket backends (vscode-server is the classic case; Jupyter behaves the same) validate `Origin` against `Host` for CSRF protection. The router rewrites `Host` to the upstream sandbox's address, so a client-supplied `Origin` pointing at the router's external hostname would mismatch and the backend would reject the upgrade — same `1006` symptom. Dropping `Origin` tells the backend "no Origin assertion available," which CSRF-aware backends typically allow for non-browser callers. Normal (non-upgrade) HTTP traffic preserves `Origin` so CORS preflights are unaffected.
 
 The router also sets `X-Forwarded-Host` / `X-Forwarded-Proto` / `X-Forwarded-For` on every outbound request (via `httputil.ReverseProxy`'s `SetXForwarded` helper), so upstream sandboxes can reconstruct the client-visible URL for self-links and redirects — important for browser-facing backends like Jupyter and vscode-server.
@@ -287,7 +289,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--tls-cipher-suites` | `""` (Go defaults) | Comma-separated Go cipher-suite names. Honors `TLS_CIPHER_SUITES`. Ignored when min version is TLS 1.3. |
 | `--mtls-mode` | `off` | `off` / `optional` / `required`. |
 | `--cluster-domain` | `cluster.local` | Honors `CLUSTER_DOMAIN` env var (Python parity). |
-| `--proxy-timeout` | `180s` | HTTP per-request upstream timeout (not gRPC). Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
+| `--proxy-timeout` | `180s` | HTTP per-request upstream timeout (not gRPC). Caps `X-Sandbox-Timeout` when the caller sends one. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
 | `--grpc-proxy-timeout` | `0s` | Native gRPC total-duration cap; zero means no router cap. CLI/YAML only. |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |

@@ -29,6 +29,7 @@ const (
 	HeaderSandboxNamespace = "X-Sandbox-Namespace"
 	HeaderSandboxPort      = "X-Sandbox-Port"
 	HeaderSandboxPodIP     = "X-Sandbox-Pod-Ip"
+	HeaderSandboxTimeout   = "X-Sandbox-Timeout"
 )
 
 // Defaults preserved from the Python router.

@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -513,21 +515,59 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Bound the upstream request lifetime by the configured proxy timeout,
-	// EXCEPT for protocol upgrades (WebSockets, raw TCP via CONNECT). An
-	// upgraded connection is long-lived by design — e.g. code-server holds
-	// a single WebSocket open for the whole editing session — and applying
-	// ProxyTimeout to it would tear down a healthy session at the timeout
-	// boundary (180s default → client sees WebSocket close 1006). Once the
-	// 101 handshake is done the connection's TCP keepalive is the
-	// liveness signal, not our handler context.
+	// Bound the upstream request lifetime by the caller's
+	// X-Sandbox-Timeout budget, capped at --proxy-timeout, EXCEPT for
+	// protocol upgrades (WebSockets, raw TCP via CONNECT). An upgraded
+	// connection is long-lived by design — e.g. code-server holds a
+	// single WebSocket open for the whole editing session — and applying
+	// either timeout to it would tear down a healthy session at the
+	// timeout boundary (180s default → client sees WebSocket close 1006).
+	// Once the 101 handshake is done the connection's TCP keepalive is
+	// the liveness signal, not our handler context.
 	ctx := r.Context()
 	if !upgrade && !grpcRequest {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, h.cfg.ProxyTimeout)
+		ctx, cancel = context.WithTimeout(ctx, h.sandboxTimeout(r))
 		defer cancel()
 	}
 	rp.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// sandboxTimeout returns the upstream request deadline for r. The Go and
+// Python SDKs send X-Sandbox-Timeout as the caller's remaining budget in
+// decimal seconds. The router honors it only to shorten requests: a budget
+// above --proxy-timeout is capped so a caller cannot extend the operator's
+// limit, and a missing or unusable value falls back to the configured
+// timeout.
+func (h *Handler) sandboxTimeout(r *http.Request) time.Duration {
+	raw := r.Header.Get(HeaderSandboxTimeout)
+	if raw == "" {
+		return h.cfg.ProxyTimeout
+	}
+	timeout, err := parseSandboxTimeout(raw, h.cfg.ProxyTimeout)
+	if err != nil {
+		observability.LoggerFromContext(r.Context(), h.log).V(1).Info(
+			"ignoring invalid X-Sandbox-Timeout; using --proxy-timeout",
+			"value", raw, "proxyTimeout", h.cfg.ProxyTimeout, "reason", err.Error())
+		return h.cfg.ProxyTimeout
+	}
+	return timeout
+}
+
+// parseSandboxTimeout parses a decimal number of seconds and caps the result
+// at max. It rejects zero, negative, NaN, and infinite values.
+func parseSandboxTimeout(raw string, max time.Duration) (time.Duration, error) {
+	seconds, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("not a decimal number: %w", err)
+	}
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 {
+		return 0, errors.New("must be a positive finite number of seconds")
+	}
+	if max > 0 && seconds >= max.Seconds() {
+		return max, nil
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 // resolveTarget parses the routing Target for r, preferring the path-based

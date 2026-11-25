@@ -16,15 +16,20 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -202,4 +207,114 @@ func TestOwnerRefreshPreservesConcurrentDependentOwner(t *testing.T) {
 			require.Equal(t, []metav1.OwnerReference{owner, additional}, live.GetOwnerReferences())
 		})
 	}
+}
+
+func TestLegacyPVCOwnerRefreshDuringInactiveLifecycle(t *testing.T) {
+	for _, mode := range []string{"deleting", "expired-first-pass", "expired-retained"} {
+		for _, owned := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/owned=%t", mode, owned), func(t *testing.T) {
+				sandbox := &sandboxv1beta1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: sandboxUID},
+					Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{
+							{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "workspace"}},
+							{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "missing"}},
+						},
+					}},
+				}
+				now := metav1.Now()
+				if mode == "deleting" {
+					sandbox.DeletionTimestamp = &now
+					sandbox.Finalizers = []string{"example.test/hold"}
+				} else {
+					past := metav1.NewTime(time.Now().Add(-time.Hour))
+					sandbox.Spec.Lifecycle.ShutdownTime = &past
+					sandbox.Spec.Lifecycle.ShutdownPolicy = new(sandboxv1beta1.ShutdownPolicyRetain)
+					if mode == "expired-retained" {
+						setSandboxExpiredCondition(sandbox)
+					}
+				}
+				owner := sandboxControllerRef(sandbox.Name)
+				owner.APIVersion = "agents.x-k8s.io/v1alpha1"
+				if !owned {
+					owner.UID = "other-sandbox-uid"
+				}
+				pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+					Name: "workspace-" + sandbox.Name, Namespace: sandbox.Namespace,
+					OwnerReferences: []metav1.OwnerReference{owner},
+				}}
+				raw := newFakeClient(sandbox, pvc)
+				creates := 0
+				c := interceptor.NewClient(raw, interceptor.Funcs{
+					Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+						creates++
+						return nil
+					},
+				})
+				r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), Recorder: events.NewFakeRecorder(10)}
+				_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)})
+				require.NoError(t, err)
+				live := &corev1.PersistentVolumeClaim{}
+				require.NoError(t, raw.Get(t.Context(), client.ObjectKeyFromObject(pvc), live))
+				if owned {
+					owner.APIVersion = sandboxv1beta1.GroupVersion.String()
+				}
+				require.Equal(t, []metav1.OwnerReference{owner}, live.OwnerReferences)
+				require.Zero(t, creates, "inactive lifecycle repair must not recreate missing children")
+			})
+		}
+	}
+}
+
+func TestLegacyOwnerRefreshPreservesAmbiguousPodRouting(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: sandboxUID},
+		Spec:       sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{Service: new(true)}},
+	}
+	hash := NameHash(sandbox.Name)
+	owner := sandboxControllerRef(sandbox.Name)
+	owner.APIVersion = "agents.x-k8s.io/v1alpha1"
+	podMetadata := metav1.ObjectMeta{Namespace: sandbox.Namespace, Labels: map[string]string{sandboxv1beta1.SandboxNameHashLabel: hash}, OwnerReferences: []metav1.OwnerReference{owner}}
+	a := &corev1.Pod{ObjectMeta: *podMetadata.DeepCopy()}
+	a.Name = "a"
+	b := &corev1.Pod{ObjectMeta: *podMetadata.DeepCopy()}
+	b.Name = "b"
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace, Labels: map[string]string{"operator": "inspect"}, OwnerReferences: []metav1.OwnerReference{owner}},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"operator": "inspect"}},
+	}
+	c := newFakeClient(sandbox, a, b, service)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), Recorder: events.NewFakeRecorder(10)}
+	_, err := r.reconcileChildResources(t.Context(), sandbox, nil)
+	require.NoError(t, err)
+	require.Empty(t, sandbox.Status.PodIPs)
+	ready := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, sandboxv1beta1.SandboxReasonMultiplePods, ready.Reason)
+	for _, object := range []client.Object{a, b, service} {
+		live := object.DeepCopyObject().(client.Object)
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(object), live))
+		require.Equal(t, sandboxv1beta1.GroupVersion.String(), live.GetOwnerReferences()[0].APIVersion)
+	}
+	liveService := &corev1.Service{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(service), liveService))
+	require.Equal(t, service.Spec, liveService.Spec)
+	require.Equal(t, service.Labels, liveService.Labels)
+}
+
+func TestLegacyOwnerRefreshBypassesPodWriteBehind(t *testing.T) {
+	sandbox := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: sandboxUID}, Spec: sandboxv1beta1.SandboxSpec{OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning}}
+	hash := NameHash(sandbox.Name)
+	owner := sandboxControllerRef(sandbox.Name)
+	owner.APIVersion = "agents.x-k8s.io/v1alpha1"
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: sandbox.Name, Namespace: sandbox.Namespace, Labels: map[string]string{sandboxv1beta1.SandboxNameHashLabel: hash}, OwnerReferences: []metav1.OwnerReference{owner}}}
+	c := newFakeClient(sandbox, pod)
+	r := &SandboxReconciler{Client: c, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+	wd := &writeDeferral{clock: &deferredWriteClock{}, key: client.ObjectKeyFromObject(sandbox), window: time.Hour}
+	_, _, err := r.reconcilePod(t.Context(), sandbox, hash, wd)
+	require.NoError(t, err)
+	require.False(t, wd.deferred, "owner changes must be synchronous even inside a fresh write-behind window")
+	live := &corev1.Pod{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(pod), live))
+	require.Equal(t, sandboxv1beta1.GroupVersion.String(), live.OwnerReferences[0].APIVersion)
 }

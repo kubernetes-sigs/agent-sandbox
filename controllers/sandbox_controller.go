@@ -174,7 +174,8 @@ func isOwnedBySandbox(pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) bool {
 // distinct from transient reconcile errors so the controller can surface a
 // stable condition without hot-looping until a Pod event changes the state.
 type multipleSandboxPodsError struct {
-	count int
+	count           int
+	ownerRefreshErr error
 }
 
 func (e *multipleSandboxPodsError) Error() string {
@@ -416,15 +417,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	ctx, end := r.Tracer.StartSpan(ctx, sandbox, "ReconcileSandbox", initialAttrs)
 	defer end()
 
-	// If the sandbox is being deleted, do nothing
+	// Do not recreate children during deletion; only repair owned PVC references
+	// so foreground garbage collection can resolve legacy owners.
 	if !sandbox.DeletionTimestamp.IsZero() {
+		ownerRefreshErr := r.refreshExistingPVCOwnerReferences(ctx, sandbox)
 		logger.Info("Sandbox is being deleted")
 		r.suspendStartTimes.Delete(req.NamespacedName)
 		r.resumeStartTimes.Delete(req.NamespacedName)
 		r.deferralClock.clear(req.NamespacedName)
 		r.recreateBackoff.clear(req.NamespacedName)
 		r.forgetSandboxCreationMetrics(sandbox.UID)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, ownerRefreshErr
 	}
 
 	// Backoff only has meaning while this Sandbox can recreate Failed Pods.
@@ -456,17 +459,20 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	expired, _ := checkSandboxExpiry(sandbox, time.Now())
 	if expired {
+		err = r.refreshExistingPVCOwnerReferences(ctx, sandbox)
 		r.recreateBackoff.clear(req.NamespacedName)
 		if !sandboxMarkedExpired(sandbox) {
 			setSandboxExpiredCondition(sandbox)
 			if statusUpdateErr := r.updateStatus(ctx, oldStatus, oldResourceVersion, sandbox); statusUpdateErr != nil {
-				return ctrl.Result{}, statusUpdateErr
+				return ctrl.Result{}, errors.Join(err, statusUpdateErr)
 			}
-			return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+			return ctrl.Result{RequeueAfter: immediateRequeueDelay}, err
 		}
 
 		logger.Info("Sandbox has expired, deleting child resources and checking shutdown policy")
-		sandboxDeleted, err = r.handleSandboxExpiry(ctx, sandbox)
+		var expiryErr error
+		sandboxDeleted, expiryErr = r.handleSandboxExpiry(ctx, sandbox)
+		err = errors.Join(err, expiryErr)
 	} else {
 		// Per-pass deferral view for the recoverable pod metadata patch
 		// (--sandbox-write-behind-window > 0). The pod patch bound caps the
@@ -564,6 +570,7 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 	pod, recreateRequeue, podErr := r.reconcilePod(ctx, sandbox, nameHash, wd)
 	podMappingConflict := isMultipleSandboxPodsError(podErr)
 	if podMappingConflict {
+		recordChildErr(asMultipleSandboxPodsError(podErr).ownerRefreshErr)
 		conditionErrors = errors.Join(conditionErrors, podErr)
 		r.recordMultiplePodsEvent(sandbox, podErr)
 	} else {
@@ -584,13 +591,21 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		}
 	}
 
-	// Do not create or modify a routing Service while the backing Pod mapping is
-	// ambiguous. Existing Services are left untouched for an operator to inspect.
+	// Do not create or change routing while the backing Pod mapping is ambiguous.
+	// Only an existing, UID-owned Service's legacy owner API version may change;
+	// its selector, ports and other metadata remain available for inspection.
 	var svc *corev1.Service
 	if !podMappingConflict {
 		var svcErr error
 		svc, svcErr = r.reconcileService(ctx, sandbox, nameHash)
 		recordChildErr(svcErr)
+	} else {
+		existingService := &corev1.Service{}
+		if getErr := r.Get(ctx, client.ObjectKeyFromObject(sandbox), existingService); getErr == nil {
+			recordChildErr(r.refreshDependentOwnerReferences(ctx, sandbox, existingService))
+		} else if !k8serrors.IsNotFound(getErr) {
+			recordChildErr(getErr)
+		}
 	}
 
 	// compute and set overall conditions
@@ -1773,7 +1788,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		ownedPods = append(ownedPods, pod)
 	}
 	if len(ownedPods) > 1 {
-		return nil, 0, &multipleSandboxPodsError{count: len(ownedPods)}
+		var ownerRefreshErr error
+		for _, ownedPod := range ownedPods {
+			ownerRefreshErr = errors.Join(ownerRefreshErr, r.refreshDependentOwnerReferences(ctx, sandbox, ownedPod))
+		}
+		return nil, 0, &multipleSandboxPodsError{count: len(ownedPods), ownerRefreshErr: ownerRefreshErr}
 	}
 
 	// Owner UID is authoritative over the compatibility annotation. If an
@@ -1835,7 +1854,8 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 
 		originalPod := pod.DeepCopy()
 		patch := client.MergeFrom(originalPod)
-		if _, changed := utils.RefreshedOwnerReferences(pod.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String()); changed {
+		_, ownerReferenceChanged := utils.RefreshedOwnerReferences(pod.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String())
+		if ownerReferenceChanged {
 			patch = client.MergeFromWithOptions(originalPod, client.MergeFromWithOptimisticLock{})
 		}
 		needsUpdate := false
@@ -1928,7 +1948,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			if metadataUpdated || needsUpdate {
 				// deferred: no write this pass; Reconcile requeues this request
 				// for the flush pass.
-				deferrable := wd != nil && ownership == resourceOwnedBySandbox && !needsUpdate
+				deferrable := wd != nil && ownership == resourceOwnedBySandbox && !needsUpdate && !ownerReferenceChanged
 				deferred := deferrable && !wd.shouldWrite()
 				if !deferred {
 					if err := r.Patch(ctx, pod, patch); err != nil {
@@ -2265,6 +2285,41 @@ func (r *SandboxReconciler) updatePodMetadata(ctx context.Context, pod *corev1.P
 		updated = true
 	}
 	return updated
+}
+
+// refreshDependentOwnerReferences only repairs an existing owner's API version.
+// It must not adopt resources, alter routing, or recreate lifecycle children.
+func (r *SandboxReconciler) refreshDependentOwnerReferences(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, dependent client.Object) error {
+	ownership, _ := checkOwnership(dependent, sandbox)
+	if ownership != resourceOwnedBySandbox {
+		return nil
+	}
+	refs, changed := utils.RefreshedOwnerReferences(dependent.GetOwnerReferences(), sandbox.UID, sandboxv1beta1.GroupVersion.String())
+	if !changed {
+		return nil
+	}
+	patch := client.MergeFromWithOptions(dependent.DeepCopyObject().(client.Object), client.MergeFromWithOptimisticLock{})
+	dependent.SetOwnerReferences(refs)
+	if err := r.Patch(ctx, dependent, patch); err != nil {
+		return fmt.Errorf("failed to refresh owner reference on %T %q: %w", dependent, dependent.GetName(), err)
+	}
+	return nil
+}
+
+func (r *SandboxReconciler) refreshExistingPVCOwnerReferences(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) error {
+	var allErrors error
+	for _, template := range sandbox.Spec.VolumeClaimTemplates {
+		pvc := &corev1.PersistentVolumeClaim{}
+		key := types.NamespacedName{Namespace: sandbox.Namespace, Name: template.Name + "-" + sandbox.Name}
+		if err := r.Get(ctx, key, pvc); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				allErrors = errors.Join(allErrors, err)
+			}
+			continue
+		}
+		allErrors = errors.Join(allErrors, r.refreshDependentOwnerReferences(ctx, sandbox, pvc))
+	}
+	return allErrors
 }
 
 func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, nameHash string) error {

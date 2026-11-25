@@ -17,15 +17,19 @@ package controllers
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -144,4 +148,103 @@ func TestSandboxClaimRefreshesV1alpha1SandboxOwner(t *testing.T) {
 	live := &sandboxv1beta1.Sandbox{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: sb.Name, Namespace: "default"}, live))
 	requireRefreshedOwner(t, live.OwnerReferences, claim.UID)
+}
+
+// Concurrent adoption replaces a pool owner after the cache read. An owner
+// refresh must not put the old pool owner back or act on that stale sandbox.
+func TestSandboxWarmPoolOwnerRefreshPreservesConcurrentAdoption(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	pool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"},
+	}
+	sb := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Name: "pool-sandbox", Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{alphaControllerRef("SandboxWarmPool", pool.Name, pool.UID)},
+	}}
+	raw := newFakeClient(scheme, pool, sb)
+	stale := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(sb), stale))
+	adopted := alphaControllerRef("SandboxClaim", "claim", "claim-uid")
+	adopted.APIVersion = extensionsv1beta1.GroupVersion.String()
+	writes := 0
+	cached := interceptor.NewClient(raw, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			writes++
+			live := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(sb), live))
+			live.OwnerReferences = []metav1.OwnerReference{adopted}
+			require.NoError(t, c.Update(ctx, live))
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+			t.Fatal("must not update a sandbox after its owner refresh conflicts")
+			return nil
+		},
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+			t.Fatal("must not delete a sandbox after its owner refresh conflicts")
+			return nil
+		},
+	})
+	r := &SandboxWarmPoolReconciler{Client: cached, Scheme: scheme}
+	poolKey := client.ObjectKeyFromObject(pool)
+	_, _, err := r.filterActiveSandboxes(ctx, poolKey, pool, []sandboxv1beta1.Sandbox{*stale}, nil, "", errors.New("no template"))
+	require.True(t, k8errors.IsConflict(err), "a stale owner array must be rejected: %v", err)
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(sb), live))
+	require.Equal(t, []metav1.OwnerReference{adopted}, live.OwnerReferences)
+	active, _, err := r.filterActiveSandboxes(ctx, poolKey, pool, []sandboxv1beta1.Sandbox{*live}, nil, "", errors.New("no template"))
+	require.NoError(t, err)
+	require.Empty(t, active, "the next pass must leave claim-owned sandboxes alone")
+	require.Equal(t, 1, writes, "the next pass must not rewrite the adopted sandbox")
+}
+
+// A concurrent writer can add an unrelated owner while the claim refreshes its
+// own reference. Reject the stale array, then preserve both owners on retry.
+func TestSandboxClaimOwnerRefreshPreservesConcurrentOwner(t *testing.T) {
+	ctx := context.Background()
+	scheme := newTestScheme()
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "pool"}},
+	}
+	claim.Status.SandboxStatus.Name = "pool-sandbox"
+	sb := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Name: "pool-sandbox", Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{alphaControllerRef("SandboxClaim", claim.Name, claim.UID)},
+	}}
+	raw := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim, sb).Build()
+	additional := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "other-owner", UID: "other-uid"}
+	concurrentWrite := true
+	cached := interceptor.NewClient(raw, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			data, err := patch.Data(obj)
+			require.NoError(t, err)
+			if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && concurrentWrite && strings.Contains(string(data), `"ownerReferences"`) {
+				concurrentWrite = false
+				live := &sandboxv1beta1.Sandbox{}
+				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(sb), live))
+				live.OwnerReferences = append(live.OwnerReferences, additional)
+				require.NoError(t, c.Update(ctx, live))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	r := &SandboxClaimReconciler{
+		Client: cached, Scheme: scheme, WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Recorder: events.NewFakeRecorder(10), Tracer: asmetrics.NewNoOp(),
+	}
+	_, err := r.reconcileActive(ctx, claim)
+	require.True(t, k8errors.IsConflict(err), "a stale owner array must be rejected: %v", err)
+	live := &sandboxv1beta1.Sandbox{}
+	require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(sb), live))
+	require.Len(t, live.OwnerReferences, 2)
+	require.Equal(t, alphaExtensionsAPIVersion, live.OwnerReferences[0].APIVersion)
+	require.Equal(t, additional, live.OwnerReferences[1])
+	_, err = r.reconcileActive(ctx, claim)
+	require.NoError(t, err)
+	require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(sb), live))
+	require.Len(t, live.OwnerReferences, 2)
+	require.Equal(t, extensionsv1beta1.GroupVersion.String(), live.OwnerReferences[0].APIVersion)
+	require.Equal(t, additional, live.OwnerReferences[1])
 }

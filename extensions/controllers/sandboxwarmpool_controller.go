@@ -93,6 +93,10 @@ const (
 	graceRequeueSlack = 2 * time.Second
 )
 
+// errOwnerRefreshInventoryIncomplete marks a pass stopped by a concurrent owner
+// change. It must be checked independently of APIStatus errors joined earlier.
+var errOwnerRefreshInventoryIncomplete = errors.New("owner refresh left sandbox inventory incomplete")
+
 // graceRequeueJitterFactor spreads the self-scheduled post-grace requeues of
 // a fleet warmed together (whose grace deadlines therefore cluster) across a
 // wait.Jitter window of up to +50% of the remaining grace, instead of letting
@@ -529,7 +533,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// paths but still occupy capacity: terminating members and unadopted
 	// orphans.
 	activeSandboxes, inactiveReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
-	if k8serrors.IsConflict(allErrors) {
+	if errors.Is(allErrors, errOwnerRefreshInventoryIncomplete) {
 		// Retry from the next observed ownership view before sizing the pool.
 		return 0, allErrors
 	}
@@ -1067,7 +1071,7 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				if k8serrors.IsConflict(err) {
 					// Ownership may have changed through claim adoption. Stop
 					// this pass rather than update or delete the stale object.
-					return nil, inactiveReplicas, allErrors
+					return nil, inactiveReplicas, errors.Join(allErrors, errOwnerRefreshInventoryIncomplete)
 				}
 			}
 		}

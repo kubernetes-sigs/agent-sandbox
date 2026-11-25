@@ -15,13 +15,18 @@
 package controllers
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
@@ -121,5 +126,80 @@ func TestReconcileRefreshesV1alpha1OwnerReferences(t *testing.T) {
 		require.Len(t, refs, 1, kind)
 		require.Equal(t, sandboxv1beta1.GroupVersion.String(), refs[0].APIVersion, kind)
 		require.Equal(t, sandboxUID, refs[0].UID, kind)
+	}
+}
+
+func TestOwnerRefreshPreservesConcurrentDependentOwner(t *testing.T) {
+	for _, kind := range []string{"Pod", "Service", "PVC"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := t.Context()
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: sandboxUID},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						PodTemplate:          sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "test"}}}},
+						Service:              new(true),
+						VolumeClaimTemplates: []sandboxv1beta1.PersistentVolumeClaimTemplate{{EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "workspace"}}},
+					},
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			}
+			owner := sandboxControllerRef(sandbox.Name)
+			owner.APIVersion = "agents.x-k8s.io/v1alpha1"
+			metadata := metav1.ObjectMeta{
+				Name: sandbox.Name, Namespace: sandbox.Namespace,
+				Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: "hash"},
+				OwnerReferences: []metav1.OwnerReference{owner},
+			}
+			var object client.Object
+			switch kind {
+			case "Pod":
+				object = &corev1.Pod{ObjectMeta: metadata, Spec: *sandbox.Spec.PodTemplate.Spec.DeepCopy()}
+			case "Service":
+				object = &corev1.Service{ObjectMeta: metadata, Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone}}
+			case "PVC":
+				metadata.Name = "workspace-" + sandbox.Name
+				object = &corev1.PersistentVolumeClaim{ObjectMeta: metadata}
+			}
+			raw := newFakeClient(sandbox, object)
+			additional := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "other-owner", UID: "other-uid"}
+			concurrentWrite := true
+			cached := interceptor.NewClient(raw, interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					data, err := patch.Data(obj)
+					require.NoError(t, err)
+					if concurrentWrite && strings.Contains(string(data), `"ownerReferences"`) {
+						concurrentWrite = false
+						live := object.DeepCopyObject().(client.Object)
+						require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(object), live))
+						live.SetOwnerReferences(append(live.GetOwnerReferences(), additional))
+						require.NoError(t, c.Update(ctx, live))
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			r := &SandboxReconciler{Client: cached, Scheme: Scheme, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}
+			reconcile := func() error {
+				switch kind {
+				case "Pod":
+					_, _, err := r.reconcilePod(ctx, sandbox.DeepCopy(), "hash", nil)
+					return err
+				case "Service":
+					_, err := r.reconcileService(ctx, sandbox.DeepCopy(), "hash")
+					return err
+				default:
+					return r.reconcilePVCs(ctx, sandbox.DeepCopy(), "hash")
+				}
+			}
+			err := reconcile()
+			require.True(t, k8errors.IsConflict(err), "stale %s owner patch must conflict: %v", kind, err)
+			live := object.DeepCopyObject().(client.Object)
+			require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(object), live))
+			require.Equal(t, []metav1.OwnerReference{owner, additional}, live.GetOwnerReferences())
+			require.NoError(t, reconcile())
+			require.NoError(t, raw.Get(ctx, client.ObjectKeyFromObject(object), live))
+			owner.APIVersion = sandboxv1beta1.GroupVersion.String()
+			require.Equal(t, []metav1.OwnerReference{owner, additional}, live.GetOwnerReferences())
+		})
 	}
 }

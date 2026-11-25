@@ -25,8 +25,10 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	k8errors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -247,4 +249,56 @@ func TestSandboxClaimOwnerRefreshPreservesConcurrentOwner(t *testing.T) {
 	require.Len(t, live.OwnerReferences, 2)
 	require.Equal(t, extensionsv1beta1.GroupVersion.String(), live.OwnerReferences[0].APIVersion)
 	require.Equal(t, additional, live.OwnerReferences[1])
+}
+
+func TestWarmPoolOwnerRefreshConflictAfterNotFoundDoesNotRefill(t *testing.T) {
+	ctx := t.Context()
+	scheme := newTestScheme()
+	pool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    new(int32(2)),
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "template"},
+		},
+	}
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+			PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "test"}}}},
+		}},
+	}
+	makeSandbox := func(name string) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: pool.Namespace,
+			Labels:          map[string]string{warmPoolSandboxLabel: sandboxcontrollers.NameHash(pool.Name)},
+			OwnerReferences: []metav1.OwnerReference{alphaControllerRef("SandboxWarmPool", pool.Name, pool.UID)},
+		}}
+	}
+	raw := newFakeClient(scheme, pool, template, makeSandbox("a"), makeSandbox("b"))
+	patches, creates := 0, 0
+	cached := interceptor.NewClient(raw, interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			data, err := patch.Data(obj)
+			require.NoError(t, err)
+			if strings.Contains(string(data), `"ownerReferences"`) {
+				patches++
+				resource := schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"}
+				if patches == 1 {
+					return k8errors.NewNotFound(resource, obj.GetName())
+				}
+				return k8errors.NewConflict(resource, obj.GetName(), errors.New("concurrent adoption"))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+			creates++
+			return nil
+		},
+	})
+	r := &SandboxWarmPoolReconciler{Client: cached, Scheme: scheme, MaxBatchSize: 10, Recorder: events.NewFakeRecorder(10)}
+	_, err := r.reconcilePool(ctx, pool)
+	require.Zero(t, creates, "never refill from the incomplete inventory, regardless of joined-error order")
+	require.ErrorIs(t, err, errOwnerRefreshInventoryIncomplete)
+	require.True(t, k8errors.IsNotFound(err), "the first APIStatus deliberately masks the later Conflict")
+	require.Equal(t, 2, patches)
 }

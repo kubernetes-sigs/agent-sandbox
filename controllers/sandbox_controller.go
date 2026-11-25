@@ -1628,7 +1628,8 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		desiredSelector := map[string]string{
 			sandboxv1beta1.SandboxNameHashLabel: nameHash,
 		}
-		patch := client.MergeFrom(service.DeepCopy())
+		originalService := service.DeepCopy()
+		patch := client.MergeFrom(originalService)
 		needsUpdate := false
 
 		if service.Labels == nil {
@@ -1648,6 +1649,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 		}
 		// A Service created before v1.0 still names its Sandbox as v1alpha1.
 		if refs, changed := utils.RefreshedOwnerReferences(service.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String()); changed {
+			patch = client.MergeFromWithOptions(originalService, client.MergeFromWithOptimisticLock{})
 			service.OwnerReferences = refs
 			needsUpdate = true
 		}
@@ -1831,7 +1833,11 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			})
 		}
 
-		patch := client.MergeFrom(pod.DeepCopy())
+		originalPod := pod.DeepCopy()
+		patch := client.MergeFrom(originalPod)
+		if _, changed := utils.RefreshedOwnerReferences(pod.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String()); changed {
+			patch = client.MergeFromWithOptions(originalPod, client.MergeFromWithOptimisticLock{})
+		}
 		needsUpdate := false
 		ownership, controllerRef := checkOwnership(pod, sandbox)
 		switch ownership {
@@ -2316,7 +2322,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 			case resourceOwnedBySandbox:
 				// A PVC created before v1.0 still names its Sandbox as v1alpha1.
 				if refs, changed := utils.RefreshedOwnerReferences(pvc.OwnerReferences, sandbox.UID, sandboxv1beta1.GroupVersion.String()); changed {
-					patch := client.MergeFrom(pvc.DeepCopy())
+					patch := client.MergeFromWithOptions(pvc.DeepCopy(), client.MergeFromWithOptimisticLock{})
 					pvc.OwnerReferences = refs
 					if err := r.Patch(ctx, pvc, patch); err != nil {
 						return fmt.Errorf("failed to refresh owner reference on PVC: %w", err)

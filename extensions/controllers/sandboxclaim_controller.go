@@ -1519,7 +1519,11 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	adopted.Spec.PodTemplate.ObjectMeta.Labels = ensureClaimIdentityLabels(adopted.Spec.PodTemplate.ObjectMeta.Labels, claim)
 
 	// Resolve the template hash and metadata used by reconcileActive.
-	template, templateErr := r.getTemplate(ctx, claim)
+	var template *extensionsv1beta1.SandboxTemplate
+	warmPool, templateErr := r.getWarmPool(ctx, claim)
+	if templateErr == nil {
+		template, templateErr = r.getTemplateForWarmPool(ctx, claim.Namespace, warmPool)
+	}
 	if templateHash == "" && template != nil {
 		templateHash = SandboxTemplateRefHash(template.Name)
 	} else if templateHash == "" && templateErr != nil {
@@ -1559,8 +1563,10 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		adopted.Spec.PodTemplate.ObjectMeta = mergedMeta
 
 		// The pool's priorityClassName is for idle Pods; a resumed Pod uses the template's.
-		spec, tspec := &adopted.Spec.PodTemplate.Spec, &template.Spec.PodTemplate.Spec
-		spec.PriorityClassName, spec.Priority, spec.PreemptionPolicy = tspec.PriorityClassName, tspec.Priority, tspec.PreemptionPolicy
+		if warmPool.Spec.PriorityClassName != "" {
+			spec, tspec := &adopted.Spec.PodTemplate.Spec, &template.Spec.PodTemplate.Spec
+			spec.PriorityClassName, spec.Priority, spec.PreemptionPolicy = tspec.PriorityClassName, tspec.Priority, tspec.PreemptionPolicy
+		}
 	} else {
 		// Fallback (just in case template is somehow missing)
 		if templateHash != "" {

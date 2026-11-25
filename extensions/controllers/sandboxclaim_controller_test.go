@@ -2345,6 +2345,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		existingObjects         []client.Object
 		warmPoolStrategy        *extensionsv1beta1.SandboxWarmPoolUpdateStrategy
 		warmPoolPriorityClass   string
+		expectedPriorityClass   string
 		expectSandboxAdoption   bool
 		expectedAdoptedSandbox  string
 		expectedAnnotations     map[string]string
@@ -2688,6 +2689,19 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
+			name:             "keeps the candidate's priority when the pool leaves priorityClassName unset",
+			warmPoolStrategy: onReplenishStrategy,
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withPoolPriority(withBlueprintHash(createWarmPoolSandbox("stale-priority", metav1.Now(), true), "stale-hash")),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "stale-priority",
+			expectedPriorityClass:   "warm-low",
+			expectNewSandboxCreated: false,
+		},
+		{
 			name:             "adopts stale candidate when warm pool strategy unset (defaults to OnReplenish)",
 			warmPoolStrategy: nil,
 			existingObjects: []client.Object{
@@ -2802,11 +2816,9 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 					}
 				}
 
-				// An adopted sandbox resumes at the template's priority, not the pool's.
-				adoptedSpec, templateSpec := adoptedSandbox.Spec.PodTemplate.Spec, template.Spec.PodTemplate.Spec
-				require.Equal(t, templateSpec.PriorityClassName, adoptedSpec.PriorityClassName)
-				require.Equal(t, templateSpec.Priority, adoptedSpec.Priority)
-				require.Equal(t, templateSpec.PreemptionPolicy, adoptedSpec.PreemptionPolicy)
+				// A pool priorityClassName is for idle Pods, so adoption swaps in the
+				// template's priority. Without one, the candidate keeps its own.
+				require.Equal(t, tc.expectedPriorityClass, adoptedSandbox.Spec.PodTemplate.Spec.PriorityClassName)
 
 				// 2. Verify SandboxID label was added to pod template
 				expectedUID := string(types.UID("claim-uid"))

@@ -106,6 +106,10 @@ class RunTypeScriptTestsTest(unittest.TestCase):
                 "--reporter=verbose",
                 "--reporter=junit",
                 "--outputFile.junit=/artifacts/junit_unit-typescript.xml",
+                "--coverage.enabled",
+                "--coverage.reporter=text-summary",
+                "--coverage.reporter=lcov",
+                "--coverage.reportsDirectory=/artifacts/coverage_unit-typescript",
             ], cwd=ts_dir, env=mock.ANY),
         ])
 

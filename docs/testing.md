@@ -15,6 +15,10 @@ the JUnit files in `$ARTIFACTS`, or `bin/` locally. View one with:
 ```shell
 go tool cover -html=bin/coverage_unit-go.out
 ```
+
+TypeScript SDK unit tests write an lcov report to `coverage_unit-typescript/`
+in the same directory.
+
 ## Running the e2e tests (including benchmarks)
 To run all e2e tests:
 ```shell

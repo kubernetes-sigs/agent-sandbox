@@ -440,12 +440,18 @@ def run_typescript_tests(repo_root, artifact_dir, env, npm_path, npx_path):
             returncode = result.returncode
 
     junit_file = os.path.join(artifact_dir, "junit_unit-typescript.xml")
+    # Not junit*: prow spyglass would try to parse it as a test report.
+    cover_dir = os.path.join(artifact_dir, "coverage_unit-typescript")
     print("\n=== Running TypeScript unit tests ===")
     result = subprocess.run([
         npx_path, "vitest", "run",
         "--reporter=verbose",
         "--reporter=junit",
         f"--outputFile.junit={junit_file}",
+        "--coverage.enabled",
+        "--coverage.reporter=text-summary",
+        "--coverage.reporter=lcov",
+        f"--coverage.reportsDirectory={cover_dir}",
     ], cwd=ts_dir, env=env)
     if result.returncode != 0:
         returncode = result.returncode

@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // Create a test scheme with extensions types registered.
@@ -3369,6 +3370,108 @@ func TestReconcilePoolMaxRefillRate(t *testing.T) {
 		require.Zero(t, requeue, "replacement fits in the initial bucket")
 		require.Equal(t, 2, countOwned(t, r, warmPool))
 	})
+}
+
+func TestReconcilePoolPreservesAdoptedSandbox(t *testing.T) {
+	for _, path := range []string{"scale_down", "stuck_cleanup", "template_recreate"} {
+		t.Run(path, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := newTestScheme()
+			template := createTemplate("default")
+			warmPool := &extensionsv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: template.Namespace, UID: "pool-uid"},
+				Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+					Replicas:    new(int32(1)),
+					TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+				},
+			}
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: template.Namespace, UID: "claim-uid"},
+				Spec: extensionsv1beta1.SandboxClaimSpec{
+					WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: warmPool.Name},
+				},
+			}
+			poolKey := client.ObjectKeyFromObject(warmPool)
+			poolHash := sandboxcontrollers.NameHash(warmPool.Name)
+			sb := createPoolSandbox(warmPool.Name, warmPool.Namespace, poolHash, template, "-member")
+			sb.UID = "sandbox-uid"
+			sb.Labels[sandboxv1beta1.SandboxLaunchTypeLabel] = sandboxv1beta1.SandboxLaunchTypeWarm
+			sb.Status.Conditions = []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			}}
+			require.NoError(t, controllerutil.SetControllerReference(warmPool, sb, scheme))
+			objects := []runtime.Object{warmPool, template, claim, sb}
+			var youngMember *sandboxv1beta1.Sandbox
+			switch path {
+			case "scale_down":
+				warmPool.Spec.Replicas = new(int32(0))
+			case "stuck_cleanup":
+				sb.CreationTimestamp = metav1.NewTime(time.Now().Add(-24 * time.Hour))
+				sb.Status.Conditions = nil
+				youngMember = sb.DeepCopy()
+				youngMember.Name = "young-member"
+				youngMember.UID = "young-member-uid"
+				youngMember.CreationTimestamp = metav1.Now()
+				objects = append(objects, youngMember)
+			case "template_recreate":
+				warmPool.Spec.UpdateStrategy = &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+					Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+				}
+				template.Spec.PodTemplate.Spec.Containers[0].Image = "new-image"
+			}
+
+			baseClient := newFakeClient(scheme, objects...)
+			claimReconciler := &SandboxClaimReconciler{Client: baseClient, Scheme: scheme}
+			adopted := false
+			poolClient := interceptor.NewClient(baseClient, interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if err := c.List(ctx, list, opts...); err != nil {
+						return err
+					}
+					members, ok := list.(*sandboxv1beta1.SandboxList)
+					if ok && !adopted {
+						idx := slices.IndexFunc(members.Items, func(member sandboxv1beta1.Sandbox) bool {
+							return member.UID == sb.UID
+						})
+						require.NotEqual(t, -1, idx)
+						candidate := members.Items[idx].DeepCopy()
+						require.NoError(t, isAdoptable(candidate))
+						require.NotEmpty(t, candidate.ResourceVersion)
+						// Commit the claim's ownership transfer after the pool has listed its members.
+						require.NoError(t, claimReconciler.completeAdoption(ctx, claim, candidate))
+						require.NotEqual(t, members.Items[idx].ResourceVersion, candidate.ResourceVersion)
+						adopted = true
+					}
+					return nil
+				},
+			})
+			r := &SandboxWarmPoolReconciler{Client: poolClient, Scheme: scheme, MaxBatchSize: sandboxCreateDeleteMaxBatchSize}
+			req := ctrl.Request{NamespacedName: poolKey}
+			_, err := r.Reconcile(ctx, req)
+
+			var surviving sandboxv1beta1.Sandbox
+			require.True(t, adopted)
+			require.NoError(t, baseClient.Get(ctx, client.ObjectKeyFromObject(sb), &surviving),
+				"the warm pool deleted the Sandbox after the SandboxClaim adopted it")
+			require.True(t, metav1.IsControlledBy(&surviving, claim))
+			require.True(t, k8serrors.IsConflict(err), "expected a delete conflict to trigger a retry, got %v", err)
+			require.True(t, r.exp().SatisfiedExpectations(poolKey), "a rejected delete has no watch event")
+			if youngMember != nil {
+				require.NoError(t, baseClient.Get(ctx, client.ObjectKeyFromObject(youngMember), &sandboxv1beta1.Sandbox{}),
+					"the adopted Sandbox must not count toward a scale-down of other pool members")
+			}
+
+			_, err = r.Reconcile(ctx, req)
+			require.NoError(t, err)
+			var members sandboxv1beta1.SandboxList
+			require.NoError(t, baseClient.List(ctx, &members, client.InNamespace(warmPool.Namespace),
+				client.MatchingFields{sandboxWarmPoolLabelIndex: poolHash}))
+			require.Len(t, members.Items, int(*warmPool.Spec.Replicas))
+			require.NoError(t, baseClient.Get(ctx, client.ObjectKeyFromObject(sb), &surviving))
+			require.True(t, metav1.IsControlledBy(&surviving, claim))
+		})
+	}
 }
 
 func TestReconcileFlushesStatusOnReconcilePoolError(t *testing.T) {

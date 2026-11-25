@@ -19,7 +19,8 @@ in `agent-sandbox-system`.
 
 ## Create a Sandbox with VSCode and Gemini CLI
 
-Apply the sandbox manifest with PVC
+Select the runtime before creating the Sandbox. Use `base` for the standard
+runtime, or apply one of the isolation overlays below instead of `base`:
 
 ```
 kubectl apply -k base
@@ -63,6 +64,9 @@ Apply the kustomize overlay to inject `runtimeClassName: gvisor` to the
 ```shell
 kubectl apply -k overlays/gvisor
 ```
+
+If the Sandbox already exists, [recreate its Pod](#change-the-runtime-of-an-existing-sandbox)
+before validating the runtime.
 
 Validate that the `Pod` with gVisor enabled is running:
 
@@ -117,6 +121,9 @@ The overlay selects the Kata RuntimeClass for MSHV isolation:
 runtimeClassName: kata-vm-isolation
 ```
 
+If the Sandbox already exists, [recreate its Pod](#change-the-runtime-of-an-existing-sandbox)
+after applying the overlay, whether you use the helper or `kubectl` directly.
+
 #### Delete the AKS Kubernetes cluster and kubeconfig
 
 Once you are done with your cluster, run the following command to deprovision
@@ -165,12 +172,32 @@ Apply the kustomize overlay to inject `runtimeClassName: kata-qemu` to the
 kubectl apply -k overlays/kata
 ```
 
+If the Sandbox already exists, [recreate its Pod](#change-the-runtime-of-an-existing-sandbox)
+before validating the runtime.
+
 Validate that the `Pod` with Kata container enabled is running:
 
 ```shell
 $ kubectl wait --for=condition=Ready sandbox sandbox-example
 $ kubectl get pods -o jsonpath=$'{range .items[*]}{.metadata.name}: {.spec.runtimeClassName}\n{end}'
 ```
+
+## Change the runtime of an existing Sandbox
+
+The controller uses `podTemplate` when it creates a Pod. Applying an overlay to
+an existing Sandbox does not update the running Pod's spec. After applying the
+chosen overlay, recreate only the Pod to use the new runtime. This stops the
+Pod's processes and retains the workspace PVC:
+
+```shell
+kubectl delete pod sandbox-example
+kubectl wait --for=create pod/sandbox-example --timeout=5m
+kubectl wait --for=condition=Ready pod/sandbox-example --timeout=5m
+kubectl get pod sandbox-example -o jsonpath='{.spec.runtimeClassName}{"\n"}'
+```
+
+Verify that the printed RuntimeClass matches the overlay you selected, then wait
+for VSCode to start as described below.
 
 ## Accessing VSCode
 

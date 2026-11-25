@@ -3529,3 +3529,181 @@ func TestReconcileFlushesStatusOnReconcilePoolError(t *testing.T) {
 		require.Zero(t, statusPatches.Load(), "updateStatus must be a no-op when reconcilePool fails before mutating status")
 	})
 }
+
+func TestReconcilePoolFinishedSandboxBackoff(t *testing.T) {
+	const (
+		poolName      = "test-pool"
+		poolNamespace = "default"
+		templateName  = "test-template"
+	)
+	replicas := int32(2)
+	template := createTemplate(poolNamespace)
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	ctx := context.Background()
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid-finished-backoff",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+		},
+	}
+
+	now := time.Now()
+	initial := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-initial")
+	initial.CreationTimestamp = metav1.Time{Time: now.Add(-10 * time.Second)}
+	initial.Status.Conditions = []metav1.Condition{
+		{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionFalse,
+			Reason: sandboxv1beta1.SandboxReasonPodFailed,
+		},
+		{
+			Type:   string(sandboxv1beta1.SandboxConditionFinished),
+			Status: metav1.ConditionTrue,
+			Reason: sandboxv1beta1.SandboxReasonPodFailed,
+		},
+	}
+	healthy := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-healthy")
+	healthy.CreationTimestamp = metav1.Time{Time: now.Add(-10 * time.Second)}
+	healthy.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionTrue,
+	}}
+
+	r := &SandboxWarmPoolReconciler{
+		Client:       newFakeClient(scheme, template, initial, healthy),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		now:          func() time.Time { return now },
+	}
+
+	listSandboxes := func(t *testing.T) []sandboxv1beta1.Sandbox {
+		t.Helper()
+		list := &sandboxv1beta1.SandboxList{}
+		require.NoError(t, r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace}))
+		return list.Items
+	}
+
+	markFinished := func(t *testing.T, sb *sandboxv1beta1.Sandbox) {
+		t.Helper()
+		sb.CreationTimestamp = metav1.NewTime(now)
+		sb.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: sandboxv1beta1.SandboxReasonPodFailed,
+			},
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionFinished),
+				Status: metav1.ConditionTrue,
+				Reason: sandboxv1beta1.SandboxReasonPodFailed,
+			},
+		}
+		require.NoError(t, r.Update(ctx, sb))
+	}
+
+	markAllReady := func(t *testing.T) {
+		t.Helper()
+		for _, sb := range listSandboxes(t) {
+			sbCopy := sb
+			sbCopy.Status.Conditions = []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			}}
+			require.NoError(t, r.Update(ctx, &sbCopy))
+		}
+	}
+
+	// First failure deletes the finished sandbox and defers its replacement by 5s,
+	// leaving the healthy member in place.
+	requeue, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Equal(t, finishedBackoffBase, requeue)
+	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, warmPool.UID))
+
+	// Mid-backoff (t=2s), a claim adopts the remaining Ready member. Its
+	// replacement is created immediately while the finished slot stays held
+	// for the remaining 3s.
+	now = now.Add(2 * time.Second)
+	remaining := listSandboxes(t)
+	require.Len(t, remaining, 1)
+	require.NoError(t, r.Delete(ctx, &remaining[0]))
+	requeue, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Equal(t, finishedBackoffBase-2*time.Second, requeue)
+	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, warmPool.UID))
+	syncPoolExpectations(r, warmPool)
+	markAllReady(t)
+
+	// Once the 5s backoff elapses, the controller creates the held replacement.
+	now = now.Add(3 * time.Second)
+	requeue, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Zero(t, requeue)
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, warmPool.UID))
+	syncPoolExpectations(r, warmPool)
+	markAllReady(t)
+
+	// A second failure within 10m doubles the backoff to 10s.
+	markFinished(t, &listSandboxes(t)[0])
+	requeue, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Equal(t, 2*finishedBackoffBase, requeue)
+	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, warmPool.UID))
+
+	// Once the 10s backoff elapses, the controller creates the second replacement.
+	now = now.Add(2 * finishedBackoffBase)
+	requeue, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Zero(t, requeue)
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, warmPool.UID))
+	syncPoolExpectations(r, warmPool)
+	markAllReady(t)
+
+	// Simulate claim adoptions mid-window so the pool does not stay
+	// continuously full and Ready, then verify backoff decays 10m after the
+	// last finished deletion.
+	now = now.Add(6 * time.Minute)
+	require.NoError(t, r.Delete(ctx, &listSandboxes(t)[0]))
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	syncPoolExpectations(r, warmPool)
+	markAllReady(t)
+
+	now = now.Add(finishedBackoffResetAfter - 6*time.Minute)
+	markFinished(t, &listSandboxes(t)[0])
+	requeue, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.Equal(t, finishedBackoffBase, requeue, "backoff must decay 10m after the last finished deletion")
+}
+
+// TestObserveFinishedBackoffGrowsWhenMembersExitOutOfPhase covers a pool whose
+// members exit a few seconds apart, so one replacement slot is always held.
+// The backoff must still grow when a replacement exits.
+func TestObserveFinishedBackoffGrowsWhenMembersExitOutOfPhase(t *testing.T) {
+	r := &SandboxWarmPoolReconciler{}
+	key := types.NamespacedName{Namespace: "default", Name: "test-pool"}
+	start := time.Now()
+	const desiredReplicas = int32(2)
+
+	// t=0s: the first member exits and the backoff starts at the base delay.
+	_, _, delay, failures := r.observeFinishedBackoff(key, 1, 1, desiredReplicas, start)
+	require.Equal(t, finishedBackoffBase, delay)
+	require.Equal(t, 1, failures)
+
+	// t=3s: the second member exits inside that delay, so the delay does not grow.
+	_, _, delay, _ = r.observeFinishedBackoff(key, 1, 0, desiredReplicas, start.Add(3*time.Second))
+	require.Zero(t, delay)
+
+	// t=7s: the first member's replacement, created at t=5s, exits while the
+	// second member's slot is still held until t=8s.
+	_, _, delay, failures = r.observeFinishedBackoff(key, 1, 0, desiredReplicas, start.Add(7*time.Second))
+	require.Equal(t, 2*finishedBackoffBase, delay, "a replacement that exits must grow the backoff while another slot is held")
+	require.Equal(t, 2, failures)
+}

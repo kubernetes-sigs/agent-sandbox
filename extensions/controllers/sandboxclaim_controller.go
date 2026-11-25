@@ -1330,6 +1330,11 @@ func (r *SandboxClaimReconciler) getCandidate(ctx context.Context, claim *extens
 			continue
 		}
 
+		if isSandboxFinished(adopted) {
+			logger.V(1).Info("Skipping finished warm pool candidate", "sandbox", adopted.Name, "warmPool", claim.Spec.WarmPoolRef.Name)
+			continue
+		}
+
 		// Enforce blueprint version consistency only under the Recreate strategy (issue #764).
 		recreate, expectedHash, expectedTemplate, err := resolveRecreate()
 		if err != nil {

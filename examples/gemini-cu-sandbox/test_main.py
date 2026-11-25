@@ -12,9 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
+from pathlib import Path
 import shlex
+import subprocess
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock
+
+import pytest
+
 from main import app
 
 client = TestClient(app)
@@ -95,3 +102,51 @@ def test_agent_command_without_api_key(mock_subprocess_run, monkeypatch):
         "exit_code": 1,
     }
     mock_subprocess_run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [(), ("--nobuild", "--interactive")],
+    ids=["default", "interactive"],
+)
+def test_docker_walkthrough(tmp_path, monkeypatch, flags):
+    example_dir = Path(__file__).resolve().parent
+    dockerfile = (example_dir / "Dockerfile").read_text()
+    server_command = json.loads(
+        next(line.removeprefix("CMD ") for line in dockerfile.splitlines() if line.startswith("CMD "))
+    )
+    server_port = server_command[server_command.index("--port") + 1]
+
+    stub = tmp_path / "record-command"
+    stub.write_text('#!/bin/bash\nprintf "%s\\n" "${0##*/} $*" >> "$COMMAND_LOG"\n')
+    stub.chmod(0o755)
+    for command in ("docker", "xhost", "curl", "python3"):
+        (tmp_path / command).symlink_to(stub)
+
+    command_log = tmp_path / "commands.log"
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("COMMAND_LOG", str(command_log))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("DISPLAY", ":71")
+    subprocess.run(
+        [example_dir / "run-test-docker.sh", *flags],
+        cwd=tmp_path,
+        check=True,
+        timeout=10,
+    )
+
+    commands = command_log.read_text().splitlines()
+    docker_run = next(line.split() for line in commands if line.startswith("docker run "))
+    assert docker_run[docker_run.index("-p") + 1] == f"8080:{server_port}"
+    assert commands[-1] == "docker stop sandbox-gemini-runtime"
+    if "--interactive" in flags:
+        assert not any(line.startswith("docker build ") for line in commands)
+        assert "xhost +local:docker" in commands
+        assert "DISPLAY=:71" in docker_run
+        assert any(line.startswith("docker exec -it sandbox-gemini-runtime ") for line in commands)
+    else:
+        assert commands[0] == f"docker build --load -t sandbox-gemini-runtime {example_dir}"
+        assert "NON_INTERACTIVE=1" in docker_run
+        assert not any(line.startswith("xhost ") for line in commands)
+        assert "curl -s http://127.0.0.1:8080/" in commands
+        assert f"python3 {example_dir / 'tester.py'} http://127.0.0.1:8080" in commands

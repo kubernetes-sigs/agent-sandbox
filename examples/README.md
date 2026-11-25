@@ -1,6 +1,17 @@
 # Agent Sandbox Examples
 
-This directory contains examples of how to use the Agent Sandbox. Each subdirectory contains a different example.
+This directory contains walkthroughs for using Agent Sandbox.
+
+## Example policy
+
+- **Admission.** Add a directory when the walkthrough demonstrates an Agent Sandbox feature or integration that the catalog does not already cover. If a runtime, agent, or vendor product uses a pattern we already cover, add it as a variant of that walkthrough.
+- **Ownership.** Name at least one maintainer as a reviewer in the example's `OWNERS` file. The maintainer responds to issues and keeps the walkthrough working. The [parent OWNERS file](OWNERS) supplies approvers. See the [Kubernetes OWNERS guide](https://go.k8s.io/owners) for reviewer eligibility.
+- **Verification.** In the example's README, record the Agent Sandbox release you last verified against and the steps or command you used. Run any test script in CI or explain in the README why it runs separately.
+- **Removal.** When a walkthrough breaks, file an issue with reproduction steps and notify its maintainer. Remove the example if it remains broken and the maintainer has not responded within 30 days of notification.
+- **Size.** Keep the example focused on the walkthrough and the files needed to run it. Place installable packages, standalone controllers, and independently released services elsewhere. See the [relocation issue](https://github.com/kubernetes-sigs/agent-sandbox/issues/2406).
+- **Images.** Build an example image in postsubmit only if a documented walkthrough or test pulls the published image. Identify the consumer in the example's README so reviewers can check whether the build is still needed.
+
+## Example catalog
 
 - [**agent-sandbox-gymnasium**](./agent-sandbox-gymnasium): A Gymnasium environment backed by Agent Sandbox warm pools for RL agent training and evaluation.
 - [**agent-sandbox-rl**](./agent-sandbox-rl): Generic, multi-cluster batch orchestration for running SWE-bench-style RL/eval workloads on Agent Sandbox warm pools.

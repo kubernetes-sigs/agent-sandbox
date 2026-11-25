@@ -519,7 +519,7 @@ describe("Sandbox suspend/resume", () => {
       expect(mockWatch).toHaveBeenCalledTimes(2);
     });
 
-    it("rejects with the watch's error when the watch fails", async () => {
+    it("rejects with a SandboxError that keeps the cause when the watch fails", async () => {
       mockGet.mockResolvedValue(sandboxObj({ mode: "Running" }));
       const watch = openWatch();
       const forbidden = Object.assign(new Error("forbidden"), {
@@ -529,7 +529,12 @@ describe("Sandbox suspend/resume", () => {
       const done = new Sandbox(createInit()).suspend();
       (await watch.started).done(forbidden);
 
-      await expect(done).rejects.toBe(forbidden);
+      const err = await done.catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as Error).message).toBe(
+        "Failed to watch Sandbox 'test-sandbox' in namespace 'default'.",
+      );
+      expect((err as Error).cause).toBe(forbidden);
       expect(mockWatch).toHaveBeenCalledTimes(1);
       expect(watch.abort.signal.aborted).toBe(true);
     });

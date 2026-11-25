@@ -177,9 +177,8 @@ export function watchSandboxOnce<R>(args: {
     const fail = (err: unknown) =>
       settle(args.failed(err instanceof Error ? err : new Error(String(err))));
 
-    // An async function, so that a synchronous throw also reaches `fail`.
-    (async () =>
-      new Watch(args.kubeConfig).watch(
+    new Watch(args.kubeConfig)
+      .watch(
         `/apis/${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}/namespaces/${args.namespace}/${SANDBOX_PLURAL_NAME}`,
         {
           fieldSelector: `metadata.name=${args.sandboxName}`,
@@ -198,10 +197,11 @@ export function watchSandboxOnce<R>(args: {
           if (isWatchCleanClose(err)) settle(args.closed);
           else fail(err);
         },
-      ))().then((ac) => {
-      if (settled) ac.abort();
-      else abortController = ac;
-    }, fail);
+      )
+      .then((ac) => {
+        if (settled) ac.abort();
+        else abortController = ac;
+      }, fail);
   });
 }
 
@@ -1031,7 +1031,7 @@ export class Sandbox {
    *
    * A GET reports a deleted, terminating, or replaced Sandbox. Between GETs
    * a watch reports changes as they happen, as in the Go and Python clients.
-   * Rejects with the watch's error when the watch fails, for example because
+   * Rejects with a SandboxError when the watch fails, for example because
    * the credentials lack the `watch` verb.
    */
   private async waitForSandbox(
@@ -1072,7 +1072,7 @@ export class Sandbox {
             return undefined;
           }
           const eventMetadata =
-            (event?.metadata as Record<string, unknown>) ?? {};
+            (event.metadata as Record<string, unknown>) ?? {};
           // The next GET reports a deleted, replaced, or terminating Sandbox.
           if (
             type === "DELETED" ||
@@ -1087,7 +1087,10 @@ export class Sandbox {
       if (result === "recheck") continue;
       if (result !== "closed") {
         if ("obj" in result) return result.obj;
-        throw result.error;
+        throw new SandboxError(
+          `Failed to watch Sandbox '${this.sandboxName}' in namespace '${this.namespace}'.`,
+          { cause: result.error },
+        );
       }
       // Spaces out the GETs when the API server keeps closing the watch.
       await this.sleep(

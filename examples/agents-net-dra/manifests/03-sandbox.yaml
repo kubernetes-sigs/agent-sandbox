@@ -12,21 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# SandboxTemplate + SandboxWarmPool + SandboxClaim using standard Kubernetes DRA
-# ResourceClaimTemplateName. Each warm replica receives its own Pod-owned
-# ResourceClaim from kube-controller-manager, and dra-agents-net automatically
-# propagates agents.x-k8s.io/claim-uid and agents.x-k8s.io/claim-name to the PEP
-# as soon as a SandboxClaim adopts a warm Pod.
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxTemplate
+# Unmodified agent-sandbox Sandbox attaching dra.agents.net solely through
+# podTemplate.spec.resourceClaims[].resourceClaimTemplateName.
+#
+# Under HostTun (default), the Pod runs completely unprivileged with no sidecar
+# container, no /dev/net/tun device, no egress.sock mount, and no HTTP_PROXY
+# environment variables, while unmodified TCP, UDP, and DNS clients route
+# transparently through the mTLS PEP.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
 metadata:
-  name: agent-template
+  name: coding-agent
   namespace: agents-net-demo
 spec:
-  # Optional: dra-agents-net's default tc clsact nicBlockMode=DropAll isolates all
-  # non-loopback NICs independently of NetworkPolicy. Leave Managed (default) or
-  # provide an explicit deny-all NetworkPolicy if you also want CNI-level rules.
-  networkPolicyManagement: Unmanaged
   podTemplate:
     spec:
       automountServiceAccountToken: false
@@ -41,6 +39,7 @@ spec:
       containers:
         - name: agent
           image: python:3.14-slim
+          imagePullPolicy: IfNotPresent
           command:
             - python3
             - -c
@@ -52,22 +51,3 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
----
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxWarmPool
-metadata:
-  name: agent-pool
-  namespace: agents-net-demo
-spec:
-  replicas: 2
-  sandboxTemplateRef:
-    name: agent-template
----
-apiVersion: extensions.agents.x-k8s.io/v1beta1
-kind: SandboxClaim
-metadata:
-  name: coding-session
-  namespace: agents-net-demo
-spec:
-  warmPoolRef:
-    name: agent-pool

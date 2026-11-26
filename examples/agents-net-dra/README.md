@@ -1,108 +1,137 @@
-# Policy Enforcement Point Egress with `dra.agents.net`
+# Policy Enforcement Point Egress with `dra.agents.net` (`HostTun`)
 
-This example isolates `agent-sandbox` workloads (`Sandbox`, `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim`) and routes egress to a Policy Enforcement Point (PEP) using the [`dra.agents.net`](https://github.com/aojea/agents.net/tree/main/kubernetes) Kubernetes DRA + NRI driver. No changes to `agent-sandbox` CRDs or controllers are needed.
+This example isolates `agent-sandbox` workloads (`Sandbox`, `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim`) and routes egress to a mandatory mTLS Policy Enforcement Point (PEP) using [`dra.agents.net`](https://github.com/aojea/agents.net/tree/main/kubernetes) (`HostTun` default). No sidecar container, no Pod capabilities, no `HTTP_PROXY` configuration, and no changes to `agent-sandbox` CRDs or controllers are needed.
 
 ## How it works
 
 `Sandbox` and `SandboxTemplate` expose a standard Kubernetes `PodSpec` at `spec.podTemplate.spec`. Workloads attach `dra.agents.net` by referencing a `ResourceClaimTemplate` in `podTemplate.spec.resourceClaims`:
 
 ```text
-  Cluster Admin                            Namespace User
-  DeviceClass: dra.agents.net              ResourceClaimTemplate: agents-net-egress
-   (FromClass DriverConfig:                 (FromClaim DriverConfig:
-    nicBlockMode, adapterMode,               policyEnforcementPoint, caTrust,
-    proxy.port, limits)                      confinementMode, custom)
-            |                                         |
-            +--------------------+--------------------+
-                                 v
-        Sandbox / SandboxTemplate (podTemplate.spec.resourceClaims)
-                                 |
-        kube-controller-manager creates one Pod-owned ResourceClaim per Pod
-        (deleted automatically on Sandbox suspend or delete)
-                                 v
-        Node DaemonSet: dra-agents-net (DRA + NRI)
-         - PrepareResourceClaims: opens egress.sock, writes CA bundles
-         - RunPodSandbox: isolates Pod netns, binds 127.0.0.1:15001, updates claim status
-         - CreateContainer: mounts /run/agents.net and /var/run/agent-ca.pem, sets proxy/CA env
-                                 |
-        HTTP/2 or HTTP/1.1 CONNECT + attested Agents-Net-* headers
-                                 v
-        Policy Enforcement Point (PEP)
-        (agents.net connect-proxy, Envoy, gke-labs/service-portals, corporate proxy)
+  Cluster Admin                                  Namespace User
+  DeviceClass: dra.agents.net-demo               ResourceClaimTemplate: agents-net-egress
+   (FromClass DriverConfig:                       (FromClaim DriverConfig:
+    confinementMode, nicBlockMode,                 caTrust from ConfigMap/ClusterTrustBundle,
+    adapterMode=HostTun, mandatory mTLS PEP,       optional ingressPorts)
+    attested custom attributes, limits)
+               |                                             |
+               +----------------------+----------------------+
+                                      v
+            Sandbox / SandboxTemplate (podTemplate.spec.resourceClaims)
+            (unprivileged container only: runAsNonRoot, drop ALL, no sidecar)
+                                      |
+            kube-controller-manager creates one Pod-owned ResourceClaim per Pod
+            (deleted automatically when the Sandbox is suspended or deleted)
+                                      v
+            Node DaemonSet: dra-agents-net (DRA + NRI)
+             - PrepareResourceClaims: opens egress.sock, writes CA bundle & resolv.conf
+             - RunPodSandbox: isolates eth0, creates persistent tun0 in Pod netns,
+               runs userspace tun2connect (gVisor TCP/IP + VirtualDNS 198.18.0.0/15) on host
+             - CreateContainer: replaces /etc/resolv.conf -> 198.19.255.253, mounts CA bundle
+                                      |
+            Mandatory mTLS + HTTP/2 CONNECT & RFC 9298 connect-udp
+            + node-attested Agents-Net-Principal / Generation / Attributes headers
+                                      v
+            Policy Enforcement Point (PEP)
+            (agents.net connect-proxy, Envoy, gke-labs/service-portals, corporate proxy)
 ```
 
-Using a standard `ResourceClaimTemplate` has three practical properties:
+Using `HostTun` (the default `adapterMode`) with a standard `ResourceClaimTemplate` provides four practical properties:
 
-- `kube-controller-manager` sets the Pod as the owner of each generated `ResourceClaim`. Suspending or deleting a `Sandbox` deletes the `ResourceClaim` and releases the node capacity unit; resuming creates a new claim.
-- Every `SandboxWarmPool` replica gets its own `ResourceClaim`. When a `SandboxClaim` adopts a warm Pod, `dra-agents-net`'s node-scoped Pod informer picks up `agents.x-k8s.io/claim-uid` and `agents.x-k8s.io/claim-name` and forwards them to the PEP.
-- The default `install.yaml` uses `adapterMode: ExplicitProxy` (no sidecar; proxy-aware clients use `127.0.0.1:15001` and clients that ignore `HTTP_PROXY` fail closed). For transparent TCP, UDP, and DNS interception of clients that ignore proxy env vars, configure `adapterMode: TunSidecar` with `agents-net-tun2connect` inside the Pod (see [`agents.net/kubernetes`](https://github.com/aojea/agents.net/tree/main/kubernetes)).
+- **Zero sidecar and zero Pod privileges:** `dra-agents-net` creates `tun0` inside the Pod network namespace during NRI `RunPodSandbox` and keeps the `/dev/net/tun` file descriptor on the host. The Sandbox Pod runs completely unprivileged (`runAsNonRoot: true`, `allowPrivilegeEscalation: false`, `capabilities: {drop: ["ALL"]}`) with no sidecar container, no `/dev/net/tun` device, and no `egress.sock` mount.
+- **Transparent TCP, UDP, and DNS:** NRI `CreateContainer` replaces `/etc/resolv.conf` with `nameserver 198.19.255.253` (avoiding Kubernetes `search`/`ndots:5` suffix hijacking). The host-side `VirtualDNS` allocates synthetic IPv4 addresses from RFC 2544 benchmarking space (`198.18.0.0/15`, avoiding collisions with CGNAT `100.64.0.0/10`) and IPv6 from RFC 6666 discard-only space (`100::/64`), failing closed locally on any unmapped synthetic address. Unmodified applications that ignore `HTTP_PROXY` work transparently over TCP and UDP.
+- **Admin-enforced trust boundary:** `dra-agents-net` accepts `confinementMode`, `nicBlockMode`, `adapterMode`, `policyEnforcementPoint` (mandatory mTLS), `custom` attributes, and limits only from cluster-admin `DeviceClass` (`FromClass`). Namespace `ResourceClaimTemplate` objects can only layer `caTrust` (`ConfigMap` or `ClusterTrustBundle`), `ingressPorts`, and `ExplicitProxy` overrides.
+- **Automatic lifecycle binding:** `kube-controller-manager` sets the Pod as owner of each `ResourceClaim`. Suspending or deleting a `Sandbox` deletes the `ResourceClaim` and releases the node slot; resuming creates a fresh claim. Each `SandboxWarmPool` replica receives its own `ResourceClaim`.
 
-Under `confinementMode: NetworkPolicyDenyAll`, `dra-agents-net` flushes non-loopback routes and attaches `tc clsact` ingress/egress drop filters on every non-loopback NIC inside the Pod netns (`nicBlockMode: DropAll`, default in `DeviceClass`). On clusters with KEP-6313 Network-Isolated Pods, set `confinementMode: PodNetworkIsolated` instead.
+### Compatibility notes with `agent-sandbox`
 
-## Prerequisites
+- **`confinementMode: NetworkPolicyDenyAll` (required today):** `agent-sandbox` currently gates `Sandbox` `Ready=True` and `SandboxWarmPool` candidate adoption on a non-empty `status.podIPs`. `NetworkPolicyDenyAll` keeps a CNI Pod IP while isolating traffic, so unmodified `agent-sandbox` works today. (`PodNetworkIsolated` under KEP-6313 assigns no Pod IP and requires relaxing the `podIPs` readiness check in `agent-sandbox`.)
+- **`sandbox-router` ingress:** Under `nicBlockMode: DropAll` (default), `dra-agents-net` flushes `eth0` routes and blocks `eth0` with `tc clsact` drop filters, which also blocks direct `sandbox-router` → `PodIP:8888` traffic (use `dra-agents-net`'s mTLS ingress bridge / `agents-net-ingress-gateway` instead). If you want `sandbox-router` and kubelet HTTP/TCP probes to keep using `PodIP` over `eth0`, set `nicBlockMode: Disabled` in the `DeviceClass` and enforce egress deny-all with a CNI `NetworkPolicy`; `HostTun` automatically installs source-IP policy routing so `PodIP` replies still exit `eth0`.
+
+## Quickstart (automated kind demo)
+
+Run [demo.sh](demo.sh) to spin up a disposable kind `v1.36.1` cluster with containerd NRI enabled, install `agent-sandbox` (core + extensions), install `dra-agents-net` with ephemeral mTLS PKI, deploy an in-cluster HTTPS/UDP echo target and `agents.net` `connect-proxy` PEP, and verify `Sandbox`, suspend/resume, and `SandboxWarmPool` + `SandboxClaim` end-to-end:
+
+```bash
+# Build dra-agents-net and connect-proxy from a local agents.net checkout:
+AGENTS_NET_DIR=/path/to/agents.net ./demo.sh
+
+# Or run against an existing Kubernetes 1.36+ cluster with NRI enabled:
+USE_EXISTING_CLUSTER=true KUBE_CONTEXT=<context> AGENTS_NET_DIR=/path/to/agents.net ./demo.sh
+```
+
+Set `KEEP_CLUSTER=true` to keep the disposable kind cluster after the verification checks pass so you can inspect the resources interactively.
+
+## Manual walkthrough
+
+### Prerequisites
 
 1. Kubernetes 1.36+ (GA DRA `resource.k8s.io/v1` and default-enabled `DRAConsumableCapacity`) with containerd NRI enabled.
-2. Standard `agent-sandbox` (core and extensions controllers).
-3. `dra-agents-net` installed in `kube-system`:
+2. `agent-sandbox` (core and extensions controllers).
+3. `dra-agents-net` installed in `kube-system` with its node mTLS client credentials mounted at `/etc/dra-agents-net/client` and PEP CA certificate at `/etc/dra-agents-net/ca/ca.crt`:
 
    ```bash
    kubectl apply -f https://raw.githubusercontent.com/aojea/agents.net/main/kubernetes/install.yaml
    kubectl -n kube-system rollout status daemonset/dra-agents-net
-   kubectl get deviceclass dra.agents.net
    kubectl get resourceslices --field-selector=spec.driver=dra.agents.net
    ```
 
-4. A reachable PEP supporting HTTP `CONNECT` (for example `agents.net` `connect-proxy`, Envoy, `gke-labs/service-portals`, or a corporate proxy), its CA ConfigMap (`pep-ca`), and any custom workload CA Secret (`corp-ca-tls`) referenced in [manifests/01-resource-claim-template.yaml](manifests/01-resource-claim-template.yaml).
+4. A reachable PEP supporting mTLS HTTP/2 or HTTP/1.1 `CONNECT` (for example `agents.net` `connect-proxy`, Envoy, `gke-labs/service-portals`, or a corporate proxy) and a `demo-ca` `ConfigMap` in `agents-net-demo` containing the trusted CA bundle.
 
-## Walkthrough
+### 1. Create the namespace, `DeviceClass`, and `ResourceClaimTemplate`
 
-### 1. Create the namespace and `ResourceClaimTemplate`
-
-Update `policyEnforcementPoint.url`, `tls`, `auth`, and `caTrust` in [manifests/01-resource-claim-template.yaml](manifests/01-resource-claim-template.yaml) for your PEP, then apply:
+Update `policyEnforcementPoint.url`, `tls`, and `auth` in [manifests/01-device-class.yaml](manifests/01-device-class.yaml) for your PEP, then apply:
 
 ```bash
 kubectl apply -f manifests/00-namespace.yaml
-kubectl apply -f manifests/01-resource-claim-template.yaml
+kubectl apply -f manifests/01-device-class.yaml
+kubectl apply -f manifests/02-resource-claim-template.yaml
 ```
 
 ### 2. Deploy a `Sandbox`
 
-Apply [manifests/02-sandbox.yaml](manifests/02-sandbox.yaml) and wait for readiness:
+Apply [manifests/03-sandbox.yaml](manifests/03-sandbox.yaml) and wait for readiness:
 
 ```bash
-kubectl apply -f manifests/02-sandbox.yaml
+kubectl apply -f manifests/03-sandbox.yaml
 kubectl -n agents-net-demo wait --for=condition=Ready sandbox/coding-agent --timeout=60s
 kubectl -n agents-net-demo get sandbox,resourceclaim,pod
 ```
 
-### 3. Check confinement and proxy env vars
+### 3. Verify `HostTun` confinement and transparent egress
 
 ```bash
-# Proxy and CA env vars injected by NRI CreateContainer
-kubectl -n agents-net-demo exec coding-agent -- sh -c \
-  'env | grep -E "PROXY|AGENT|CA_CERT|SSL_CERT" | sort'
+# NRI replaces /etc/resolv.conf with the HostTun virtual DNS resolver (198.19.255.253)
+kubectl -n agents-net-demo exec coding-agent -- cat /etc/resolv.conf
 
-# Non-loopback routes are flushed
+# All non-loopback routes point exclusively to tun0 (eth0 routes are flushed)
 kubectl -n agents-net-demo exec coding-agent -- cat /proc/net/route
 
-# Direct egress bypassing the proxy fails
+# Verify zero proxy env vars, transparent allowed egress, and fail-closed denials
 kubectl -n agents-net-demo exec -i coding-agent -- python3 - <<'PY'
-import os, socket
+import os, socket, urllib.error, urllib.request
+
+assert not os.environ.get("HTTP_PROXY") and not os.environ.get("HTTPS_PROXY")
+
+with urllib.request.urlopen("https://echo.agents-net-demo.svc.cluster.local:8443/hello", timeout=10) as resp:
+    print("Allowed HTTPS:", resp.status, resp.read().decode())
 
 try:
-    socket.create_connection(("1.1.1.1", 443), timeout=2).close()
-    raise SystemExit("UNEXPECTED: direct egress succeeded")
-except OSError as e:
-    print("Direct egress blocked:", e)
+    urllib.request.urlopen("https://blocked.example:443/", timeout=5)
+    raise SystemExit("UNEXPECTED: blocked.example succeeded")
+except (urllib.error.URLError, OSError) as e:
+    print("Denied host blocked:", e)
 
-print("HTTP_PROXY =", os.environ.get("HTTP_PROXY"))
-print("SSL_CERT_FILE =", os.environ.get("SSL_CERT_FILE"))
+try:
+    socket.create_connection(("198.18.9.9", 443), timeout=5).close()
+    raise SystemExit("UNEXPECTED: unmapped synthetic IP succeeded")
+except OSError as e:
+    print("Unmapped synthetic IP failed closed:", e)
 PY
 ```
 
-### 4. Check suspend and resume
+### 4. Verify suspend and resume
 
-Suspending deletes the backing Pod and its Pod-owned `ResourceClaim`. Resuming creates a fresh `ResourceClaim`:
+Suspending deletes the backing Pod and its Pod-owned `ResourceClaim`. Resuming creates a fresh `ResourceClaim` and re-attaches `HostTun`:
 
 ```bash
 kubectl -n agents-net-demo patch sandbox coding-agent --type=merge -p '{"spec":{"operatingMode":"Suspended"}}'
@@ -116,10 +145,10 @@ kubectl -n agents-net-demo get resourceclaims
 
 ### 5. Deploy a `SandboxTemplate`, `SandboxWarmPool`, and `SandboxClaim`
 
-Apply [manifests/03-warmpool.yaml](manifests/03-warmpool.yaml):
+Apply [manifests/04-warmpool.yaml](manifests/04-warmpool.yaml):
 
 ```bash
-kubectl apply -f manifests/03-warmpool.yaml
+kubectl apply -f manifests/04-warmpool.yaml
 kubectl -n agents-net-demo wait --for=condition=Ready sandboxclaim/coding-session --timeout=60s
 kubectl -n agents-net-demo get sandboxwarmpool,sandboxclaim,sandbox,resourceclaim
 ```
@@ -127,8 +156,9 @@ kubectl -n agents-net-demo get sandboxwarmpool,sandboxclaim,sandbox,resourceclai
 ## Cleanup
 
 ```bash
-kubectl delete -f manifests/03-warmpool.yaml --ignore-not-found
-kubectl delete -f manifests/02-sandbox.yaml --ignore-not-found
-kubectl delete -f manifests/01-resource-claim-template.yaml --ignore-not-found
+kubectl delete -f manifests/04-warmpool.yaml --ignore-not-found
+kubectl delete -f manifests/03-sandbox.yaml --ignore-not-found
+kubectl delete -f manifests/02-resource-claim-template.yaml --ignore-not-found
+kubectl delete -f manifests/01-device-class.yaml --ignore-not-found
 kubectl delete -f manifests/00-namespace.yaml --ignore-not-found
 ```

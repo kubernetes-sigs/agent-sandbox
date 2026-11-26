@@ -1,0 +1,61 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Cluster-admin DeviceClass defining the confinement mode, HostTun adapter
+# (default, zero sidecar), mandatory mTLS Policy Enforcement Point (PEP), and
+# admin-attested custom attributes.
+#
+# dra-agents-net restricts these fields strictly to DeviceClass (FromClass) so
+# namespace workloads cannot bypass the PEP, disable confinement, or spoof
+# Agents-Net-Attributes headers from a ResourceClaim.
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: dra.agents.net-demo
+spec:
+  selectors:
+    - cel:
+        expression: device.driver == "dra.agents.net"
+  config:
+    - opaque:
+        driver: dra.agents.net
+        parameters:
+          apiVersion: dra.agents.net/v1alpha1
+          kind: DriverConfig
+          # NetworkPolicyDenyAll keeps a CNI Pod IP so unmodified agent-sandbox
+          # Sandbox Ready=True and SandboxWarmPool adoption work today.
+          confinementMode: NetworkPolicyDenyAll
+          # DropAll flushes eth0 routes and attaches tc clsact drop filters on
+          # eth0. Set nicBlockMode: Disabled with a CNI NetworkPolicy if you
+          # route inbound traffic to PodIP:8888 via sandbox-router; HostTun
+          # installs source-IP policy routing so eth0 replies keep working.
+          nicBlockMode: DropAll
+          # HostTun (default) creates tun0 inside the Pod netns and runs the
+          # userspace TCP/IP stack + VirtualDNS (198.18.0.0/15) on the host.
+          # Zero sidecar container, zero Pod privileges, transparent TCP/UDP.
+          adapterMode: HostTun
+          policyEnforcementPoint:
+            url: https://connect-proxy.agents-net-demo.svc.cluster.local:8443
+            tls:
+              serverName: connect-proxy.agents-net-demo.svc.cluster.local
+              caCertificateRefs:
+                - type: HostPath
+                  hostPath: /etc/dra-agents-net/ca/ca.crt
+            auth:
+              type: MTLS
+              mtls:
+                certDir: /etc/dra-agents-net/client
+          custom:
+            tenant: team-alpha
+            env: demo

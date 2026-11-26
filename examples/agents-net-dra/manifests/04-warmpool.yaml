@@ -12,15 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Unmodified agent-sandbox Sandbox attaching dra.agents.net solely through
-# standard Kubernetes podTemplate.spec.resourceClaims[].resourceClaimTemplateName.
-# Zero changes to the Sandbox CRD or agent-sandbox controller are required.
-apiVersion: agents.x-k8s.io/v1beta1
-kind: Sandbox
+# SandboxTemplate + SandboxWarmPool + SandboxClaim using standard Kubernetes DRA
+# ResourceClaimTemplateName with HostTun (zero sidecar, zero Pod privileges).
+#
+# Each warm replica gets its own Pod-owned ResourceClaim from
+# kube-controller-manager. When a SandboxClaim adopts a warm Pod, transparent
+# egress through the mTLS PEP continues working with zero Pod changes.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
 metadata:
-  name: coding-agent
+  name: agent-template
   namespace: agents-net-demo
 spec:
+  # Optional: dra-agents-net's default nicBlockMode=DropAll isolates all
+  # non-loopback NICs independently of NetworkPolicy. Leave Managed (default)
+  # with nicBlockMode=Disabled when using CNI NetworkPolicy + sandbox-router.
+  networkPolicyManagement: Unmanaged
   podTemplate:
     spec:
       automountServiceAccountToken: false
@@ -35,6 +42,7 @@ spec:
       containers:
         - name: agent
           image: python:3.14-slim
+          imagePullPolicy: IfNotPresent
           command:
             - python3
             - -c
@@ -46,3 +54,22 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: agent-pool
+  namespace: agents-net-demo
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: agent-template
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: coding-session
+  namespace: agents-net-demo
+spec:
+  warmPoolRef:
+    name: agent-pool

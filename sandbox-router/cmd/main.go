@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/tls"
 	"errors"
 	"flag"
@@ -278,17 +277,6 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 				return fmt.Errorf("read --authz-scoped-token-secret-file: %w", err)
 			}
 		}
-		var verificationKeys map[string]ed25519.PublicKey
-		if cfg.AuthzScopedTokenVerificationKeysFile != "" {
-			keyData, err := os.ReadFile(cfg.AuthzScopedTokenVerificationKeysFile)
-			if err != nil {
-				return fmt.Errorf("read --authz-scoped-token-verification-keys-file: %w", err)
-			}
-			verificationKeys, err = authz.ParseScopedTokenVerificationKeys(keyData)
-			if err != nil {
-				return fmt.Errorf("parse --authz-scoped-token-verification-keys-file: %w", err)
-			}
-		}
 		var v1AcceptUntil time.Time
 		if cfg.AuthzScopedTokenV1AcceptUntil != "" {
 			var err error
@@ -297,18 +285,38 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 				return fmt.Errorf("parse --authz-scoped-token-v1-accept-until: %w", err)
 			}
 		}
-		st, err := authz.NewScopedTokenAuthorizer(authz.ScopedTokenOptions{
+		stOpts := authz.ScopedTokenOptions{
 			// NewScopedTokenAuthorizer trims whitespace itself, so a
 			// mounted Secret with a trailing newline just works.
-			Secret:           secret,
-			VerificationKeys: verificationKeys,
-			V1AcceptUntil:    v1AcceptUntil,
-			TokenLocations:   tokenLocations,
-		})
-		if err != nil {
-			return fmt.Errorf("build scoped-token authorizer: %w", err)
+			Secret:         secret,
+			V1AcceptUntil:  v1AcceptUntil,
+			TokenLocations: tokenLocations,
 		}
-		authorizer = st
+		if cfg.AuthzScopedTokenVerificationKeysFile != "" {
+			// The v2 key file is followed, not read once: a reader-first
+			// rotation needs no rollout.
+			st, err := authz.NewReloadingScopedTokenAuthorizer(cfg.AuthzScopedTokenVerificationKeysFile, stOpts,
+				log.WithName("scoped-token-keys"), func(ok bool, _ error) {
+					outcome := "success"
+					if !ok {
+						outcome = "failure"
+					}
+					metrics.ScopedTokenKeyReloadsTotal.WithLabelValues(outcome).Inc()
+				})
+			if err != nil {
+				return fmt.Errorf("--authz-scoped-token-verification-keys-file: %w", err)
+			}
+			if err := st.Start(ctx); err != nil {
+				return fmt.Errorf("scoped-token key watcher: %w", err)
+			}
+			authorizer = st
+		} else {
+			st, err := authz.NewScopedTokenAuthorizer(stOpts)
+			if err != nil {
+				return fmt.Errorf("build scoped-token authorizer: %w", err)
+			}
+			authorizer = st
+		}
 	}
 
 	// --- Proxy handler -----------------------------------------------------

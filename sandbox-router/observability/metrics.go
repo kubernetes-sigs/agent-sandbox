@@ -35,15 +35,18 @@ import (
 // tests do not collide with the global one and so we don't accidentally
 // pick up unrelated controller-runtime metrics.
 type Metrics struct {
-	RequestsTotal           *prometheus.CounterVec
-	RequestDurationSeconds  *prometheus.HistogramVec
-	InflightRequests        prometheus.Gauge
-	UpstreamErrorsTotal     *prometheus.CounterVec
-	CertReloadsTotal        *prometheus.CounterVec
-	UpstreamRetriesTotal    *prometheus.CounterVec
-	CacheInvalidationsTotal *prometheus.CounterVec
-	AuthzDecisionsTotal     *prometheus.CounterVec
-	BuildInfo               prometheus.Collector
+	RequestsTotal          *prometheus.CounterVec
+	RequestDurationSeconds *prometheus.HistogramVec
+	InflightRequests       prometheus.Gauge
+	UpstreamErrorsTotal    *prometheus.CounterVec
+	CertReloadsTotal       *prometheus.CounterVec
+	// ScopedTokenKeyReloadsTotal counts reloads of the scoped-token v2
+	// verification key file, by outcome.
+	ScopedTokenKeyReloadsTotal *prometheus.CounterVec
+	UpstreamRetriesTotal       *prometheus.CounterVec
+	CacheInvalidationsTotal    *prometheus.CounterVec
+	AuthzDecisionsTotal        *prometheus.CounterVec
+	BuildInfo                  prometheus.Collector
 	// ClientRxBytesTotal counts bytes received from clients (request bodies).
 	ClientRxBytesTotal *prometheus.CounterVec
 	// ClientTxBytesTotal counts bytes sent to clients (response bodies).
@@ -88,6 +91,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		CertReloadsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sandbox_router_cert_reloads_total",
 			Help: "Server certificate reload attempts, labeled by outcome.",
+		}, []string{"outcome"}),
+
+		ScopedTokenKeyReloadsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sandbox_router_scoped_token_key_reloads_total",
+			Help: "Scoped-token v2 verification key file reload attempts, labeled by outcome.",
 		}, []string{"outcome"}),
 
 		UpstreamRetriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -146,6 +154,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.InflightRequests,
 		m.UpstreamErrorsTotal,
 		m.CertReloadsTotal,
+		m.ScopedTokenKeyReloadsTotal,
 		m.UpstreamRetriesTotal,
 		m.CacheInvalidationsTotal,
 		m.AuthzDecisionsTotal,

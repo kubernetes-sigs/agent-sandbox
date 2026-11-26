@@ -30,9 +30,11 @@ The key-set file accepts overlapping readers. Each `publicKey` is the raw 32-byt
 Rotate keys reader first:
 
 1. Create `sandbox-router-scoped-token-keys-v2` with both the previous and new public keys.
-2. Change the ConfigMap name in `deployment-patch.yaml` to `v2`, then apply the overlay again. The Pod-template change rolls the Deployment because the router does not reload the file in place.
+2. Change the ConfigMap name in `deployment-patch.yaml` to `v2`, then apply the overlay again. The Pod-template change rolls the Deployment, so the change is recorded and gated by the rollout.
 3. Wait for the rollout to finish before issuers mint tokens with the new `kid`.
 4. Wait until every token signed by the previous key has expired.
 5. Create the next versioned ConfigMap with only the current key, update the patch, and complete another rollout before deleting the old ConfigMap.
+
+The router also follows the mounted key file, so editing one mutable ConfigMap in place works too: the change reaches each replica within the kubelet's sync period, with no rollout. The versioned, rolled-out sequence above keeps every change visible in the Deployment's history and lets a rollout gate it, which is why this example uses it.
 
 Keep the versioned ConfigMaps immutable in production. A chart or GitOps system may generate the names from content hashes, but that rollout policy belongs to the downstream deployment rather than this upstream example.

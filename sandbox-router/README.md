@@ -361,7 +361,7 @@ Set `--authz-mode=scoped-token` to authorize requests without giving callers a c
 
 Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry, or only the Sandbox for a sandbox-scoped token. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
 
-The router reads the verification key file once during startup. It does not reload projected file updates. Use a versioned ConfigMap name in the Pod template so each reader-first key-set change rolls the Deployment, and wait for every router replica to accept the overlapping set before issuers use a new `kid`. The [`examples/scoped-token-v2`](examples/scoped-token-v2/) overlay carries the upstream patch and rotation sequence. Helm values, content-hash annotations, and rollout policy belong to the downstream deployment.
+The router follows the verification key file: an edit, or a projected ConfigMap or Secret update, is picked up without a restart (the file's directory is watched, as for the TLS certificate). A file that fails to read or parse keeps the previous key set; the failure is logged and counted in `sandbox_router_scoped_token_key_reloads_total{outcome="failure"}`, so check that counter after removing a key. For a reader-first rotation, add the new `kid` to the ConfigMap, wait until every replica has reloaded it (the kubelet's sync period plus a moment) before issuers use it, and remove the old `kid` once its tokens have expired. The [`examples/scoped-token-v2`](examples/scoped-token-v2/) overlay's versioned ConfigMap names still work and still roll the Deployment.
 
 V2 requires `--cache-enabled` and rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. Before authorization, the router resolves the UID and namespace/name indexes together and places the cache-selected Sandbox UID in the canonical target. The current name owner wins over a stale requested UID, so a token from a replaced Sandbox cannot follow the name to its replacement. An unclaimed warm-pool member remains reachable only through its exact UID until adoption adds the name index. When v1 and v2 verification are both configured, legacy namespace/name routing remains available to v1 only during the configured overlap window. V1-only deployments retain their existing behavior.
 
@@ -386,7 +386,7 @@ An exact v2 token authorizes the bound Sandbox UID, method, port, and path until
 
 `authz.MintScopedTokenV2Sandbox` mints a sandbox-scoped token instead. It authorizes every port, method, and path of the bound Sandbox UID until expiry, including sidecar ports, so keep its TTL short. Use it for clients that send one token on every call, such as the Python SDK's router mode. Routers without sandbox-scope support reject these tokens with 403, so upgrade every router replica before issuers mint them.
 
-The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
+The router reloads keys when the file changes. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
 
 ### Browser-session credentials
 
@@ -470,6 +470,7 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_cache_invalidations_total` | counter | `sandbox_namespace` (KEP-NNNN active invalidation: bumped when the proxy evicts a cached IP after a dial failure) |
 | `sandbox_router_authz_decisions_total` | counter | `sandbox_namespace`, `decision` (`allow` / `deny`) |
 | `sandbox_router_cert_reloads_total` | counter | `outcome` (`success` / `failure`) |
+| `sandbox_router_scoped_token_key_reloads_total` | counter | `outcome` (`success` / `failure`) |
 | `sandbox_router_build_info` | gauge (const labels) | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` |
 
 These request, duration and inflight metrics also cover native gRPC and

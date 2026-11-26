@@ -93,6 +93,10 @@ type Config struct {
 	HTTPSAddr string
 	// MetricsAddr is the address for the Prometheus /metrics endpoint.
 	MetricsAddr string
+	// MetricsSecureServing enables TLS on the /metrics endpoint using the
+	// same certificate as the HTTPS proxy listener. Requires TLSCertFile
+	// and TLSKeyFile.
+	MetricsSecureServing bool
 	// ProbeAddr is the address for the /healthz and /readyz endpoints.
 	ProbeAddr string
 
@@ -116,11 +120,14 @@ type Config struct {
 	// ClusterDomain is the Kubernetes cluster DNS suffix used to build target
 	// service FQDNs (e.g. "cluster.local"). Honors CLUSTER_DOMAIN.
 	ClusterDomain string
-	// ProxyTimeout bounds the total time spent proxying a single request to
-	// an upstream sandbox. Honors PROXY_TIMEOUT_SECONDS (numeric seconds).
+	// ProxyTimeout bounds normal HTTP requests, not gRPC or upgrades.
+	// Honors PROXY_TIMEOUT_SECONDS (numeric seconds).
 	ProxyTimeout time.Duration
-	// ResponseHeaderTimeout bounds the time spent waiting for the upstream
-	// to start sending the response headers.
+	// GRPCProxyTimeout is an optional total RPC duration cap, including
+	// discovery and authorization. Zero leaves the caller's budget intact.
+	GRPCProxyTimeout time.Duration
+	// ResponseHeaderTimeout bounds the wait for HTTP upstream headers.
+	// gRPC uses its effective RPC budget instead.
 	ResponseHeaderTimeout time.Duration
 	// ShutdownTimeout bounds the time each HTTP server is allowed to drain
 	// in-flight requests on SIGTERM.
@@ -181,6 +188,34 @@ type Config struct {
 	// SDKs that already hold cluster-internal knowledge, never for a
 	// browser tab.
 	PathRoutingPrefix string
+
+	// PathRoutingPreservePrefix, when true, forwards a path-routed request
+	// to the sandbox with its full original path intact —
+	// <PathRoutingPrefix>/<namespace>/<id>/<port>/<rest...> — instead of
+	// the stripped <rest...>. Use it for a sandbox UI that is configured
+	// to serve under its own base path (for example JupyterLab started
+	// with --ServerApp.base_url=<prefix>/<namespace>/<id>/<port>/): such an
+	// app emits prefixed Location, Set-Cookie, asset and WebSocket URLs
+	// itself, so the router must not strip the prefix from what it
+	// forwards. Its Location headers are left alone too, though Set-Cookie
+	// Path is still rescoped under the prefix (see PathRoutingRewriteResponses).
+	//
+	// Off by default, which keeps the stripped form for apps that have no
+	// base-path setting. In that default mode the router rewrites
+	// upstream Location and Set-Cookie Path attributes for path-routed
+	// requests so they stay under the prefix. Requires
+	// PathRoutingPrefix.
+	PathRoutingPreservePrefix bool
+
+	// PathRoutingRewriteResponses, when true (the default), rewrites the
+	// Location and Set-Cookie Path of path-routed responses so they stay under
+	// the routing prefix. Set-Cookie Path is rewritten in both modes. Location
+	// is rewritten only in the default strip mode: under
+	// PathRoutingPreservePrefix the sandbox already emits prefixed redirects,
+	// and the router leaves them alone. Turn this off only for an upstream that
+	// must see its redirects and cookies unmodified, accepting that apps with
+	// no base-path setting will redirect the browser outside the prefix.
+	PathRoutingRewriteResponses bool
 
 	// EnableTracing enables OTel tracing via the OTLP gRPC exporter. The
 	// exporter endpoint is read from OTEL_EXPORTER_OTLP_ENDPOINT.
@@ -319,29 +354,37 @@ type Config struct {
 	// same-origin check this exists to make actually match reality.
 	// Has no effect without AuthzCookieName.
 	AuthzTrustForwardedProto bool
+	// GRPCWebAllowedOrigins is the allowlist of browser origins permitted
+	// to call the router with gRPC-Web. A same-origin request is always
+	// allowed regardless of this list. When the list is empty (the
+	// default), only same-origin browser callers receive CORS headers;
+	// cross-origin requests are still proxied but the browser blocks the
+	// response. Each entry has the form scheme://host[:port].
+	GRPCWebAllowedOrigins []string
 }
 
 // Defaults returns a Config populated with the default values used when no
 // flag overrides are present.
 func Defaults() Config {
 	return Config{
-		HTTPAddr:                  ":8080",
-		HTTPSAddr:                 "",
-		MetricsAddr:               ":9090",
-		ProbeAddr:                 ":8081",
-		MTLSMode:                  MTLSOff,
-		ClusterDomain:             "cluster.local",
-		ProxyTimeout:              180 * time.Second,
-		ResponseHeaderTimeout:     30 * time.Second,
-		ShutdownTimeout:           30 * time.Second,
-		UpstreamMaxRetries:        3,
-		UpstreamRetryInitialDelay: 200 * time.Millisecond,
-		UpstreamRetryMaxDelay:     800 * time.Millisecond,
-		AccessLog:                 true,
-		AuthzMode:                 AuthzAllowAll,
-		AuthzTokenReviewTTL:       30 * time.Second,
-		AuthzTokenReviewCacheSize: 2048,
-		AuthzCookieSameSite:       CookieSameSiteLax,
+		PathRoutingRewriteResponses: true,
+		HTTPAddr:                    ":8080",
+		HTTPSAddr:                   "",
+		MetricsAddr:                 ":9090",
+		ProbeAddr:                   ":8081",
+		MTLSMode:                    MTLSOff,
+		ClusterDomain:               "cluster.local",
+		ProxyTimeout:                180 * time.Second,
+		ResponseHeaderTimeout:       30 * time.Second,
+		ShutdownTimeout:             30 * time.Second,
+		UpstreamMaxRetries:          3,
+		UpstreamRetryInitialDelay:   200 * time.Millisecond,
+		UpstreamRetryMaxDelay:       800 * time.Millisecond,
+		AccessLog:                   true,
+		AuthzMode:                   AuthzAllowAll,
+		AuthzTokenReviewTTL:         30 * time.Second,
+		AuthzTokenReviewCacheSize:   2048,
+		AuthzCookieSameSite:         CookieSameSiteLax,
 	}
 }
 
@@ -364,6 +407,12 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.MetricsSecureServing {
+		if c.TLSCertFile == "" || c.TLSKeyFile == "" {
+			return errors.New("--tls-cert-file and --tls-key-file are required when --metrics-secure-serving is set")
+		}
+	}
+
 	if c.MTLSMode != MTLSOff {
 		if c.HTTPSAddr == "" {
 			return fmt.Errorf("--mtls-mode=%s requires --https-bind-address to be set", c.MTLSMode)
@@ -383,6 +432,9 @@ func (c *Config) Validate() error {
 
 	if c.ProxyTimeout <= 0 {
 		return fmt.Errorf("--proxy-timeout must be positive, got %s", c.ProxyTimeout)
+	}
+	if c.GRPCProxyTimeout < 0 {
+		return fmt.Errorf("--grpc-proxy-timeout must be non-negative, got %s", c.GRPCProxyTimeout)
 	}
 	if c.ResponseHeaderTimeout <= 0 {
 		return fmt.Errorf("--response-header-timeout must be positive, got %s", c.ResponseHeaderTimeout)
@@ -416,6 +468,9 @@ func (c *Config) Validate() error {
 		}) {
 			return fmt.Errorf("--path-routing-prefix must not contain whitespace or control characters, got %q", c.PathRoutingPrefix)
 		}
+	}
+	if c.PathRoutingPreservePrefix && c.PathRoutingPrefix == "" {
+		return errors.New("--path-routing-preserve-prefix requires --path-routing-prefix")
 	}
 	if c.UpstreamMaxRetries < 0 {
 		return fmt.Errorf("--upstream-max-retries must be non-negative, got %d", c.UpstreamMaxRetries)
@@ -493,6 +548,11 @@ func (c *Config) Validate() error {
 	}
 	if len(c.AuthzCookieAllowedOrigins) > 0 && c.AuthzCookieName == "" {
 		return errors.New("--authz-cookie-allowed-origins has no effect without --authz-cookie-name, which is what runs the same-origin check it configures")
+	}
+	for _, origin := range c.GRPCWebAllowedOrigins {
+		if !validOriginPattern(origin) {
+			return fmt.Errorf("--grpc-web-allowed-origins entry %q must have the form scheme://host[:port], with no path/query/fragment", origin)
+		}
 	}
 	if c.AuthzTrustForwardedProto && c.AuthzCookieName == "" {
 		return errors.New("--authz-trust-forwarded-proto has no effect without --authz-cookie-name, which is what runs the same-origin check it affects")

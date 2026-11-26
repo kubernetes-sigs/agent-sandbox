@@ -60,6 +60,25 @@ type SandboxWarmPoolSpec struct {
 	// Defaults to OnReplenish.
 	// +optional
 	UpdateStrategy *SandboxWarmPoolUpdateStrategy `json:"updateStrategy,omitempty"`
+
+	// readinessGracePeriodSeconds is how long a sandbox in this pool may stay
+	// non-Ready before the controller treats it as stuck and replaces it. The
+	// period is counted from the later of the sandbox's creation and its Pod
+	// being scheduled, not from when it last lost readiness. A sandbox whose Pod
+	// is unschedulable or waiting on scheduling gates is held rather than
+	// replaced. Pools backed by slow-starting runtimes generally
+	// need a longer grace period than pools backed by fast ones.
+	// If unset, the controller-level value is used (the
+	// --sandbox-warm-pool-readiness-grace-period flag or the controller
+	// ConfigMap), which defaults to 300 seconds.
+	// Changing this field does not mark existing sandboxes stale. Shortening it
+	// can still replace a non-Ready sandbox that is already older than the new
+	// value.
+	// The minimum is 30 seconds: a shorter period would delete members before
+	// they could start, and the pool would keep recreating them.
+	// +kubebuilder:validation:Minimum=30
+	// +optional
+	ReadinessGracePeriodSeconds *int32 `json:"readinessGracePeriodSeconds,omitempty"`
 }
 
 // SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates
@@ -120,6 +139,7 @@ type SandboxWarmPoolStatus struct {
 // +kubebuilder:resource:scope=Namespaced,shortName=swp
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.readyReplicas"
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".spec.replicas"
+// +kubebuilder:printcolumn:name="Template",type="string",JSONPath=".spec.sandboxTemplateRef.name",priority=1
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
 // SandboxWarmPool is the Schema for the sandboxwarmpools API.

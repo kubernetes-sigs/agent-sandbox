@@ -1,0 +1,22 @@
+{{- if and .Values.rbac.create (eq (include "sandbox-router.authzMode" .) "tokenreview") }}
+{{- /*
+--authz-mode=tokenreview needs create on tokenreviews.authentication.k8s.io.
+system:auth-delegator is the stock ClusterRole for that (it also grants create
+on subjectaccessreviews). It is bound only in this mode, so default installs
+carry no TokenReview grant.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-router-auth-delegator
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: {{ include "sandbox-router.namespace" . }}
+{{- end }}

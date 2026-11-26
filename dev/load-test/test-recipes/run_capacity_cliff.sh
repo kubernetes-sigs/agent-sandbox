@@ -18,11 +18,26 @@ set -o pipefail
 
 
 RUN_ID=$(date +%Y%m%d-%H%M%S)
-if [ -n "$1" ]; then
+if [ -n "${1:-}" ]; then
   RUN_ID+="-${1}"
 fi
 
 # Configuration defaults (overridable via environment variables)
+WORKLOAD="${WORKLOAD:-sandbox}"
+WARMPOOL_SCENARIO="${WARMPOOL_SCENARIO:-single-pool}"
+POOL_SIZE="${POOL_SIZE:-1}"
+WARMPOOL_TIMEOUT_SECONDS="${WARMPOOL_TIMEOUT_SECONDS:-1800}"
+WARMPOOL_POLL_SECONDS="${WARMPOOL_POLL_SECONDS:-10}"
+ENABLE_PROMETHEUS="${ENABLE_PROMETHEUS:-true}"
+case "$WORKLOAD" in sandbox|warmpool) ;; *) echo "Invalid WORKLOAD: $WORKLOAD" >&2; exit 1 ;; esac
+case "$WARMPOOL_SCENARIO" in single-pool|many-pools) ;; *) echo "Invalid WARMPOOL_SCENARIO" >&2; exit 1 ;; esac
+case "$ENABLE_PROMETHEUS" in true|false) ;; *) echo "Invalid ENABLE_PROMETHEUS" >&2; exit 1 ;; esac
+if [ "$WORKLOAD" = sandbox ] && [ "$ENABLE_PROMETHEUS" != true ]; then
+  echo "The Sandbox recipe requires Prometheus." >&2; exit 1
+fi
+if [ "$WORKLOAD" = warmpool ] && [ -z "${KUBECONFIG:-}" ]; then
+  echo "Set KUBECONFIG explicitly for the WarmPool load test." >&2; exit 1
+fi
 STEP_SIZE="${STEP_SIZE:-1000}"
 TOTAL_STEPS="${TOTAL_STEPS:-20}"
 QPS="${QPS:-100}"
@@ -75,10 +90,27 @@ fi
 # Paths to local clones (overridable via environment variables).
 # Clusterloader2 must be cloned or forked from https://github.com/kubernetes/perf-tests
 CL2_DIR="${CL2_DIR:-${HOME}/perf-tests/clusterloader2}"
-AGENTS_DIR="${AGENTS_DIR:-${HOME}/agent-sandbox}"
+AGENTS_DIR="${AGENTS_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 TEST_DIR="${AGENTS_DIR}/dev/load-test/test-recipes"
 TEST_CONFIG="${TEST_DIR}/sandbox-capacity-cliff-test.yaml"
 LOGS_DIR="${TEST_DIR}/tmp/${RUN_ID}"
+if [ "$WORKLOAD" = warmpool ]; then
+  if [ ! -f "$KUBECONFIG" ]; then
+    echo "KUBECONFIG must name a single existing file." >&2; exit 1
+  fi
+  export KUBECONFIG="$(cd "$(dirname "$KUBECONFIG")" && pwd)/$(basename "$KUBECONFIG")"
+  if [ "$NAMESPACES" != 1 ]; then
+    echo "The WarmPool recipe uses one namespace to exercise shared-template fan-out." >&2; exit 1
+  fi
+  for value in "$STEP_SIZE" "$TOTAL_STEPS" "$POOL_SIZE" "$WARMPOOL_TIMEOUT_SECONDS" "$WARMPOOL_POLL_SECONDS"; do
+    if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+      echo "WarmPool counts and timeouts must be positive integers: $value" >&2; exit 1
+    fi
+  done
+  TEST_CONFIG="${TEST_DIR}/warmpool-capacity-cliff-test.yaml"
+  export WARMPOOL_TEST_DIR="$TEST_DIR" WARMPOOL_REPORT_DIR="$LOGS_DIR"
+  export WARMPOOL_RUN_ID="wp-$(date +%s)-$$"
+fi
 
 # Pre-flight checks
 echo "Verifying connection to Kubernetes cluster..."
@@ -99,14 +131,27 @@ fi
 mkdir -p "$LOGS_DIR"
 
 MAX_SANDBOXES=$(($STEP_SIZE * $TOTAL_STEPS * $NAMESPACES))
-echo "=== Starting Sandbox Capacity Cliff Test (up to ${MAX_SANDBOXES} sandboxes) ==="
+if [ "$WORKLOAD" = warmpool ] && [ "$WARMPOOL_SCENARIO" = many-pools ]; then
+  MAX_SANDBOXES=$((MAX_SANDBOXES * POOL_SIZE))
+fi
+echo "=== Starting ${WORKLOAD} Capacity Cliff Test (up to ${MAX_SANDBOXES} sandboxes) ==="
 echo "Step Size: $STEP_SIZE, Total Steps: $TOTAL_STEPS, Namespaces: $NAMESPACES, QPS: $QPS"
-echo "Hold: $HOLD_DURATION, Convergence Timeout: $CONVERGENCE_TIMEOUT, kwok Nodes: $KWOK_NODES"
+if [ "$WORKLOAD" = warmpool ]; then
+  echo "Scenario: $WARMPOOL_SCENARIO, Hold: $HOLD_DURATION, Timeout: ${WARMPOOL_TIMEOUT_SECONDS}s, kwok Nodes: $KWOK_NODES"
+else
+  echo "Hold: $HOLD_DURATION, Convergence Timeout: $CONVERGENCE_TIMEOUT, kwok Nodes: $KWOK_NODES"
+fi
 
 # Create overrides specifying the CL2 parameters (jq handles JSON escaping —
 # PROMETHEUS_NODE_SELECTOR is a YAML fragment that may contain quotes or
 # newlines, which a heredoc would embed as invalid JSON).
 jq -n \
+  --arg warmpool_scenario "$WARMPOOL_SCENARIO" \
+  --arg warmpool_run_id "${WARMPOOL_RUN_ID:-}" \
+  --argjson pool_size "$POOL_SIZE" \
+  --argjson warmpool_timeout "$WARMPOOL_TIMEOUT_SECONDS" \
+  --argjson warmpool_poll "$WARMPOOL_POLL_SECONDS" \
+  --argjson enable_prometheus "$ENABLE_PROMETHEUS" \
   --argjson step_size "$STEP_SIZE" \
   --argjson total_steps "$TOTAL_STEPS" \
   --argjson qps "$QPS" \
@@ -120,6 +165,12 @@ jq -n \
   --arg prometheus_node_selector "$PROMETHEUS_NODE_SELECTOR" \
   --argjson prometheus_slow_apiserver "$PROMETHEUS_SLOW_APISERVER" \
   '{
+    CL2_WARMPOOL_SCENARIO: $warmpool_scenario,
+    CL2_WARMPOOL_RUN_ID: $warmpool_run_id,
+    CL2_POOL_SIZE: $pool_size,
+    CL2_WARMPOOL_TIMEOUT_SECONDS: $warmpool_timeout,
+    CL2_WARMPOOL_POLL_SECONDS: $warmpool_poll,
+    CL2_ENABLE_PROMETHEUS: $enable_prometheus,
     CL2_STEP_SIZE: $step_size,
     CL2_TOTAL_STEPS: $total_steps,
     CL2_QPS: $qps,
@@ -140,7 +191,7 @@ jq -n \
 cd "$CL2_DIR"
 go run cmd/clusterloader.go \
   --enable-exec-service=false \
-  --enable-prometheus-server=true \
+  --enable-prometheus-server="${ENABLE_PROMETHEUS}" \
   --prometheus-pvc-storage-class="${PROMETHEUS_PVC_STORAGE_CLASS}" \
   --prometheus-scrape-kube-proxy="${SCRAPE_KUBE_PROXY}" \
   ${PROMETHEUS_EXTRA_FLAGS} \

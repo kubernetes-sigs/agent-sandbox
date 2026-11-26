@@ -1,0 +1,14 @@
+# Where GKE stores the snapshots. The bucket must exist, and the pod's
+# Kubernetes ServiceAccount (20-sandbox.yaml) needs storage.bucketViewer and
+# storage.objectUser on it through Workload Identity. See the README.
+# Substitute ${SNAPSHOT_BUCKET} before applying (envsubst).
+apiVersion: podsnapshot.gke.io/v1
+kind: PodSnapshotStorageConfig
+metadata:
+  name: gpu-l4-snapshot-storage
+spec:
+  snapshotStorageConfig:
+    gcs:
+      bucket: ${SNAPSHOT_BUCKET}
+      path: gpu-l4-snapshot-sandbox
+      tokenSource: podKSA

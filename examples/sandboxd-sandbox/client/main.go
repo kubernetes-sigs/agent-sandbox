@@ -26,6 +26,10 @@
 // The SDK reaches sandboxd via a pod port-forward, so your kubeconfig must
 // be able to port-forward to pods in the target namespace.
 //
+// Kata and gVisor sandboxes can't be reached by port-forward; run this
+// inside the cluster with ConnectivityInClusterPodIP (or
+// ConnectivityInClusterService, which needs spec.service: true).
+//
 // Usage:
 //
 //	go run ./examples/sandboxd-sandbox/client \

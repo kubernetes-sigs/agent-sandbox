@@ -1,0 +1,85 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Path 1 (kubectl): a plain Sandbox. Run prompts with:
+#   kubectl exec pod/opencode-sandbox -- opencode run "your prompt"
+# Start the interactive OpenCode TUI with:
+#   kubectl exec -it pod/opencode-sandbox -- opencode
+# All Secret keys are optional: without the opencode-api-keys Secret,
+# OpenCode uses its free default model.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: opencode-sandbox
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: opencode-sandbox
+    spec:
+      automountServiceAccountToken: false
+      # Makes the PVC-backed dirs group-writable for UID 1000.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: opencode
+          image: opencode-sandbox:v1
+          imagePullPolicy: IfNotPresent
+          # Keep stdin and a TTY so `kubectl exec -it` can run the OpenCode TUI.
+          stdin: true
+          tty: true
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opencode-api-keys
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            - name: OPENCODE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: opencode-api-keys
+                  key: OPENCODE_API_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+              ephemeral-storage: "2Gi"
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: opencode-state
+              mountPath: /home/python/.local/share/opencode
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+        labels:
+          sandbox: opencode-sandbox
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+    - metadata:
+        name: opencode-state
+        labels:
+          sandbox: opencode-sandbox
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi

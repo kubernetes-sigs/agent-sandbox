@@ -78,9 +78,12 @@ CL2_BIN="${BINDIR}/clusterloader2"
 
 if [[ ! -x "${KWOKCTL}" ]]; then
   echo "Installing kwokctl ${KWOK_VERSION}..."
-  curl -fsSL --retry 5 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64" -o "${KWOKCTL}"
+  # GitHub's release download has returned 504 for over a minute at a time,
+  # and curl's default backoff gives up after about thirty seconds. Space the
+  # retries out so a short GitHub incident does not fail the lane.
+  curl -fsSL --retry 8 --retry-delay 15 --retry-max-time 300 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwokctl-linux-amd64" -o "${KWOKCTL}"
   chmod +x "${KWOKCTL}"
-  curl -fsSL --retry 5 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwok-linux-amd64" -o "${BINDIR}/kwok"
+  curl -fsSL --retry 8 --retry-delay 15 --retry-max-time 300 --retry-connrefused "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION}/kwok-linux-amd64" -o "${BINDIR}/kwok"
   chmod +x "${BINDIR}/kwok"
 fi
 

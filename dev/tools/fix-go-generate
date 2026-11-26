@@ -32,11 +32,11 @@ def main():
     local_bin = os.path.join(repo_root, "bin")
     os.makedirs(local_bin, exist_ok=True)
 
-    # Tools to install with their exact versions
+    # Tools to install with their exact versions.
+    # protoc-gen-go and protoc-gen-go-grpc are fetched as remote Buf plugins
+    # (pinned in packages/sandboxd/spec/buf.gen.yaml) — no local install needed.
     tools = [
         ("github.com/bufbuild/buf/cmd/buf@v1.47.2", "buf"),
-        ("google.golang.org/protobuf/cmd/protoc-gen-go@v1.33.0", "protoc-gen-go"),
-        ("google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0", "protoc-gen-go-grpc"),
     ]
 
     # Check if we need to install/update tools by comparing against a version stamp file

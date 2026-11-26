@@ -66,7 +66,9 @@ class BuildxDockerfileArgTest(unittest.TestCase):
     instead (issue #1123).
     """
 
-    def _captured_build_cmd(self, srcdir, dockerfile_path):
+    def _captured_build_cmd(
+        self, srcdir, dockerfile_path, service_name="svc", **arg_overrides
+    ):
         captured = {}
 
         def fake_run(cmd, **kwargs):
@@ -85,9 +87,12 @@ class BuildxDockerfileArgTest(unittest.TestCase):
             args = argparse.Namespace(
                 docker_build_output_type="docker",
                 extra_image_tags=[],
+                platform=None,
             )
+            for k, v in arg_overrides.items():
+                setattr(args, k, v)
             push_images.build_and_push_image_with_docker_buildx(
-                args, "svc", srcdir, dockerfile_path, "testtag"
+                args, service_name, srcdir, dockerfile_path, "testtag"
             )
         finally:
             push_images.subprocess.run = orig_run
@@ -120,6 +125,60 @@ class BuildxDockerfileArgTest(unittest.TestCase):
         )
         self.assertEqual(captured["cwd"], ".")
 
+    def _platform_args(self, service_name="svc", **arg_overrides):
+        cmd = self._captured_build_cmd(
+            srcdir=".",
+            dockerfile_path=os.path.join(".", "Dockerfile"),
+            service_name=service_name,
+            **arg_overrides,
+        )["cmd"]
+        return [a for a in cmd if a.startswith("--platform")]
+
+    def test_registry_push_defaults_to_multi_arch(self):
+        self.assertEqual(
+            self._platform_args(docker_build_output_type="registry"),
+            ["--platform=linux/amd64,linux/arm64"],
+        )
+
+    def test_registry_push_honors_platform(self):
+        self.assertEqual(
+            self._platform_args(
+                docker_build_output_type="registry", platform="linux/amd64"
+            ),
+            ["--platform=linux/amd64"],
+        )
+
+    def test_slow_example_images_push_amd64_only(self):
+        self.assertEqual(
+            self._platform_args(
+                service_name="langchain", docker_build_output_type="registry"
+            ),
+            ["--platform=linux/amd64"],
+        )
+
+    def test_slow_example_images_keep_explicit_arm64(self):
+        self.assertEqual(
+            self._platform_args(
+                service_name="langchain",
+                docker_build_output_type="registry",
+                platform="linux/arm64",
+            ),
+            ["--platform=linux/arm64"],
+        )
+
+    def test_slow_example_images_keep_explicit_multi_arch(self):
+        self.assertEqual(
+            self._platform_args(
+                service_name="langchain",
+                docker_build_output_type="registry",
+                platform="linux/amd64,linux/arm64",
+            ),
+            ["--platform=linux/amd64,linux/arm64"],
+        )
+
+    def test_kind_load_builds_host_platform_only(self):
+        self.assertEqual(self._platform_args(platform="linux/amd64"), [])
+
 
 class ControllerOnlySelectionTest(unittest.TestCase):
     """The controller-only mode must not build other discovered images."""
@@ -131,6 +190,7 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             images=["sandbox-router-go"],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
 
         with (
@@ -149,6 +209,7 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             images=[],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
         discovered_dockerfiles = [
             (".", ["sandbox-router"], ["Dockerfile"]),
@@ -189,6 +250,7 @@ class ControllerOnlySelectionTest(unittest.TestCase):
             images=["agent-sandbox-controller"],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
         discovered_dockerfiles = [
             (".", ["sandbox-router"], ["Dockerfile"]),
@@ -233,6 +295,7 @@ class DockerfileOverridesTest(unittest.TestCase):
             images=[],
             container_engine="docker",
             kind_cluster_name=None,
+            docker_build_output_type="registry",
         )
         with (
             mock.patch.object(
@@ -262,6 +325,39 @@ class DockerfileOverridesTest(unittest.TestCase):
         self.assertEqual(context_dir, ".")
         self.assertEqual(dockerfile_path, os.path.join(acp_server_dir, "Dockerfile"))
 
+    def test_cma_runner_builds_from_repo_root(self):
+        cma_runner_dir = os.path.join(
+            ".", "examples", "managed-agents", "claude-managed-agents")
+        calls = self._build_calls([(cma_runner_dir, [], ["Dockerfile"])])
+        self.assertEqual(len(calls), 1)
+        _, service_name, context_dir, dockerfile_path, _ = calls[0].args
+        self.assertEqual(service_name, "cma-runner")
+        self.assertEqual(context_dir, ".")
+        self.assertEqual(dockerfile_path, os.path.join(cma_runner_dir, "Dockerfile"))
+
+    def test_oma_runner_builds_from_repo_root(self):
+        oma_runner_dir = os.path.join(
+            ".", "examples", "managed-agents", "openai-managed-agents")
+        calls = self._build_calls([(oma_runner_dir, [], ["Dockerfile"])])
+        self.assertEqual(len(calls), 1)
+        _, service_name, context_dir, dockerfile_path, _ = calls[0].args
+        self.assertEqual(service_name, "oma-runner")
+        self.assertEqual(context_dir, ".")
+        self.assertEqual(dockerfile_path, os.path.join(oma_runner_dir, "Dockerfile"))
+
+    def test_multi_cluster_fleet_deploy_builds_from_repo_root(self):
+        # Regression: discovery built this Dockerfile from its own directory
+        # as image "deploy", and every post-merge push-images run failed on
+        # its repo-root-relative COPY lines (2026-10-08 onward).
+        fleet_deploy_dir = os.path.join(
+            ".", "examples", "multi-cluster-fleet", "deploy")
+        calls = self._build_calls([(fleet_deploy_dir, [], ["Dockerfile"])])
+        self.assertEqual(len(calls), 1)
+        _, service_name, context_dir, dockerfile_path, _ = calls[0].args
+        self.assertEqual(service_name, "fleet-member")
+        self.assertEqual(context_dir, ".")
+        self.assertEqual(dockerfile_path, os.path.join(fleet_deploy_dir, "Dockerfile"))
+
     def test_geminicli_toolbox_builds_from_repo_root(self):
         toolbox_dir = os.path.join(
             ".", "examples", "sandboxed-tools", "images", "geminicli-toolbox")
@@ -270,6 +366,180 @@ class DockerfileOverridesTest(unittest.TestCase):
         _, service_name, context_dir, _, _ = calls[0].args
         self.assertEqual(service_name, "geminicli-toolbox")
         self.assertEqual(context_dir, ".")
+
+
+class RepoImageNamesUniqueTest(unittest.TestCase):
+    """Every Dockerfile in the repo must map to a distinct image name.
+
+    Presubmits pass an explicit --images list, so only the postsubmit image
+    push walks the whole tree. A colliding directory name (e.g. two examples
+    each with an image/ directory) then fails that job after merge before
+    any image is pushed, including core ones.
+    """
+
+    def test_no_duplicate_image_names(self):
+        repo_root = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
+        args = argparse.Namespace(
+            controller_only=False,
+            image_tag="testtag",
+            images=[],
+            container_engine="docker",
+            kind_cluster_name=None,
+            docker_build_output_type="registry",
+        )
+        old_cwd = os.getcwd()
+        os.chdir(repo_root)
+        self.addCleanup(os.chdir, old_cwd)
+        with (
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+            ),
+            mock.patch.object(
+                push_images,
+                "build_and_push_image",
+            ) as build_image,
+            mock.patch("builtins.print"),
+        ):
+            try:
+                push_images.main(args)
+            except SystemExit as e:
+                self.fail(str(e))
+        self.assertGreater(build_image.call_count, 1)
+
+
+class BuildOrderAndFailureTest(unittest.TestCase):
+    """The postsubmit push must not let one failed image block the rest.
+
+    Images promoted on release are built first, and a failed build is
+    reported at the end instead of stopping the run (issue #2192).
+    """
+
+    _DISCOVERED = [
+        (".", ["examples", "sandbox-router"], ["Dockerfile"]),
+        (os.path.join(".", "examples"), ["aider-sandbox", "chrome-sandbox"], []),
+        (os.path.join(".", "examples", "aider-sandbox"), [], ["Dockerfile"]),
+        (os.path.join(".", "examples", "chrome-sandbox"), [], ["Dockerfile"]),
+        (os.path.join(".", "examples", "langchain"), [], ["Dockerfile"]),
+        (os.path.join(".", "sandbox-router"), [], ["Dockerfile"]),
+    ]
+
+    def _args(self, output_type="registry"):
+        return argparse.Namespace(
+            controller_only=False,
+            image_tag="testtag",
+            images=[],
+            container_engine="docker",
+            kind_cluster_name=None,
+            docker_build_output_type=output_type,
+        )
+
+    def _run(self, build_side_effect=None, builder_side_effect=None, output_type="registry"):
+        with (
+            mock.patch.object(push_images.os, "walk", return_value=self._DISCOVERED),
+            mock.patch.object(
+                push_images,
+                "create_buildx_builder_if_not_exists",
+                side_effect=builder_side_effect,
+            ),
+            mock.patch.object(
+                push_images, "build_and_push_image", side_effect=build_side_effect
+            ) as build_image,
+            mock.patch("builtins.print"),
+        ):
+            try:
+                push_images.main(self._args(output_type))
+                exit_message = None
+            except SystemExit as e:
+                exit_message = str(e)
+        built = [c.args[1] for c in build_image.call_args_list]
+        return built, exit_message
+
+    def test_promoted_images_build_first(self):
+        built, exit_message = self._run()
+        self.assertIsNone(exit_message)
+        self.assertEqual(
+            built,
+            [
+                # IMAGES_TO_PROMOTE order.
+                "agent-sandbox-controller",
+                "chrome-sandbox",
+                "sandbox-router-go",
+                # Everything else in walk order.
+                "aider-sandbox",
+                "langchain",
+            ],
+        )
+
+    def test_failed_image_does_not_stop_later_images(self):
+        def fail_aider(args, service_name, *rest):
+            if service_name == "aider-sandbox":
+                raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
+
+        with mock.patch.object(push_images.sys, "stderr"):
+            built, exit_message = self._run(build_side_effect=fail_aider)
+        self.assertIn("langchain", built)
+        # aider-sandbox appears twice: the failed attempt and its retry.
+        self.assertEqual(len(set(built)), 5)
+        self.assertIsNotNone(exit_message)
+        self.assertIn("1 of 5", exit_message)
+        self.assertIn("aider-sandbox", exit_message)
+
+    def test_failed_registry_push_is_retried_once(self):
+        # The first aider-sandbox attempt fails the way an expired Cloud Build
+        # credential does; the retry succeeds and the run is clean.
+        calls = {"aider-sandbox": 0}
+
+        def fail_aider_once(args, service_name, *rest):
+            if service_name == "aider-sandbox":
+                calls[service_name] += 1
+                if calls[service_name] == 1:
+                    raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
+
+        with mock.patch.object(push_images.sys, "stderr"):
+            built, exit_message = self._run(build_side_effect=fail_aider_once)
+        self.assertIsNone(exit_message)
+        self.assertEqual(built.count("aider-sandbox"), 2)
+        self.assertEqual(built.count("langchain"), 1)
+
+    def test_image_failing_twice_is_reported(self):
+        def fail_aider(args, service_name, *rest):
+            if service_name == "aider-sandbox":
+                raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
+
+        with mock.patch.object(push_images.sys, "stderr"):
+            built, exit_message = self._run(build_side_effect=fail_aider)
+        self.assertEqual(built.count("aider-sandbox"), 2)
+        self.assertIsNotNone(exit_message)
+        self.assertIn("aider-sandbox", exit_message)
+
+    def test_kind_builds_are_not_retried(self):
+        def fail_aider(args, service_name, *rest):
+            if service_name == "aider-sandbox":
+                raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
+
+        built, exit_message = self._run(build_side_effect=fail_aider, output_type="docker")
+        self.assertEqual(built.count("aider-sandbox"), 1)
+        self.assertIsNotNone(exit_message)
+
+    def test_failed_builder_setup_does_not_stop_later_images(self):
+        calls = {"n": 0}
+
+        def fail_second_setup(container_engine):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise subprocess.CalledProcessError(1, ["docker", "buildx", "use"])
+
+        built, exit_message = self._run(builder_side_effect=fail_second_setup)
+        # The image whose builder setup failed (chrome-sandbox) is not built,
+        # but every image after it is.
+        self.assertEqual(
+            built,
+            ["agent-sandbox-controller", "sandbox-router-go", "aider-sandbox", "langchain"],
+        )
+        self.assertIsNotNone(exit_message)
+        self.assertIn("1 of 5", exit_message)
+        self.assertIn("chrome-sandbox", exit_message)
 
 
 class KindLoadImagesExtraTagsTest(unittest.TestCase):
@@ -484,6 +754,14 @@ class CLITest(unittest.TestCase):
         os.environ["CONTAINER_ENGINE"] = "podman"
         args = self._make_parser().parse_args([])
         self.assertEqual(args.container_engine, "podman")
+
+    def test_platform_unset_by_default(self):
+        args = self._make_parser().parse_args([])
+        self.assertIsNone(args.platform)
+
+    def test_platform_flag(self):
+        args = self._make_parser().parse_args(["--platform", "linux/amd64"])
+        self.assertEqual(args.platform, "linux/amd64")
 
     def test_cli_overrides_env(self):
         os.environ["CONTAINER_ENGINE"] = "podman"

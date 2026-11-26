@@ -12,19 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""E2E coverage for the concurrency guarantees of AsyncSandboxClient.
-"""
+"""E2E coverage for the concurrency guarantees of AsyncSandboxClient."""
 
 import asyncio
 import time
-
-from test.e2e.clients.python.test_e2e_python_sdk import (
+from test.e2e.clients.python.framework.sdk_helpers import (
     GATEWAY_NAME,
-    deploy_gateway,
-    deploy_router,
-    sandbox_template,
-    tc,
-    temp_namespace,
 )
 
 import pytest
@@ -80,9 +73,7 @@ def _run_with_client(scenario, warmpool_name, namespace):
             gateway_name=GATEWAY_NAME,
             gateway_namespace=namespace,
         )
-        async with AsyncSandboxClient(
-            connection_config=config, cleanup=True
-        ) as client:
+        async with AsyncSandboxClient(connection_config=config, cleanup=True) as client:
             await scenario(client, warmpool_name, namespace)
 
     asyncio.run(_main())
@@ -224,18 +215,13 @@ async def _assert_event_loop_not_blocked(client, warmpool_name, namespace):
     print("--- Event Loop Not Blocked Test Passed! ---")
 
 
-def test_async_client_concurrent_sandbox_creation(
-        temp_namespace, async_warmpool):
+def test_async_client_concurrent_sandbox_creation(temp_namespace, async_warmpool):
     """AsyncSandboxClient creates sandboxes in parallel, not one at a time."""
-    _run_with_client(
-        _assert_concurrent_creates_overlap, async_warmpool, temp_namespace
-    )
+    _run_with_client(_assert_concurrent_creates_overlap, async_warmpool, temp_namespace)
 
 
 def test_async_client_event_loop_not_blocked(
     temp_namespace, deploy_router, deploy_gateway, async_warmpool
 ):
     """AsyncSandboxClient keeps the event loop responsive, data path included."""
-    _run_with_client(
-        _assert_event_loop_not_blocked, async_warmpool, temp_namespace
-    )
+    _run_with_client(_assert_event_loop_not_blocked, async_warmpool, temp_namespace)

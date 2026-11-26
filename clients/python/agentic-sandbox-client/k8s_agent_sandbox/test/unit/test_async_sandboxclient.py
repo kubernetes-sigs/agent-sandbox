@@ -15,25 +15,41 @@
 """Tests for AsyncSandboxClient lifecycle and transport behavior."""
 
 import asyncio
+import contextlib
+import gc
 import json
 import os
+import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
+import weakref
+from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
+import certifi
 
 httpx = pytest.importorskip("httpx")
 pytest.importorskip("kubernetes_asyncio")
 
+from kubernetes import client as sync_client
+from kubernetes_asyncio import client as async_client
+
+from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.async_sandbox import AsyncSandbox
-from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient, _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+from k8s_agent_sandbox.async_sandbox_client import (
+    AsyncSandboxClient,
+    _ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS,
+    _sync_configuration_from_async,
+)
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
@@ -41,6 +57,7 @@ from k8s_agent_sandbox.models import (
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 
 
@@ -150,9 +167,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
+        mock_sandbox.sandbox_id = "resolved-id"
         mock_sandbox.terminate = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
 
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -163,9 +182,12 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
     async def test_get_sandbox_inactive_reattaches(self):
         mock_inactive = MagicMock()
         mock_inactive.is_active = False
+        mock_inactive.sandbox_id = "resolved-id"
         mock_inactive.terminate = AsyncMock()
+        mock_inactive.close_connection = AsyncMock()
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_inactive
 
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="resolved-id")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -174,6 +196,81 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
 
         sandbox = await self.client.get_sandbox("test-claim", "test-namespace")
         self.assertEqual(sandbox, mock_new)
+
+    async def test_get_sandbox_replaces_handle_when_claim_rebinds(self):
+        """A claim deleted and re-created under the same name binds to a new
+        sandbox, so get_sandbox must not return the old sandbox's handle."""
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="python-aaaaa")
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+        old_handle = MagicMock()
+        old_handle.is_active = True
+        old_handle.sandbox_id = "python-aaaaa"
+        old_handle.close_connection = AsyncMock()
+        old_handle.terminate = AsyncMock()
+        new_handle = MagicMock()
+        self.mock_sandbox_class.side_effect = [old_handle, new_handle]
+
+        self.assertIs(await self.client.get_sandbox("c1", "ns"), old_handle)
+
+        # The claim is deleted and re-created; the warm pool binds it to a new sandbox.
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-bbbbb"
+
+        sandbox = await self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        # The stale handle is closed locally; nothing is deleted server-side.
+        old_handle.close_connection.assert_awaited_once_with()
+        old_handle.terminate.assert_not_awaited()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
+    async def test_get_sandbox_replaces_stale_handle_when_close_fails(self):
+        """A stale handle that fails to close is still replaced, so the caller
+        gets a handle for the claim's current sandbox."""
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="python-bbbbb")
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        stale_handle = MagicMock()
+        stale_handle.is_active = True
+        stale_handle.sandbox_id = "python-aaaaa"
+        stale_handle.close_connection = AsyncMock(side_effect=RuntimeError("socket already gone"))
+        stale_handle.terminate = AsyncMock()
+        self.client._active_connection_sandboxes[("ns", "c1")] = stale_handle
+        new_handle = MagicMock()
+        self.mock_sandbox_class.return_value = new_handle
+
+        with self.assertLogs("k8s_agent_sandbox.async_sandbox_client", level="ERROR") as logs:
+            sandbox = await self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        stale_handle.close_connection.assert_awaited_once_with()
+        self.assertIn("socket already gone", logs.output[0])
+
+    async def test_concurrent_get_sandbox_shares_one_handle(self):
+        async def resolve(*_args, **_kwargs):
+            await asyncio.sleep(0)
+            return "resolved-id"
+
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
+        self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(side_effect=resolve)
+        self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
+        handles = [MagicMock(is_active=True, sandbox_id="resolved-id", close_connection=AsyncMock()) for _ in range(2)]
+        self.mock_sandbox_class.side_effect = handles
+
+        first, second = await asyncio.gather(
+            self.client.get_sandbox("c1", "ns"), self.client.get_sandbox("c1", "ns")
+        )
+
+        self.assertIs(first, handles[0])
+        self.assertIs(second, handles[0])
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], handles[0])
+        handles[0].close_connection.assert_not_awaited()
+        handles[1].close_connection.assert_awaited_once_with()
 
     async def test_get_sandbox_not_found(self):
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(
@@ -236,6 +333,25 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_sandbox.close_connection.assert_awaited_once()
         self.mock_k8s_helper.close.assert_awaited_once()
 
+    async def test_close_retains_failed_connection_for_retry(self):
+        """A failed connection close remains registered for a later retry."""
+        mock_sandbox = MagicMock()
+        mock_sandbox.close_connection = AsyncMock(
+            side_effect=[RuntimeError("close failed"), None]
+        )
+        self.client._active_connection_sandboxes[("ns", "claim")] = mock_sandbox
+        self.mock_k8s_helper.close = AsyncMock()
+
+        await self.client.close()
+
+        self.assertIn(("ns", "claim"), self.client._active_connection_sandboxes)
+        mock_sandbox.close_connection.assert_awaited_once()
+
+        await self.client.close()
+
+        self.assertNotIn(("ns", "claim"), self.client._active_connection_sandboxes)
+        self.assertEqual(mock_sandbox.close_connection.await_count, 2)
+
     async def test_context_manager(self):
         self.mock_k8s_helper.close = AsyncMock()
 
@@ -253,17 +369,38 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             str(ctx.exception),
         )
 
+    def test_api_client_forwarded_to_k8s_helper(self):
+        sentinel = MagicMock(name="ApiClient")
+        with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper") as MockHelper:
+            AsyncSandboxClient(connection_config=self.config, cleanup=False, api_client=sentinel)
+            MockHelper.assert_called_once_with(api_client=sentinel)
+
     def test_cleanup_default_registers_atexit(self):
         """Constructing without cleanup= should default to True and register the hook."""
         with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
             client = AsyncSandboxClient(connection_config=self.config)
-            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+            self._assert_registered_exit_hook(mock_atexit, client, api_client=None)
 
     def test_cleanup_true_registers_atexit(self):
-        """cleanup=True should register the _atexit_cleanup method as an atexit handler."""
+        """cleanup=True registers the static _atexit_cleanup with the client's registry, not the client."""
+        api_client = MagicMock(name="ApiClient")
         with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
-            client = AsyncSandboxClient(connection_config=self.config, cleanup=True)
-            mock_atexit.register.assert_called_once_with(client._atexit_cleanup)
+            client = AsyncSandboxClient(connection_config=self.config, cleanup=True, api_client=api_client)
+            self._assert_registered_exit_hook(mock_atexit, client, api_client=api_client)
+
+    def _assert_registered_exit_hook(self, mock_atexit, client, api_client):
+        mock_atexit.register.assert_called_once()
+        hook = mock_atexit.register.call_args.args[0]
+        self.assertIs(hook.func, AsyncSandboxClient._atexit_cleanup)
+        self.assertIs(hook.args[0], client._active_connection_sandboxes)
+        self.assertIs(hook.args[1], client._explicit_claims)
+        self.assertIs(hook.args[2], api_client)
+
+    def _exit_hook_for(self, api_client):
+        """Returns a client with cleanup on and the exit hook it registered."""
+        with patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+            client = AsyncSandboxClient(connection_config=self.config, api_client=api_client)
+        return client, mock_atexit.register.call_args.args[0]
 
     def test_cleanup_false_does_not_register_atexit(self):
         """cleanup=False should opt out and not register any atexit handler."""
@@ -272,14 +409,13 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             mock_atexit.register.assert_not_called()
 
     def test_atexit_cleanup_deletes_tracked_claims(self):
-        """_atexit_cleanup should open a fresh K8sHelper and delete all tracked claims."""
         first_sandbox = MagicMock()
         first_sandbox.close_connection = AsyncMock()
         first_sandbox._close_for_atexit = MagicMock()
         second_sandbox = MagicMock()
         second_sandbox.close_connection = AsyncMock()
         second_sandbox._close_for_atexit = MagicMock()
-        self.client._active_connection_sandboxes = {
+        registry = {
             ("default", "claim-abc"): first_sandbox,
             ("other-ns", "claim-xyz"): second_sandbox,
         }
@@ -287,7 +423,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         mock_helper_instance.delete_sandbox_claim = MagicMock()
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(registry, set(), None)
 
         mock_helper_instance.delete_sandbox_claim.assert_any_call(
             "claim-abc", "default", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
@@ -305,7 +441,7 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         sandbox = MagicMock()
         sandbox.close_connection = AsyncMock()
         sandbox._close_for_atexit = MagicMock()
-        self.client._active_connection_sandboxes = {
+        registry = {
             ("default", "claim-abc"): sandbox,
         }
         mock_helper_instance = MagicMock()
@@ -315,44 +451,219 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
             return_value=mock_helper_instance,
         ):
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(registry, set(), None)
 
         sandbox._close_for_atexit.assert_called_once_with()
         sandbox.close_connection.assert_not_awaited()
 
-    def test_atexit_cleanup_skips_when_no_sandboxes(self):
-        """_atexit_cleanup should be a no-op when there are no tracked sandboxes."""
-        self.client._active_connection_sandboxes = {}
+    def test_atexit_cleanup_does_not_fall_back_to_default_kubeconfig_with_injected_api_client(self):
+        """Atexit cleanup should preserve the cluster targeted by an injected ApiClient."""
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.verify_ssl = False
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {"Impersonate-User": "tenant-a"}
+        injected_api_client.cookie = "session=abc"
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper:
+            exit_hook()
+
+        MockHelper.assert_called_once()
+        atexit_api_client = MockHelper.call_args.kwargs["api_client"]
+        self.assertIsInstance(atexit_api_client, sync_client.ApiClient)
+        self.assertEqual(atexit_api_client.configuration.host, "https://tenant-a.example.com")
+        self.assertFalse(atexit_api_client.configuration.verify_ssl)
+        self.assertEqual(atexit_api_client.cookie, "session=abc")
+        self.assertEqual(atexit_api_client.default_headers.get("Impersonate-User"), "tenant-a")
+
+    def test_atexit_cleanup_with_injected_api_client_needs_no_temp_dir(self):
+        """An injected ApiClient loads no kubeconfig, so cleanup must not need a temp directory."""
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_api_client.default_headers = {}
+        injected_api_client.cookie = None
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
+        mock_helper_instance = MagicMock()
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper, patch(
+            "k8s_agent_sandbox.async_sandbox_client.tempfile.TemporaryDirectory",
+            side_effect=OSError("no usable temp dir"),
+        ) as mock_tmpdir:
+            exit_hook()
+
+        mock_tmpdir.assert_not_called()
+        self.assertIsNone(MockHelper.call_args.kwargs["kube_config_temp_dir"])
+        mock_helper_instance.delete_sandbox_claim.assert_called_once_with(
+            "claim-abc", "tenant-ns", _request_timeout=_ATEXIT_DELETE_REQUEST_TIMEOUT_SECONDS
+        )
+
+    def test_atexit_cleanup_reflects_injected_client_state_at_cleanup_time_not_construction_time(self):
+        injected_configuration = async_client.Configuration(host="https://old.example.com")
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {"Authorization": "Bearer old-token"}
+        injected_api_client.cookie = "session=old"
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        refreshed_configuration = async_client.Configuration(host="https://refreshed.example.com")
+        injected_api_client.configuration = refreshed_configuration
+        injected_api_client.default_headers["Authorization"] = "Bearer refreshed-token"
+        injected_api_client.cookie = "session=refreshed"
+
+        with patch(
+            "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+            return_value=mock_helper_instance,
+        ) as MockHelper:
+            exit_hook()
+
+        atexit_api_client = MockHelper.call_args.kwargs["api_client"]
+        self.assertEqual(atexit_api_client.configuration.host, "https://refreshed.example.com")
+        self.assertEqual(atexit_api_client.cookie, "session=refreshed")
+        self.assertEqual(
+            atexit_api_client.default_headers.get("Authorization"), "Bearer refreshed-token"
+        )
+
+    def test_atexit_cleanup_does_not_copy_async_refresh_api_key_hook(self):
+        """The sync client doesn't await an async refresh_api_key_hook, so copying it would leave an un-awaited coroutine instead of refreshing; the live api_key must be used instead."""
+        async def async_refresh_hook(config):
+            config.api_key["BearerToken"] = "should-not-be-used"
+
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "live-token"
+        injected_configuration.refresh_api_key_hook = async_refresh_hook
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {}
+        injected_api_client.cookie = None
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
+        mock_helper_instance = MagicMock()
+        mock_helper_instance.delete_sandbox_claim = MagicMock()
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch(
+                "k8s_agent_sandbox.async_sandbox_client.K8sHelper",
+                return_value=mock_helper_instance,
+            ) as MockHelper:
+                exit_hook()
+
+        self.assertFalse(
+            any("was never awaited" in str(w.message) for w in caught),
+            "copying an async refresh_api_key_hook must not leave an un-awaited coroutine",
+        )
+        atexit_api_client = MockHelper.call_args.kwargs["api_client"]
+        self.assertIsNone(atexit_api_client.configuration.refresh_api_key_hook)
+        self.assertEqual(
+            atexit_api_client.configuration.get_api_key_with_prefix("BearerToken"), "live-token"
+        )
+
+    def test_atexit_cleanup_sends_injected_bearer_token_on_older_sync_clients(self):
+        """kubernetes<36's auth_settings() only reads api_key["authorization"], so the token kubernetes_asyncio stores under "BearerToken" must be mirrored there without mutating the injected config."""
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "live-token"
+        injected_configuration.api_key_prefix["BearerToken"] = "Bearer"
+        injected_api_client = MagicMock(name="InjectedApiClient")
+        injected_api_client.configuration = injected_configuration
+        injected_api_client.default_headers = {}
+        injected_api_client.cookie = None
+        client, exit_hook = self._exit_hook_for(injected_api_client)
+        client._active_connection_sandboxes[("tenant-ns", "claim-abc")] = MagicMock()
+
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
-            self.client._atexit_cleanup()
+            exit_hook()
+
+        atexit_configuration = MockHelper.call_args.kwargs["api_client"].configuration
+        self.assertEqual(atexit_configuration.auth_settings()["BearerToken"]["value"], "Bearer live-token")
+        self.assertEqual(atexit_configuration.api_key["authorization"], "live-token")
+        self.assertEqual(atexit_configuration.api_key_prefix["authorization"], "Bearer")
+        self.assertEqual(injected_configuration.api_key, {"BearerToken": "live-token"})
+        self.assertEqual(injected_configuration.api_key_prefix, {"BearerToken": "Bearer"})
+
+    def test_atexit_configuration_runs_sync_refresh_hook_for_token_expired_since_last_request(self):
+        """Cleanup must use the refresh_api_key_hook to avoid deleting with a token that expired."""
+        def sync_refresh_hook(config):
+            config.api_key["BearerToken"] = "Bearer fresh-token"
+
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "Bearer expired-token"
+        injected_configuration.refresh_api_key_hook = sync_refresh_hook
+
+        sync_configuration = _sync_configuration_from_async(injected_configuration)
+
+        self.assertEqual(sync_configuration.auth_settings()["BearerToken"]["value"], "Bearer fresh-token")
+        self.assertEqual(sync_configuration.api_key["authorization"], "Bearer fresh-token")
+        self.assertEqual(injected_configuration.api_key, {"BearerToken": "Bearer expired-token"})
+
+    def test_atexit_configuration_keeps_live_token_when_refresh_hook_fails(self):
+        def failing_refresh_hook(config):
+            raise OSError("token file unreadable")
+
+        injected_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+        injected_configuration.api_key["BearerToken"] = "Bearer live-token"
+        injected_configuration.refresh_api_key_hook = failing_refresh_hook
+
+        with patch("sys.stderr") as mock_stderr:
+            sync_configuration = _sync_configuration_from_async(injected_configuration)
+
+        self.assertEqual(sync_configuration.auth_settings()["BearerToken"]["value"], "Bearer live-token")
+        mock_stderr.write.assert_called()
+
+    def test_atexit_configuration_keeps_environment_proxy_unless_injected_one_is_explicit(self):
+        """kubernetes_asyncio leaves proxy unset and lets aiohttp read HTTPS_PROXY/NO_PROXY, while the sync
+        Configuration reads them itself, so an unset async proxy must not clear the sync one."""
+        with patch.dict(os.environ, {"HTTPS_PROXY": "http://env-proxy:3128", "NO_PROXY": "internal.example.com"}, clear=True):
+            from_env = _sync_configuration_from_async(async_client.Configuration(host="https://tenant-a.example.com"))
+            sync_default = sync_client.Configuration(host="https://tenant-a.example.com")
+            explicit_async_configuration = async_client.Configuration(host="https://tenant-a.example.com")
+            explicit_async_configuration.proxy = "http://explicit-proxy:8080"
+            explicit = _sync_configuration_from_async(explicit_async_configuration)
+
+        self.assertEqual(from_env.proxy, sync_default.proxy)
+        self.assertEqual(from_env.no_proxy, sync_default.no_proxy)
+        self.assertEqual(explicit.proxy, "http://explicit-proxy:8080")
+
+    def test_atexit_cleanup_skips_when_no_sandboxes(self):
+        with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
+            AsyncSandboxClient._atexit_cleanup({}, set(), None)
             MockHelper.assert_not_called()
 
     def test_atexit_cleanup_suppresses_errors(self):
-        """_atexit_cleanup should not propagate exceptions — cleanup is best-effort.
-        A warning is printed to stderr so the user knows a sandbox was orphaned."""
         sandbox = MagicMock()
         sandbox.close_connection = AsyncMock()
         sandbox._close_for_atexit = MagicMock()
-        self.client._active_connection_sandboxes = {("default", "claim-abc"): sandbox}
+        registry = {("default", "claim-abc"): sandbox}
         mock_helper_instance = MagicMock()
         mock_helper_instance.delete_sandbox_claim = MagicMock(side_effect=Exception("network error"))
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", return_value=mock_helper_instance):
             with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
                 # Should not raise
-                self.client._atexit_cleanup()
+                AsyncSandboxClient._atexit_cleanup(registry, set(), None)
                 # Should have printed a warning
                 mock_stderr.write.assert_called()
 
     def test_atexit_cleanup_suppresses_helper_construction_errors(self):
-        """A failure constructing K8sHelper itself (e.g. no reachable kubeconfig)
-        must not escape _atexit_cleanup either — cleanup is best-effort."""
-        self.client._active_connection_sandboxes = {("default", "claim-abc"): MagicMock()}
+        registry = {("default", "claim-abc"): MagicMock()}
 
         with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper", side_effect=Exception("no kubeconfig")):
             with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
                 # Should not raise
-                self.client._atexit_cleanup()
+                AsyncSandboxClient._atexit_cleanup(registry, set(), None)
                 # Should have printed a warning
                 mock_stderr.write.assert_called()
 
@@ -363,11 +674,11 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         best-effort."""
         mock_sandboxes = MagicMock()
         mock_sandboxes.keys.side_effect = RuntimeError("dictionary changed size during iteration")
-        self.client._active_connection_sandboxes = mock_sandboxes
+        registry = mock_sandboxes
 
         with patch("k8s_agent_sandbox.async_sandbox_client.sys.stderr") as mock_stderr:
             # Should not raise
-            self.client._atexit_cleanup()
+            AsyncSandboxClient._atexit_cleanup(registry, set(), None)
             # Should have printed a warning
             mock_stderr.write.assert_called()
 
@@ -397,10 +708,10 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
             call_kwargs = mock_create.call_args[1]
             self.assertEqual(
                 call_kwargs["pod_metadata"],
-                {
-                    "labels": {"client-id": "tenant-a"},
-                    "annotations": {"note": "owned-by-tenant-a"},
-                },
+                AdditionalPodMetadata(
+                    labels={"client-id": "tenant-a"},
+                    annotations={"note": "owned-by-tenant-a"},
+                ),
             )
 
     async def test_create_sandbox_rejects_invalid_pod_label(self):
@@ -610,6 +921,11 @@ class TestAsyncSandboxClientInCluster(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(
             client.connection_config, SandboxdPodTunnelConnectionConfig
         )
+
+    async def test_sandboxd_in_cluster_config_accepted(self):
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-pod-ip")
+        client = AsyncSandboxClient(connection_config=config, cleanup=False)
+        self.assertIs(client.connection_config, config)
 
     async def test_in_cluster_connection_config_passed_to_sandbox(self):
         config = SandboxInClusterConnectionConfig()
@@ -926,6 +1242,435 @@ class TestAsyncConnector(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("X-Sandbox-Timeout", sent_headers)
 
 
+    def _connector_with_ok_response(self, config):
+        connector = AsyncSandboxConnector(
+            sandbox_id="my-sandbox",
+            namespace="dev",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        mock_response = AsyncMock(spec=httpx.Response)
+        mock_response.status_code = 200
+        mock_response.is_redirect = False
+        mock_response.raise_for_status.return_value = None
+        connector.client.request = AsyncMock(return_value=mock_response)
+        return connector
+
+    async def test_extra_headers_are_sent_with_routing_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._connector_with_ok_response(config)
+        try:
+            await connector.send_request("GET", "health")
+
+            _, call_kwargs = connector.client.request.call_args
+            self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer t")
+            self.assertEqual(call_kwargs["headers"]["X-Sandbox-ID"], "my-sandbox")
+            # Must not mutate the config.
+            self.assertEqual(config.extra_headers, {"Authorization": "Bearer t"})
+        finally:
+            await connector.close()
+
+    async def test_caller_headers_override_extra_headers(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._connector_with_ok_response(config)
+        try:
+            await connector.send_request(
+                "GET", "health", headers={"authorization": "Bearer other"}
+            )
+
+            _, call_kwargs = connector.client.request.call_args
+            self.assertEqual(call_kwargs["headers"]["authorization"], "Bearer other")
+            self.assertNotIn("Authorization", call_kwargs["headers"])
+        finally:
+            await connector.close()
+
+    async def test_explicit_none_headers_are_accepted(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", extra_headers={"Authorization": "Bearer t"}
+        )
+        connector = self._connector_with_ok_response(config)
+        try:
+            await connector.send_request("GET", "health", headers=None)
+
+            _, call_kwargs = connector.client.request.call_args
+            self.assertEqual(call_kwargs["headers"]["Authorization"], "Bearer t")
+        finally:
+            await connector.close()
+
+    async def test_tls_options_build_context_for_transport(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router",
+            client_cert=("/c.crt", "/c.key"),
+            ca_cert="/ca.pem",
+        )
+        context = MagicMock(spec=ssl.SSLContext)
+        with patch(
+            "k8s_agent_sandbox.async_connector.ssl.create_default_context",
+            return_value=context,
+        ) as create_context, patch(
+            "k8s_agent_sandbox.async_connector.httpx.AsyncHTTPTransport",
+            wraps=httpx.AsyncHTTPTransport,
+        ) as transport:
+            connector = AsyncSandboxConnector(
+                sandbox_id="my-sandbox",
+                namespace="dev",
+                connection_config=config,
+                k8s_helper=MagicMock(),
+            )
+            connector._ensure_client()
+        try:
+            create_context.assert_called_once_with(cafile="/ca.pem")
+            context.load_cert_chain.assert_called_once_with("/c.crt", "/c.key")
+            self.assertIs(transport.call_args.kwargs["verify"], context)
+        finally:
+            await connector.close()
+
+    async def test_client_cert_alone_keeps_default_trust_store(self):
+        config = SandboxDirectConnectionConfig(
+            api_url="https://router", client_cert=("/c.crt", "/c.key")
+        )
+        context = MagicMock(spec=ssl.SSLContext)
+        with patch(
+            "k8s_agent_sandbox.async_connector.httpx.create_ssl_context",
+            return_value=context,
+        ) as create_context, patch(
+            "k8s_agent_sandbox.async_connector.ssl.create_default_context"
+        ) as stdlib_context:
+            connector = AsyncSandboxConnector(
+                sandbox_id="my-sandbox",
+                namespace="dev",
+                connection_config=config,
+                k8s_helper=MagicMock(),
+            )
+            connector._ensure_client()
+        try:
+            create_context.assert_called_once_with()
+            stdlib_context.assert_not_called()
+            context.load_cert_chain.assert_called_once_with("/c.crt", "/c.key")
+        finally:
+            await connector.close()
+
+    async def test_default_context_verifies_certificates_and_hostnames(self):
+        with patch(
+            "k8s_agent_sandbox.async_connector.httpx.AsyncHTTPTransport",
+            wraps=httpx.AsyncHTTPTransport,
+        ) as transport:
+            connector = AsyncSandboxConnector(
+                sandbox_id="my-sandbox",
+                namespace="dev",
+                connection_config=SandboxDirectConnectionConfig(api_url="https://router"),
+                k8s_helper=MagicMock(),
+            )
+            transport.assert_not_called()
+            connector._ensure_client()
+        try:
+            context = transport.call_args.kwargs["verify"]
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(context.check_hostname)
+        finally:
+            await connector.close()
+
+
+class TestAsyncTLSContextReuse(unittest.IsolatedAsyncioTestCase):
+    """Check allocation and ownership without replacing the HTTPX transport."""
+
+    def setUp(self):
+        env = dict(os.environ)
+        for name in ("SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE"):
+            env.pop(name, None)
+        environment = patch.dict(os.environ, env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.client = self._make_client()
+        self.addAsyncCleanup(self.client.close)
+
+    def _make_client(self, config=None):
+        client = AsyncSandboxClient(
+            config or SandboxDirectConnectionConfig(api_url="http://router.invalid"),
+            cleanup=False,
+        )
+        helper = client.k8s_helper
+        helper.create_sandbox_claim = AsyncMock(return_value={"metadata": {"uid": "u"}})
+        helper.wait_for_claim_ready = AsyncMock(side_effect=lambda name, *a, **kw: name)
+        helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
+        helper.resolve_sandbox_name = AsyncMock(side_effect=lambda name, *a, **kw: name)
+        helper.get_sandbox = AsyncMock(return_value={"metadata": {"name": "sandbox"}})
+        return client
+
+    async def test_unused_handles_and_cleanup_do_not_load_certificates(self):
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            for _ in range(5):
+                handle = await self.client.create_sandbox("pool")
+                await handle.close_connection()
+            await self.client.close()
+        create.assert_not_called()
+
+    async def test_concurrent_handles_load_default_trust_once(self):
+        async def connect():
+            handle = await self.client.create_sandbox("pool")
+            return handle.connector.client
+
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            clients = await asyncio.gather(*(connect() for _ in range(5)))
+            attached = await self.client.get_sandbox("attached-claim")
+            attached_client = attached.connector.client
+        create.assert_called_once()
+        self.assertEqual(len({id(client) for client in clients + [attached_client]}), 6)
+
+    async def test_independent_sdk_clients_do_not_share_contexts(self):
+        other = self._make_client()
+        self.addAsyncCleanup(other.close)
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            first = await self.client.create_sandbox("pool")
+            second = await other.create_sandbox("pool")
+            first.connector._ensure_client()
+            second.connector._ensure_client()
+        self.assertEqual(create.call_count, 2)
+
+    async def test_close_releases_default_trust(self):
+        contexts = []
+        create_context = httpx.create_ssl_context
+
+        def create():
+            context = create_context()
+            contexts.append(weakref.ref(context))
+            return context
+
+        with patch("httpx.create_ssl_context", side_effect=create):
+            handle = await self.client.create_sandbox("pool")
+            handle.connector._ensure_client()
+            await self.client.close()
+            del handle
+            gc.collect()
+        self.assertEqual(len(contexts), 1)
+        self.assertIsNone(contexts[0]())
+
+    async def test_ca_file_replacement_reloads_trust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ca = Path(directory) / "ca.pem"
+            ca.write_bytes(Path(certifi.where()).read_bytes())
+            os.environ["SSL_CERT_FILE"] = str(ca)
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                replacement = Path(directory) / "replacement.pem"
+                replacement.write_bytes(ca.read_bytes())
+                # Preserve size and mtime so atomic replacement needs inode/ctime detection.
+                info = ca.stat()
+                os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+                replacement.replace(ca)
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+                third = await self.client.create_sandbox("pool")
+                third.connector._ensure_client()
+            self.assertEqual(create.call_count, 2)
+
+    async def test_environment_change_reloads_trust(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ca = Path(directory) / "ca.pem"
+            ca.write_bytes(Path(certifi.where()).read_bytes())
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                os.environ["SSL_CERT_FILE"] = str(ca)
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+                del os.environ["SSL_CERT_FILE"]
+                third = await self.client.create_sandbox("pool")
+                third.connector._ensure_client()
+            self.assertEqual(create.call_count, 3)
+
+    async def test_directory_trust_is_loaded_for_each_handle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["SSL_CERT_DIR"] = directory
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+            self.assertEqual(create.call_count, 2)
+
+    def test_httpx_default_trust_selection_contract(self):
+        """Fail if HTTPX's trust selection no longer matches the cache's assumptions."""
+        with tempfile.TemporaryDirectory() as directory:
+            ca = Path(directory) / "ca.pem"
+            ca.write_bytes(Path(certifi.where()).read_bytes())
+            cases = [
+                ({}, {"cafile": certifi.where()}),
+                ({"SSL_CERT_FILE": str(ca)}, {"cafile": str(ca)}),
+                ({"SSL_CERT_DIR": directory}, {"capath": directory}),
+                ({"SSL_CERT_FILE": str(ca), "SSL_CERT_DIR": directory}, {"cafile": str(ca)}),
+            ]
+            for environment, expected in cases:
+                with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                    with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                        httpx.create_ssl_context()
+                    create.assert_called_once_with(**expected)
+
+    def test_missing_ca_uses_httpx_error_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["SSL_CERT_FILE"] = str(Path(directory) / "missing.pem")
+            with self.assertRaises(FileNotFoundError) as expected:
+                httpx.create_ssl_context()
+            with self.assertRaises(FileNotFoundError) as actual:
+                self.client._default_ssl_context()
+            self.assertEqual(actual.exception.args, expected.exception.args)
+            self.assertEqual(actual.exception.filename, expected.exception.filename)
+
+    async def test_key_logging_contexts_are_loaded_for_each_handle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.environ["SSLKEYLOGFILE"] = str(Path(directory) / "keys.log")
+            with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+                first = await self.client.create_sandbox("pool")
+                first.connector._ensure_client()
+                second = await self.client.create_sandbox("pool")
+                second.connector._ensure_client()
+            self.assertEqual(create.call_count, 2)
+
+    async def test_explicit_ca_is_loaded_for_each_handle(self):
+        self.client.connection_config.ca_cert = certifi.where()
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            await self.client.create_sandbox("pool")
+            await self.client.create_sandbox("pool")
+        self.assertEqual(create.call_count, 2)
+
+    async def test_failed_context_creation_can_be_retried(self):
+        handle = await self.client.create_sandbox("pool")
+        with patch("httpx.create_ssl_context", side_effect=OSError("cannot load CA")):
+            with self.assertRaisesRegex(OSError, "cannot load CA"):
+                handle.connector._ensure_client()
+        self.assertIsInstance(handle.connector.client, httpx.AsyncClient)
+
+    async def test_closed_unused_handle_cannot_open_http_client(self):
+        handle = await self.client.create_sandbox("pool")
+        await handle.close_connection()
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            with self.assertRaisesRegex(RuntimeError, "connector is closed"):
+                handle.connector._ensure_client()
+        create.assert_not_called()
+
+    async def test_subclass_does_not_need_new_constructor_arguments(self):
+        class ExtensionSandbox(AsyncSandbox):
+            def __init__(self, claim_name, sandbox_id, namespace, connection_config,
+                         tracer_config, k8s_helper):
+                super().__init__(claim_name, sandbox_id, namespace, connection_config,
+                                 tracer_config, k8s_helper)
+
+        self.client.sandbox_class = ExtensionSandbox
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            first = await self.client.create_sandbox("pool")
+            attached = await self.client.get_sandbox("attached-claim")
+            self.assertIsInstance(first, ExtensionSandbox)
+            self.assertIsInstance(attached, ExtensionSandbox)
+            first.connector._ensure_client()
+            attached.connector._ensure_client()
+        create.assert_called_once()
+
+    def _tls_certificates(self):
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is required for loopback TLS certificates")
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        certificates = []
+        for index in range(2):
+            cert = Path(directory.name) / f"cert-{index}.pem"
+            key = Path(directory.name) / f"key-{index}.pem"
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-keyout", str(key), "-out", str(cert),
+            ], check=True, capture_output=True)
+            certificates.append((cert, key))
+        return certificates
+
+    async def _tls_server(self, cert, key, require_client_cert=False):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        if require_client_cert:
+            context.verify_mode = ssl.CERT_REQUIRED
+            context.load_verify_locations(cafile=cert)
+
+        async def respond(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                await writer.drain()
+            finally:
+                writer.close()
+                with contextlib.suppress(ConnectionError):
+                    await writer.wait_closed()
+
+        server = await asyncio.start_server(respond, "127.0.0.1", 0, ssl=context)
+        async def close_server():
+            server.close()
+            await server.wait_closed()
+        self.addAsyncCleanup(close_server)
+        return server.sockets[0].getsockname()[1]
+
+    async def test_real_tls_verification_rotation_and_handle_isolation(self):
+        (cert, key), (untrusted, _) = self._tls_certificates()
+        port = await self._tls_server(cert, key)
+        url = f"https://localhost:{port}"
+        self.client.connection_config.api_url = url
+        ca = cert.parent / "trust.pem"
+        ca.write_bytes(Path(certifi.where()).read_bytes() + b"\n" + cert.read_bytes())
+        os.environ["SSL_CERT_FILE"] = str(ca)
+
+        with patch("ssl.create_default_context", wraps=ssl.create_default_context) as create:
+            first = await self.client.create_sandbox("pool")
+            second = await self.client.create_sandbox("pool")
+            for handle in (first, second):
+                response = await handle.connector.send_request("GET", "health", _disable_retries=True)
+                self.assertEqual(response.text, "ok")
+            create.assert_called_once()
+        first.connector.client.cookies.set("private", "first")
+        self.assertNotIn("private", second.connector.client.cookies)
+        await first.close_connection()
+        response = await second.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertEqual(response.text, "ok")
+
+        wrong_host = self._make_client(SandboxDirectConnectionConfig(api_url=f"https://127.0.0.1:{port}"))
+        self.addAsyncCleanup(wrong_host.close)
+        handle = await wrong_host.create_sandbox("pool")
+        with self.assertRaises(SandboxRequestError) as error:
+            await handle.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertIn("mismatch", str(error.exception.__cause__))
+
+        replacement = ca.with_suffix(".replacement")
+        replacement.write_bytes(untrusted.read_bytes())
+        replacement.replace(ca)
+        handle = await self.client.create_sandbox("pool")
+        with self.assertRaises(SandboxRequestError) as error:
+            await handle.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", str(error.exception.__cause__))
+        # Existing handles retain their original trust even on a fresh handshake.
+        response = await second.connector.send_request("GET", "health", _disable_retries=True)
+        self.assertEqual(response.text, "ok")
+
+    async def test_real_mtls_keeps_client_identities_separate(self):
+        (cert, key), (other_cert, other_key) = self._tls_certificates()
+        port = await self._tls_server(cert, key, require_client_cert=True)
+        for identity, succeeds in ((None, False), ((cert, key), True), ((other_cert, other_key), False)):
+            with self.subTest(identity=identity):
+                client = self._make_client(SandboxDirectConnectionConfig(
+                    api_url=f"https://localhost:{port}", ca_cert=str(cert),
+                    client_cert=tuple(map(str, identity)) if identity else None,
+                ))
+                self.addAsyncCleanup(client.close)
+                handle = await client.create_sandbox("pool")
+                if succeeds:
+                    response = await handle.connector.send_request("GET", "health", _disable_retries=True)
+                    self.assertEqual(response.text, "ok")
+                else:
+                    with self.assertRaises(SandboxRequestError):
+                        await handle.connector.send_request("GET", "health", _disable_retries=True)
+
+
 class AsyncSandboxHandler(BaseHTTPRequestHandler):
     """Minimal handler for async connector HTTP tests."""
 
@@ -1005,6 +1750,216 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             response = await connector.send_request("GET", "health")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["status"], "healthy")
+        finally:
+            await connector.close()
+
+    async def test_non_streaming_request_forwards_request_auth(self):
+        connector = self._make_connector()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.request = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request("GET", "health", auth=auth)
+
+            self.assertIs(result, response)
+            connector.client.request.assert_awaited_once_with(
+                "GET",
+                ANY,
+                headers=ANY,
+                follow_redirects=False,
+                auth=auth,
+            )
+        finally:
+            await connector.close()
+
+    async def test_streaming_request_returns_unbuffered_response(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        response.aclose = AsyncMock()
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request("GET", "download/file", stream=True)
+
+            self.assertIs(result, response)
+            connector.client.build_request.assert_called_once()
+            connector.client.send.assert_awaited_once_with(
+                request,
+                auth=httpx.USE_CLIENT_DEFAULT,
+                follow_redirects=False,
+                stream=True,
+            )
+            response.aclose.assert_not_awaited()
+        finally:
+            await connector.close()
+
+    async def test_streaming_request_forwards_request_auth(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 200
+        response.is_redirect = False
+        response.raise_for_status = MagicMock()
+        response.aclose = AsyncMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            result = await connector.send_request(
+                "GET", "download/file", stream=True, auth=auth
+            )
+
+            self.assertIs(result, response)
+            connector.client.build_request.assert_called_once()
+            self.assertNotIn(
+                "auth", connector.client.build_request.call_args.kwargs
+            )
+            connector.client.send.assert_awaited_once_with(
+                request, follow_redirects=False, stream=True, auth=auth
+            )
+        finally:
+            await connector.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
+    async def test_streaming_retry_preserves_request_auth(self, mock_sleep):
+        connector = self._make_connector()
+        request = MagicMock()
+        retry_response = MagicMock()
+        retry_response.status_code = 503
+        retry_response.aclose = AsyncMock()
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.is_redirect = False
+        success_response.raise_for_status = MagicMock()
+        success_response.aclose = AsyncMock()
+        auth = httpx.BasicAuth("user", "password")
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(
+            side_effect=[retry_response, success_response]
+        )
+
+        try:
+            result = await connector.send_request(
+                "GET", "download/file", stream=True, auth=auth
+            )
+
+            self.assertIs(result, success_response)
+            self.assertEqual(
+                connector.client.send.await_args_list[0].kwargs["auth"], auth
+            )
+            self.assertEqual(
+                connector.client.send.await_args_list[1].kwargs["auth"], auth
+            )
+            mock_sleep.assert_awaited_once()
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_closes_response(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 404
+        response.is_redirect = False
+        response.aclose = AsyncMock()
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=request, response=response
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request("GET", "missing", stream=True)
+
+            response.aclose.assert_awaited_once_with()
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_preserves_response_body(self):
+        connector = self._make_connector()
+        request = httpx.Request("GET", "http://sandbox/missing")
+
+        class SingleChunkStream(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b"missing file"
+
+        response = httpx.Response(
+            404, stream=SingleChunkStream(), request=request
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(SandboxRequestError) as ctx:
+                await connector.send_request("GET", "missing", stream=True)
+
+            self.assertEqual(ctx.exception.response.content, b"missing file")
+            self.assertEqual(ctx.exception.response.text, "missing file")
+        finally:
+            await connector.close()
+
+    async def test_streaming_error_closes_response_when_capture_is_cancelled(self):
+        connector = self._make_connector()
+        request = MagicMock()
+        response = MagicMock()
+        response.status_code = 404
+        response.is_redirect = False
+        response.aclose = AsyncMock()
+
+        async def cancelled_body(*, chunk_size):
+            del chunk_size
+            raise asyncio.CancelledError
+            yield b"unreachable"
+
+        response.aiter_bytes = cancelled_body
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "404 Not Found", request=request, response=response
+        )
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(return_value=response)
+
+        try:
+            with self.assertRaises(asyncio.CancelledError):
+                await connector.send_request("GET", "missing", stream=True)
+
+            response.aclose.assert_awaited_once_with()
+        finally:
+            await connector.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new_callable=AsyncMock)
+    async def test_streaming_retry_closes_discarded_response(self, mock_sleep):
+        connector = self._make_connector()
+        request = MagicMock()
+        retry_response = MagicMock()
+        retry_response.status_code = 503
+        retry_response.aclose = AsyncMock()
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.is_redirect = False
+        success_response.raise_for_status = MagicMock()
+        success_response.aclose = AsyncMock()
+        connector.client.build_request = MagicMock(return_value=request)
+        connector.client.send = AsyncMock(
+            side_effect=[retry_response, success_response]
+        )
+
+        try:
+            result = await connector.send_request("GET", "download/file", stream=True)
+
+            self.assertIs(result, success_response)
+            retry_response.aclose.assert_awaited_once_with()
+            success_response.aclose.assert_not_awaited()
+            mock_sleep.assert_awaited_once()
         finally:
             await connector.close()
 
@@ -1122,8 +2077,9 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             k8s_helper=MagicMock(),
         )
         try:
-            with self.assertRaises(SandboxRequestError) as ctx:
-                await connector.send_request("POST", "run", timeout=1)
+            with patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()):
+                with self.assertRaises(SandboxRequestError) as ctx:
+                    await connector.send_request("POST", "run", timeout=1)
             self.assertIsNone(ctx.exception.status_code)
         finally:
             await connector.close()
@@ -1137,6 +2093,54 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             # in this test setup, but the request succeeds which validates
             # the header injection doesn't break the flow.
             self.assertEqual(response.status_code, 200)
+        finally:
+            await connector.close()
+
+
+class DropConnectionHandler(BaseHTTPRequestHandler):
+    """Drops every connection before sending a response (a transport failure)."""
+
+    attempts = 0
+
+    def do_GET(self):
+        type(self).attempts += 1
+        self.connection.close()
+
+    def log_message(self, *args):
+        pass
+
+
+class TestAsyncConnectorTransportRetry(unittest.IsolatedAsyncioTestCase):
+    """A transport failure (no HTTP response) must be retried for idempotent
+    methods, matching the sync connector's urllib3 adapter."""
+
+    port: int
+    server: HTTPServer
+    server_thread: Thread
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server, cls.server_thread, cls.port = _start_stub_server(DropConnectionHandler)
+
+    @classmethod
+    def tearDownClass(cls):
+        _stop_stub_server(cls.server, cls.server_thread)
+
+    async def test_transport_failure_is_retried_for_idempotent_methods(self):
+        config = SandboxDirectConnectionConfig(
+            api_url=f"http://127.0.0.1:{self.port}", server_port=self.port
+        )
+        connector = AsyncSandboxConnector(
+            sandbox_id="test",
+            namespace="default",
+            connection_config=config,
+            k8s_helper=MagicMock(),
+        )
+        try:
+            with patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "run")
+            self.assertGreater(DropConnectionHandler.attempts, 1)
         finally:
             await connector.close()
 
@@ -1169,6 +2173,7 @@ class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTe
         self.assertEqual(call_kwargs["connection_config"], self.config)
 
     async def test_get_sandbox_passes_connection_config(self):
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         self.mock_k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         self.mock_k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -1184,6 +2189,7 @@ class TestAsyncSandboxClientInClusterConnectionConfig(unittest.IsolatedAsyncioTe
         """Verify connection_config is passed through for non-InCluster configs."""
         config = SandboxDirectConnectionConfig(api_url="http://test", server_port=8888)
         client = AsyncSandboxClient(connection_config=config, cleanup=False)
+        client.k8s_helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {}})
         client.k8s_helper.resolve_sandbox_name = AsyncMock(return_value="sandbox-123")
         client.k8s_helper.get_sandbox = AsyncMock(return_value={"metadata": {}})
 
@@ -1337,8 +2343,9 @@ class TestAsyncConnectorCacheInvalidation(unittest.IsolatedAsyncioTestCase):
         )
 
         try:
-            with self.assertRaises(SandboxRequestError):
-                await connector.send_request("GET", "test")
+            with patch("k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "test")
 
             # Verify cache was cleared
             self.assertFalse(connector._pod_ip_resolved,
@@ -1438,7 +2445,7 @@ class TestAtexitCleanupRealInterpreterShutdown(unittest.TestCase):
     def setUp(self):
         SandboxClaimDeleteHandler.received_deletes = []
 
-    def _write_fake_kubeconfig(self) -> str:
+    def _write_fake_kubeconfig(self, server: str | None = None, user: str = "{}") -> str:
         fd, path = tempfile.mkstemp(suffix=".yaml")
         with os.fdopen(fd, "w") as f:
             f.write(f"""\
@@ -1446,7 +2453,7 @@ apiVersion: v1
 kind: Config
 clusters:
 - cluster:
-    server: http://127.0.0.1:{self.port}
+    server: {server or f"http://127.0.0.1:{self.port}"}
   name: test-cluster
 contexts:
 - context:
@@ -1456,13 +2463,13 @@ contexts:
 current-context: test-context
 users:
 - name: test-user
-  user: {{}}
+  user: {user}
 """)
         self.addCleanup(os.remove, path)
         return path
 
-    def test_atexit_cleanup_deletes_claim_on_real_process_exit(self):
-        kubeconfig_path = self._write_fake_kubeconfig()
+    def _run_atexit_script(self, kubeconfig_path: str, tmpdir: str | None = None) -> None:
+        """Runs a client that never closes, so only its atexit hook can delete the claim."""
         script = """
 import asyncio
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
@@ -1489,6 +2496,8 @@ asyncio.run(main())
         for k in ("KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT", "KUBERNETES_PORT"):
             env.pop(k, None)
         env["KUBECONFIG"] = kubeconfig_path
+        if tmpdir is not None:
+            env["TMPDIR"] = tmpdir
 
         result = subprocess.run(
             [sys.executable, "-c", script],
@@ -1500,10 +2509,83 @@ asyncio.run(main())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr, result.stderr)
+
+    def test_atexit_cleanup_deletes_claim_on_real_process_exit(self):
+        self._run_atexit_script(self._write_fake_kubeconfig())
+
         self.assertEqual(
             SandboxClaimDeleteHandler.received_deletes,
             ["/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/default/sandboxclaims/claim-abc"],
         )
+
+    def test_atexit_cleanup_leaves_no_temp_cert_files(self):
+        """kubernetes extracts inline client-certificate-data of an https cluster to temp files and registers an
+        atexit hook to remove them, but Python drops registrations made from inside a running atexit hook, so the
+        files used to leak. The server is unreachable on purpose, since the files exist as soon as the config loads."""
+        leak_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, leak_dir, True)
+        kubeconfig_path = self._write_fake_kubeconfig(
+            server="https://127.0.0.1:1",
+            user="{client-certificate-data: Y2VydA==, client-key-data: a2V5}",
+        )
+
+        self._run_atexit_script(kubeconfig_path, tmpdir=leak_dir)
+
+        self.assertEqual(os.listdir(leak_dir), [])
+
+
+@pytest.mark.asyncio
+async def test_tracked_handle_does_not_keep_its_client_alive():
+    with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper"):
+        client = AsyncSandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"), cleanup=False
+        )
+    client.sandbox_class = AsyncSandbox
+    client.k8s_helper.wait_for_claim_ready = AsyncMock(return_value="sandbox-id")
+    with patch.object(client, "_create_claim", new_callable=AsyncMock, return_value={}):
+        sandbox = await client.create_sandbox("pool", "ns")
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+        await sandbox.close_connection()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tracked", [False, True], ids=["registry-empty", "registry-tracking"])
+async def test_dropped_client_is_freed_and_its_exit_hook_still_cleans_up(tracked):
+    with patch("k8s_agent_sandbox.async_sandbox_client.AsyncK8sHelper"), \
+            patch("k8s_agent_sandbox.async_sandbox_client.atexit") as mock_atexit:
+        client = AsyncSandboxClient(connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"))
+    exit_hook = mock_atexit.register.call_args.args[0]
+    client.sandbox_class = AsyncSandbox
+    client.k8s_helper.wait_for_claim_ready = AsyncMock(return_value="sandbox-id")
+    client.k8s_helper.close = AsyncMock()
+    claim = {"metadata": {"uid": "uid-kept", "resourceVersion": "1"}, "spec": {"warmPoolRef": {"name": "pool"}}}
+    with patch.object(client, "_create_claim", new_callable=AsyncMock, return_value=claim):
+        generated = await client.create_sandbox("pool", "ns")
+        explicit = await client.create_sandbox("pool", "ns", claim_name="kept")
+    generated_name = generated.claim_name
+    if not tracked:
+        await client.close()
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+    with patch("k8s_agent_sandbox.async_sandbox_client.K8sHelper") as MockHelper:
+        exit_hook()
+    deleted = [c.args[:2] for c in MockHelper.return_value.delete_sandbox_claim.call_args_list]
+    assert deleted == ([(generated_name, "ns")] if tracked else [])
+    assert not generated.is_active
+    assert not explicit.is_active
 
 
 if __name__ == "__main__":

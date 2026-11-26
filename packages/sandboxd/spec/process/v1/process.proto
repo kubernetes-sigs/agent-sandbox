@@ -16,6 +16,7 @@ syntax = "proto3";
 
 package process.v1;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 
 option go_package = "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1;processv1";
@@ -33,6 +34,10 @@ service ProcessService {
   // stderr, and the exit code atomically. Use when real-time streaming is not required.
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
 
+  // ExecuteWithLimits captures bounded output and reports execution outcomes.
+  // Older runtimes reject this method instead of ignoring requested limits.
+  rpc ExecuteWithLimits(ExecuteWithLimitsRequest) returns (ExecuteWithLimitsResponse);
+
   // WriteStdin sends standard input bytes or EOF to an active running process.
   // Note: Any stdout/stderr produced by the process in response to this input
   // flows continuously through the active Start stream rather than WriteStdinResponse.
@@ -49,9 +54,9 @@ service ProcessService {
 
 enum Signal {
   SIGNAL_UNSPECIFIED = 0;
-  SIGNAL_SIGINT      = 2;
-  SIGNAL_SIGKILL     = 9;
-  SIGNAL_SIGTERM     = 15;
+  SIGNAL_SIGINT = 2;
+  SIGNAL_SIGKILL = 9;
+  SIGNAL_SIGTERM = 15;
 }
 
 message PTY {
@@ -101,6 +106,34 @@ message ExecuteResponse {
   bytes stderr = 3;
 }
 
+message ExecuteWithLimitsRequest {
+  ProcessConfig config = 1;
+  // Omitted limits inherit deployment policy. Explicit limits must be positive.
+  optional uint64 stdout_limit_bytes = 2;
+  optional uint64 stderr_limit_bytes = 3;
+  // Independent of the RPC deadline. Includes launch and output collection.
+  google.protobuf.Duration time_limit = 4;
+}
+
+enum ExecuteTerminationReason {
+  EXECUTE_TERMINATION_REASON_UNSPECIFIED = 0;
+  // The program exited normally or due to a signal other than an execution limit.
+  EXECUTE_TERMINATION_REASON_EXITED = 1;
+  EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED = 2;
+}
+
+message ExecuteWithLimitsResponse {
+  int32 exit_code = 1;
+  // Each stream retains its prefix. Additional output is drained and discarded.
+  bytes stdout = 2;
+  bytes stderr = 3;
+  ExecuteTerminationReason termination_reason = 4;
+  // Wall-clock time from launch preparation through termination and I/O cleanup.
+  google.protobuf.Duration elapsed_duration = 5;
+  bool stdout_truncated = 6;
+  bool stderr_truncated = 7;
+}
+
 message WriteStdinRequest {
   int32 process_id = 1;
   oneof payload {
@@ -112,8 +145,7 @@ message WriteStdinRequest {
 // WriteStdinResponse is returned on successful delivery of standard input.
 // It is intentionally empty because process output (stdout/stderr) streams
 // continuously through the StartResponse stream to prevent race conditions.
-message WriteStdinResponse {
-}
+message WriteStdinResponse {}
 
 message SendSignalRequest {
   int32 process_id = 1;
@@ -122,8 +154,7 @@ message SendSignalRequest {
 
 // SendSignalResponse is returned on successful delivery of a signal.
 // Failure cases are communicated via gRPC status codes rather than fields in this message.
-message SendSignalResponse {
-}
+message SendSignalResponse {}
 
 message ResizeTTYRequest {
   int32 process_id = 1;
@@ -131,6 +162,4 @@ message ResizeTTYRequest {
   uint32 rows = 3;
 }
 
-message ResizeTTYResponse {
-}
-
+message ResizeTTYResponse {}

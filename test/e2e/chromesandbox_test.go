@@ -237,22 +237,29 @@ func runChromeSandbox(t *framework.TestContext) *ChromeSandboxMetrics {
 	return metrics
 }
 
+// Allow for port-forward round trips to remote clusters.
+const chromeProbeTimeout = 5 * time.Second
+
 func waitForChromeReady(tc *framework.TestContext, podID types.NamespacedName) error {
 	tc.Helper()
 
-	ctx := tc.Context()
+	// Benchmarks need their own deadline; go test's timeout does not cover them.
+	ctx, cancel := context.WithTimeout(tc.Context(), framework.DefaultTimeout)
+	defer cancel()
 
 	// Loop until we can query chrome for its version via the debug port
 	pollDuration := 100 * time.Millisecond
+	var lastErr error
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("context cancelled")
+			return fmt.Errorf("waiting for Chrome readiness: %w; last probe: %v", ctx.Err(), lastErr)
 		default:
 			// We have to port-forward in the loop because port-forward exits when it sees an error
 			// https://github.com/kubernetes/kubectl/issues/1249
 			portForwardCtx, portForwardCancel := context.WithCancel(ctx)
 			if err := tc.PortForward(portForwardCtx, podID, 9222, 9222); err != nil {
+				lastErr = err
 				tc.Logf("failed to port forward: %s", err)
 				portForwardCancel()
 				time.Sleep(pollDuration)
@@ -263,6 +270,7 @@ func waitForChromeReady(tc *framework.TestContext, podID types.NamespacedName) e
 			info, err := getChromeInfo(ctx, u)
 			portForwardCancel()
 			if err != nil {
+				lastErr = err
 				tc.Logf("failed to get chrome info: %s", err)
 				time.Sleep(pollDuration)
 				continue
@@ -277,7 +285,7 @@ func waitForChromeReady(tc *framework.TestContext, podID types.NamespacedName) e
 // This is used to verify that Chrome is running inside the sandbox.
 func getChromeInfo(ctx context.Context, u string) (string, error) {
 	httpClient := &http.Client{}
-	httpClient.Timeout = 200 * time.Millisecond
+	httpClient.Timeout = chromeProbeTimeout
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {

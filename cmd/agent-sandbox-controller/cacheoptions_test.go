@@ -21,7 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
-	"sigs.k8s.io/agent-sandbox/controllers"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 )
 
 // assertStripsManagedFields runs the configured DefaultTransform against an
@@ -113,7 +113,7 @@ func TestBuildCacheOptionsScopedToTrackingLabel(t *testing.T) {
 	if svc == nil {
 		t.Fatal("no Service entry in ByObject with the flag enabled")
 	}
-	want := controllers.SandboxNameHashLabel // selector: label exists
+	want := sandboxv1beta1.SandboxNameHashLabel // selector: label exists
 	for name, entry := range map[string]*cache.ByObject{"Pod": pod, "Service": svc} {
 		if entry.Label == nil {
 			t.Errorf("%s cache not label-scoped", name)

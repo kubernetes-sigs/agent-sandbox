@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -26,9 +27,10 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/net/http/httpguts"
-	"k8s.io/apimachinery/pkg/types"
+	"google.golang.org/grpc/codes"
 
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
@@ -39,13 +41,16 @@ import (
 // HTTP request is parsed into a Target and proxied to the upstream sandbox
 // with the same body, headers (minus Host), and method.
 type Handler struct {
-	cfg        *config.Config
-	metrics    *observability.Metrics
-	propagator propagation.TextMapPropagator
-	transport  http.RoundTripper
-	cache      Lookup
-	authz      authz.Authorizer
-	log        logr.Logger
+	cfg             *config.Config
+	metrics         *observability.Metrics
+	propagator      propagation.TextMapPropagator
+	transport       http.RoundTripper
+	httpTransport   *http.Transport
+	grpcTransport   *http.Transport
+	grpcConnections *grpcConnections
+	cache           Lookup
+	authz           authz.Authorizer
+	log             logr.Logger
 }
 
 // Options bundles the dependencies NewHandler needs. Metrics, Propagator,
@@ -75,7 +80,8 @@ func NewHandler(o Options) *Handler {
 	if o.Propagator == nil {
 		o.Propagator = propagation.TraceContext{}
 	}
-	var tr http.RoundTripper = defaultTransport(o.Config)
+	httpTransport := defaultTransport(o.Config)
+	var tr http.RoundTripper = httpTransport
 	// Wrap with retry only if max-retries > 0. The transport is unchanged
 	// when retries are disabled so the request path stays a single Dial.
 	if o.Config.UpstreamMaxRetries > 0 {
@@ -96,28 +102,96 @@ func NewHandler(o Options) *Handler {
 			onRetry,
 		)
 	}
+	// Wrap with metrics last (outermost) so every upstream byte —
+	// including those on the single successful attempt after dial-class
+	// retries — is counted exactly once.
+	if o.Metrics != nil {
+		tr = newMetricsTransport(tr, o.Metrics)
+	}
 	authorizer := o.Authorizer
 	if authorizer == nil {
 		authorizer = authz.AllowAll{}
 	}
+	grpcTr := grpcTransport(o.Config)
+	grpcConns := newGRPCConnections(grpcTr.DialContext)
+	grpcTr.DialContext = grpcConns.dialContext
 	return &Handler{
-		cfg:        o.Config,
-		metrics:    o.Metrics,
-		propagator: o.Propagator,
-		transport:  tr,
-		cache:      o.Cache,
-		authz:      authorizer,
-		log:        o.Logger,
+		cfg:             o.Config,
+		metrics:         o.Metrics,
+		propagator:      o.Propagator,
+		transport:       tr,
+		httpTransport:   httpTransport,
+		grpcTransport:   grpcTr,
+		grpcConnections: grpcConns,
+		cache:           o.Cache,
+		authz:           authorizer,
+		log:             o.Logger,
 	}
+}
+
+// CloseIdleConnections releases idle upstream connections without interrupting
+// active requests. Use Close for final cleanup after server shutdown.
+func (h *Handler) CloseIdleConnections() {
+	h.httpTransport.CloseIdleConnections()
+	h.grpcTransport.CloseIdleConnections()
+}
+
+// Close releases upstream resources after server shutdown. It also closes
+// native gRPC connections whose canceled streams are still unwinding, without
+// waiting for request handlers. The handler cannot be reused after Close.
+func (h *Handler) Close() {
+	h.grpcConnections.close()
+	h.CloseIdleConnections()
 }
 
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	upstreamPath, upstreamRawPath := r.URL.Path, ""
+	kind := classifyRequest(r)
+	if kind == protoGRPCWebReject {
+		if labels := observability.LabelsFromContext(r.Context()); labels != nil {
+			labels.GRPC = true
+		}
+		// Stamp CORS before the error so a browser caller from an
+		// allowlisted origin can actually read why the variant was
+		// rejected instead of seeing an opaque CORS failure.
+		h.maybeSetCORSHeaders(w, r, kind)
+		writeGRPCWebError(w, r, codes.InvalidArgument,
+			"unsupported grpc-web content type: the router transcodes binary application/grpc-web only")
+		return
+	}
+	// A CORS preflight carries no routing headers — the browser only
+	// lists their names — so answer it before any routing or authz.
+	if h.maybeHandlePreflight(w, r) {
+		return
+	}
+	// CORS headers for the real gRPC-Web request go on before routing and
+	// authorization so the browser can also read error responses.
+	h.maybeSetCORSHeaders(w, r, kind)
+	grpcRequest := kind.isGRPCish()
+	if grpcRequest {
+		if labels := observability.LabelsFromContext(r.Context()); labels != nil {
+			labels.GRPC = true
+		}
+		ctx, cancel, err := grpcRequestContext(r, h.cfg.GRPCProxyTimeout)
+		if err != nil {
+			writeGRPCError(w, codes.InvalidArgument, err.Error())
+			return
+		}
+		defer cancel()
+		r = r.WithContext(ctx)
+		if err := grpcContextError(ctx); err != nil {
+			writeProxyError(w, r, kind, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			return
+		}
+		if h.cfg.MaxRequestBodyBytes > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxRequestBodyBytes)
+		}
+	}
+	upstreamPath, upstreamRawPath := r.URL.Path, r.URL.RawPath
 	var pathRouted bool
-	target, perr := h.resolveTarget(r, &upstreamPath, &upstreamRawPath, &pathRouted)
+	target, perr := h.resolveTarget(r, grpcRequest, &upstreamPath, &upstreamRawPath, &pathRouted)
 	if perr != nil {
-		WriteJSONError(w, perr)
+		writeProxyError(w, r, kind, perr)
 		return
 	}
 
@@ -160,9 +234,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.metrics != nil {
 				h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 			}
-			WriteJSONError(w, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
+			writeProxyError(w, r, kind, &Error{Status: http.StatusForbidden, Detail: "origin not allowed for cookie-authenticated request"})
 			return
 		}
+	}
+
+	// Resolve once per request, before authorization: the cache returns
+	// the Sandbox UID and Pod IP together, so the UID a scoped token is
+	// checked against is the incarnation this request will dial. The
+	// ErrorHandler also needs src to invalidate the cache entry on
+	// dial-class failures, and the Rewrite callback re-uses the URL.
+	target0 := target // capture for closures
+	upstreamURL, src, resolved := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, r.URL.RawQuery, h.cache)
+	if upstreamRawPath != "" {
+		// Header routing seeds RawPath from r.URL; path routing rewrites
+		// it in resolveTarget. Target.Resolve only assigns URL.Path, so
+		// without this a request carrying an encoded separator (e.g. a
+		// filename containing "/", sent as "%2F") would reach the sandbox
+		// already decoded, silently renaming the resource it addresses.
+		// net/url only honors RawPath when it is a valid encoding of Path
+		// (see url.URL.EscapedPath's doc). That pairing comes from r.URL
+		// for a header-routed request, and resolveTarget/ParsePathRoute
+		// guarantee it for a path-routed one.
+		upstreamURL.RawPath = upstreamRawPath
 	}
 
 	// Authorization. Implementations are expected to pull whatever
@@ -175,13 +269,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	authorizationTarget, err := authz.NormalizeAuthorizationTarget(authz.AuthorizationTarget{
 		Namespace:   target.Namespace,
 		SandboxName: target.ID,
-		SandboxUID:  target.UID,
+		SandboxUID:  string(resolved.SandboxUID),
 		Port:        target.Port,
 		Method:      r.Method,
 		Path:        upstreamPathURL.EscapedPath(),
 	})
 	if err != nil {
-		WriteJSONError(w, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
+		writeProxyError(w, r, kind, &Error{Status: http.StatusInternalServerError, Detail: err.Error()})
 		return
 	}
 	if err := h.authz.Authorize(r.Context(), r, authorizationTarget); err != nil {
@@ -195,11 +289,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.metrics != nil {
 			h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "deny").Inc()
 		}
-		WriteJSONError(w, &Error{Status: status, Detail: err.Error()})
+		writeProxyError(w, r, kind, &Error{Status: status, Detail: err.Error()})
 		return
 	}
 	if h.metrics != nil {
 		h.metrics.AuthzDecisionsTotal.WithLabelValues(target.Namespace, "allow").Inc()
+	}
+	if grpcRequest {
+		if err := grpcContextError(r.Context()); err != nil {
+			writeProxyError(w, r, kind, &Error{Status: http.StatusBadGateway, Detail: err.Error()})
+			return
+		}
 	}
 
 	// Browser-session bootstrap: this request just proved (via the
@@ -213,7 +313,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target0 := target // capture for closures
 	outboundRawQuery := r.URL.RawQuery
 	if h.cfg.AuthzCookieQueryParam != "" {
 		// Never forward the bootstrap credential to the sandbox itself.
@@ -222,27 +321,36 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// normal flow already returned above.
 		outboundRawQuery = stripQueryParam(outboundRawQuery, h.cfg.AuthzCookieQueryParam)
 	}
-	// Resolve once per request so the ErrorHandler can see which path
-	// produced the IP (cache vs DNS vs override) and invalidate the cache
-	// entry on dial-class failures. The Rewrite callback re-uses the URL.
-	upstreamURL, src := target0.Resolve("http", h.cfg.ClusterDomain, upstreamPath, outboundRawQuery, h.cache)
-	if upstreamRawPath != "" {
-		// Only ever set for a path-routed request (see resolveTarget).
-		// Target.Resolve only assigns URL.Path, so without this a path-
-		// routed request carrying an encoded separator in its upstream
-		// portion (e.g. a filename containing "/", sent as "%2F") would
-		// reach the sandbox already decoded, silently renaming the
-		// resource it addresses. net/url only honors RawPath when it is
-		// a valid encoding of Path (see url.URL.EscapedPath's doc) —
-		// resolveTarget/ParsePathRoute guarantee that pairing holds.
-		upstreamURL.RawPath = upstreamRawPath
+	if pathRouted && h.cfg.PathRoutingPreservePrefix {
+		// Authorization above saw the stripped path, which is what policies
+		// are written against. Only the forwarded request keeps the prefix:
+		// the sandbox serves under its own base path, so it must receive
+		// the full path it was addressed with. Same escaping pair as the
+		// stripped branch, so an encoded separator survives unchanged.
+		//
+		// The prefix segments reach the sandbox exactly as the client
+		// encoded them. An app that compares its configured base URL as a
+		// string must match that encoded form: percent-decoding a segment
+		// yields a different path than the one the request was addressed
+		// with, so the base URL would no longer match.
+		upstreamURL.Path = r.URL.Path
+		upstreamURL.RawPath = r.URL.EscapedPath()
 	}
+	upstreamURL.RawQuery = outboundRawQuery
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL = upstreamURL
 			// Clear inbound Host so net/http picks the URL host. Matches the
 			// Python router's behavior of stripping Host before forwarding.
 			pr.Out.Host = ""
+			if grpcRequest {
+				if deadline, ok := pr.Out.Context().Deadline(); ok {
+					pr.Out.Header.Set("Grpc-Timeout", remainingGRPCTimeout(time.Until(deadline)))
+				}
+			}
+			if kind == protoGRPCWeb {
+				rewriteGRPCWebContentType(pr.Out.Header)
+			}
 			// Strip Authorization before forwarding. The router consumes
 			// it (e.g. --authz-mode=tokenreview validates a Bearer token
 			// via the K8s TokenReview API); the sandbox must not see the
@@ -313,6 +421,30 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Transport:     h.transport,
 		FlushInterval: -1, // immediate flush for SSE / streaming responses
 		ErrorHandler: func(w http.ResponseWriter, errReq *http.Request, err error) {
+			var bodyLimit *http.MaxBytesError
+			if grpcRequest && errors.As(err, &bodyLimit) {
+				writeProxyError(w, errReq, kind, &Error{
+					Status: http.StatusRequestEntityTooLarge,
+					Detail: "RPC request body limit exceeded",
+				})
+				return
+			}
+			// A caller's own cancel is not a sandbox failure. writeProxyError
+			// answers a gRPC caller with codes.Canceled, not the 502 below.
+			if errors.Is(err, context.Canceled) && errReq.Context().Err() != nil {
+				h.recordUpstreamErrorReason(target0.Namespace, reasonClientCanceled)
+				observability.LoggerFromContext(errReq.Context(), h.log).V(1).Info(
+					"client canceled the request",
+					"sandbox", target0.ID,
+					"namespace", target0.Namespace,
+					"source", string(src),
+				)
+				writeProxyError(w, errReq, kind, &Error{
+					Status: http.StatusBadGateway,
+					Detail: "The client canceled the request",
+				})
+				return
+			}
 			h.recordUpstreamErrorReason(target0.Namespace, classifyError(err))
 			// KEP-NNNN: actively invalidate the cache entry when a dial
 			// failure indicates the IP itself is dead (timeout, no
@@ -326,22 +458,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// working route for a warm-pool sandbox until resync. We only
 			// invalidate when the IP we tried actually came from the
 			// cache — a DNS or PodIP-header failure means the cache had
-			// nothing useful to evict — and evict by the same key the
-			// entry was resolved with: UID for the fast path,
-			// namespace/name (plus the failed IP, so a recreated Pod's
-			// fresh entry survives) for the name index.
-			if h.cache != nil && isDeadHostDialError(err) {
-				invalidated := false
-				switch {
-				case src == SourceCache && target0.UID != "":
-					invalidated = h.cache.Invalidate(types.UID(target0.UID))
-				case src == SourceCacheName:
-					// SplitHostPort strips the port and the brackets
-					// JoinHostPort added around IPv6 literals.
-					if ip, _, sperr := net.SplitHostPort(upstreamURL.Host); sperr == nil {
-						invalidated = h.cache.InvalidateByName(target0.Namespace, target0.ID, ip)
-					}
-				}
+			// nothing useful to evict. Either cache path resolved a full
+			// entry, so evict exactly that entry: one a recreated Pod
+			// refreshed mid-dial survives, even if it reused the IP.
+			if h.cache != nil && isDeadHostDialError(err) && (src == SourceCache || src == SourceCacheName) {
+				invalidated := h.cache.Invalidate(resolved)
 				if invalidated && h.metrics != nil {
 					h.metrics.CacheInvalidationsTotal.WithLabelValues(target0.Namespace).Inc()
 				}
@@ -354,11 +475,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				"namespace", target0.Namespace,
 				"source", string(src),
 			)
-			WriteJSONError(w, &Error{
+			writeProxyError(w, errReq, kind, &Error{
 				Status: http.StatusBadGateway,
 				Detail: fmt.Sprintf("Could not connect to the backend sandbox: %s", target0.ID),
 			})
 		},
+	}
+	if grpcRequest {
+		rp.Transport = h.grpcTransport
+		rp.ModifyResponse = prepareGRPCResponse
+		if kind == protoGRPCWeb {
+			// The inbound request context carries the observability
+			// Labels; recording the terminal status there is what lets
+			// the access log and span report it even though a grpc-web
+			// response never exposes Grpc-Status as a header.
+			rp.ModifyResponse = func(resp *http.Response) error {
+				return prepareGRPCWebResponse(resp, func(status string) {
+					observability.RecordGRPCStatus(r.Context(), status)
+				})
+			}
+		}
+	}
+
+	// Cookie paths are rescoped under the prefix in both modes: an app that
+	// writes Path=/ would otherwise hand its cookie to every sandbox sharing
+	// the origin. Location is rewritten only in strip mode. There the sandbox
+	// does not know its prefix; in preserve mode it already emits prefixed
+	// redirects, and rewriting them again would double the prefix. gRPC
+	// responses keep their own hook.
+	if pathRouted && !grpcRequest && h.cfg.PathRoutingRewriteResponses {
+		base := strings.TrimSuffix(bootstrapCookiePath(h.cfg.PathRoutingPrefix, target0), "/")
+		isSelf := selfHostMatcher(r.Host, upstreamURL.Host)
+		rewriteLocations := !h.cfg.PathRoutingPreservePrefix
+		rp.ModifyResponse = func(resp *http.Response) error {
+			rewriteResponseHeaders(resp.Header, base, isSelf, rewriteLocations)
+			return nil
+		}
 	}
 
 	// Bound the upstream request lifetime by the configured proxy timeout,
@@ -370,7 +522,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 101 handshake is done the connection's TCP keepalive is the
 	// liveness signal, not our handler context.
 	ctx := r.Context()
-	if !upgrade {
+	if !upgrade && !grpcRequest {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, h.cfg.ProxyTimeout)
 		defer cancel()
@@ -390,17 +542,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // originally-escaped form — both are needed together to preserve an
 // encoded separator (e.g. "%2F") through to the outbound request, see
 // ParsePathRoute. Both are left untouched for header-routed requests,
-// which carry no routing prefix to strip; *upstreamRawPath in particular
-// stays "" there, exactly matching pre-path-routing behavior of never
-// setting Resolve's outbound URL.RawPath at all.
+// which carry no routing prefix to strip; the caller seeds both from
+// r.URL so header-routed requests keep their original escaping.
 //
 // *pathRouted reports which branch actually resolved the target — the
 // browser-session bootstrap (maybeBootstrapCookie) must only fire for a
 // path-routed request, since the cookie it would set is scoped to a
 // Path shaped like the routing prefix and can never match a
 // header-routed request's URL.
-func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *string, pathRouted *bool) (Target, *Error) {
-	if h.cfg.PathRoutingPrefix != "" {
+func (h *Handler) resolveTarget(r *http.Request, grpcRequest bool, upstreamPath, upstreamRawPath *string, pathRouted *bool) (Target, *Error) {
+	if !grpcRequest && h.cfg.PathRoutingPrefix != "" {
 		if route, matched, perr := ParsePathRoute(h.cfg.PathRoutingPrefix, r.URL.EscapedPath()); matched {
 			if perr != nil {
 				return Target{}, perr
@@ -411,7 +562,10 @@ func (h *Handler) resolveTarget(r *http.Request, upstreamPath, upstreamRawPath *
 			return route.Target, nil
 		}
 	}
-	return ParseSandboxHeaders(r.Header, ParseOptions{AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP})
+	return ParseSandboxHeaders(r.Header, ParseOptions{
+		AllowLoopbackPodIP: h.cfg.AllowLoopbackPodIP,
+		RequirePort:        grpcRequest,
+	})
 }
 
 // isUpgradeRequest reports whether r is asking the server to switch
@@ -467,6 +621,10 @@ func (h *Handler) recordUpstreamErrorReason(namespace, reason string) {
 	h.metrics.UpstreamErrorsTotal.WithLabelValues(namespace, reason).Inc()
 }
 
+// reasonClientCanceled labels a request that its caller canceled before the
+// upstream answered.
+const reasonClientCanceled = "client_canceled"
+
 // classifyError turns an arbitrary RoundTrip error into a low-cardinality
 // label value so the upstream_errors_total counter does not explode.
 func classifyError(err error) string {
@@ -489,4 +647,125 @@ func classifyError(err error) string {
 		return "dial"
 	}
 	return "other"
+}
+
+// metricsTransport wraps an http.RoundTripper and increments Prometheus
+// counters for every byte flowing to / from the upstream sandbox. The
+// sandbox_namespace label is read from the per-request *Labels the proxy
+// handler attached to the request context earlier in ServeHTTP — same
+// mechanism the rest of the observability stack uses.
+//
+// The wrapping is applied outside retryTransport so retries that fail at
+// dial time (before any body bytes move) don't double-count; retries on
+// dial failures are safe here because http.Transport only consumes the
+// body after a successful connect.
+type metricsTransport struct {
+	base    http.RoundTripper
+	metrics *observability.Metrics
+}
+
+func newMetricsTransport(base http.RoundTripper, metrics *observability.Metrics) *metricsTransport {
+	return &metricsTransport{base: base, metrics: metrics}
+}
+
+// RoundTrip implements http.RoundTripper. The http.RoundTripper contract
+// forbids mutating the incoming request; ReverseProxy happens to hand us
+// an owned clone today, but a shallow copy before swapping Body keeps
+// this transport safe for reuse by other callers.
+func (t *metricsTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	namespace := observability.SandboxNamespaceFromContext(req.Context())
+
+	// Wrap the request body so bytes streamed to the upstream are
+	// counted toward upstream_tx_bytes_total. The counter is bound to
+	// the resolved namespace up front; WithLabelValues is a map lookup
+	// but the series is reused for the lifetime of the process so the
+	// per-call cost is trivial.
+	if req.Body != nil {
+		reqClone := req.Clone(req.Context())
+		reqClone.Body = &upstreamCountingReadCloser{
+			rc:      req.Body,
+			counter: t.metrics.UpstreamTxBytesTotal.WithLabelValues(namespace),
+		}
+		req = reqClone
+	}
+
+	resp, err := t.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap the response body so bytes streamed back from the upstream
+	// are counted toward upstream_rx_bytes_total. httputil.ReverseProxy
+	// copies resp.Body to the client via io.Copy and then calls Close,
+	// so the counter is incremented lazily as bytes flow — SSE /
+	// streaming responses are accounted for correctly because the
+	// counting happens per Read, not per response.
+	if body := resp.Body; body != nil {
+		counting := &upstreamCountingReadCloser{
+			rc:      body,
+			counter: t.metrics.UpstreamRxBytesTotal.WithLabelValues(namespace),
+		}
+		resp.Body = counting
+		// http.Transport returns a writable body for a 101 response, and
+		// ReverseProxy only hijacks the connection if the body is still an
+		// io.ReadWriteCloser. Keep Write available so upgrades do not 502.
+		if w, ok := body.(io.Writer); ok {
+			resp.Body = &upstreamCountingReadWriteCloser{
+				upstreamCountingReadCloser: counting,
+				w:                          w,
+				writeCounter:               t.metrics.UpstreamTxBytesTotal.WithLabelValues(namespace),
+			}
+		}
+	}
+
+	return resp, nil
+}
+
+// upstreamCountingReadCloser wraps an io.ReadCloser, counts bytes read,
+// and increments a Prometheus counter in real time. Incrementing per Read
+// (rather than accumulating locally and flushing at Close) keeps the
+// counters accurate even if a streaming response is abandoned mid-flight
+// — the bytes that did flow are still attributed.
+type upstreamCountingReadCloser struct {
+	rc      io.ReadCloser
+	counter prometheus.Counter
+}
+
+func (c *upstreamCountingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.rc.Read(p)
+	addBytes(c.counter, n)
+	return n, err
+}
+
+func (c *upstreamCountingReadCloser) Close() error {
+	return c.rc.Close()
+}
+
+// upstreamCountingReadWriteCloser also counts bytes written to the upstream.
+// It wraps the body of an upgraded (101) response, where Read carries
+// upstream-to-client bytes and Write carries client-to-upstream bytes.
+type upstreamCountingReadWriteCloser struct {
+	*upstreamCountingReadCloser
+	w            io.Writer
+	writeCounter prometheus.Counter
+}
+
+func (c *upstreamCountingReadWriteCloser) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	addBytes(c.writeCounter, n)
+	return n, err
+}
+
+// CloseWrite lets ReverseProxy half-close the upstream, as net/http's own body does.
+func (c *upstreamCountingReadWriteCloser) CloseWrite() error {
+	if cw, ok := c.w.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return http.ErrNotSupported
+}
+
+func addBytes(counter prometheus.Counter, n int) {
+	if n > 0 {
+		counter.Add(float64(n))
+	}
 }

@@ -14,10 +14,9 @@ This integration provides a standard [Gymnasium](https://gymnasium.farama.org/) 
 
 ### Installation
 
-Install the Gymnasium integration directly from pip (once published) or via a local editable install within the repo:
-
 ```bash
-pip install k8s-agent-sandbox-gymnasium
+# Replace <tag> with a release tag from https://github.com/kubernetes-sigs/agent-sandbox/releases
+pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subdirectory=clients/integrations/gymnasium"
 ```
 
 > **Note**: You will also need a running Kubernetes cluster with the Sandbox controller and warmpool deployed.

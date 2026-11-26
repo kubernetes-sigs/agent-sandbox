@@ -15,15 +15,19 @@
 package proxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/types"
 
+	sandboxdserver "sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/cache"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/config"
 )
@@ -93,5 +97,81 @@ func TestPathRoutingPreservesEncodedSlash(t *testing.T) {
 	const want = "/some%2Ffile"
 	if got != want {
 		t.Fatalf("backend saw escaped path %q, want %q (the encoded slash must survive the hop)", got, want)
+	}
+}
+
+// TestHeaderRoutingSandboxdFilePaths checks that header-routed file paths
+// reach sandboxd with their escaping intact. A decoded "%2F" or "%2E" yields
+// "//" or a dot segment, which sandboxd's ServeMux redirects with 307.
+func TestHeaderRoutingSandboxdFilePaths(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"a.txt":         "root file",
+		"dir/child.txt": "child file",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	daemon, err := sandboxdserver.New(sandboxdserver.Options{RootDir: root, Log: logr.Discard()})
+	if err != nil {
+		t.Fatalf("new sandboxd: %v", err)
+	}
+	backend := httptest.NewServer(daemon.RESTHandler())
+	defer backend.Close()
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend URL: %v", err)
+	}
+
+	cfg := config.Defaults()
+	cfg.AllowLoopbackPodIP = true
+	lookup := &stubLookup{entries: map[types.UID]cache.Entry{
+		"file-path-uid": {PodIP: backendURL.Hostname(), SandboxName: "my-box", Namespace: "test"},
+	}}
+	router := httptest.NewServer(NewHandler(Options{Config: &cfg, Cache: lookup, Logger: logr.Discard()}))
+	defer router.Close()
+	client := router.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "encoded slash", path: "/v1/files/dir%2F%2Fchild.txt", body: "child file"},
+		{name: "encoded dot", path: "/v1/files/%2E%2Fa.txt", body: "root file"},
+		{name: "encoded parent", path: "/v1/files/dir%2F%2E%2E%2Fa.txt", body: "root file"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, router.URL+test.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(HeaderSandboxID, "my-box")
+			req.Header.Set(HeaderSandboxNamespace, "test")
+			req.Header.Set(HeaderSandboxUID, "file-path-uid")
+			req.Header.Set(HeaderSandboxPort, backendURL.Port())
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request through router: %v", err)
+			}
+			defer resp.Body.Close()
+			got, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status: got %d want %d, body %s", resp.StatusCode, http.StatusOK, got)
+			}
+			if string(got) != test.body {
+				t.Fatalf("file content: got %q want %q", got, test.body)
+			}
+		})
 	}
 }

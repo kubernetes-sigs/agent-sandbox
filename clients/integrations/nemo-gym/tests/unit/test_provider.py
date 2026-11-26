@@ -447,7 +447,6 @@ async def test_upload_file_stages_then_copies(tmp_path):
     assert data == b"\x00\x01binary"
     script = sandbox._commands.scripts()[0]
     assert script == f"mkdir -p /data/out && cp {staging} /data/out/artifact.bin && rm -f {staging}"
-    assert "cd " not in script
 
 
 async def test_upload_file_failure_raises_and_cleans_staging(tmp_path):

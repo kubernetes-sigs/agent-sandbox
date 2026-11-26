@@ -6,6 +6,11 @@ This integration provides Gymnasium API support for the Agent Sandbox Python SDK
 
 The `SandboxEnv` class (`gymnasium_env.py`) subclasses `gymnasium.Env` and handles sandbox lifecycle management via `SandboxClient`. It can be customized with modular reward and termination functions from `reward_fns.py` and `termination_fns.py`.
 
+For a CPU-only example that performs real PPO training, checkpointing, and
+evaluation with Ray RLlib, see [RLlib training with SandboxEnv](rllib/README.md).
+Its [KubeRay RayJob workflow](rllib/README.md#run-a-sandboxd-rayjob-on-kubernetes)
+uses direct sandboxd Service DNS, two remote EnvRunners and a retained checkpoint PVC.
+
 To see how it works in actions, follow the steps below to deploy an example jupyter notebook that fine-tunes `Qwen/Qwen2.5-Coder-1.5B` on a dummy task.
 
 ## Installation

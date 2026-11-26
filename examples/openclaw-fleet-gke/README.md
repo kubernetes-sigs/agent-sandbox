@@ -201,6 +201,15 @@ gateway origin to `controlUi.allowedOrigins` in
 [`00-prereqs.yaml`](00-prereqs.yaml) first). For percentiles across a batch:
 `PORTAL_URL=http://$GW tools/measure-claim-latency.sh 20`.
 
+The UI asks for a gateway token. Each employee's gateway generates its own
+token on first start and keeps it in the employee's workspace, so the token
+survives suspend, wake, and rebuild. Retrieve alice's token from her Pod:
+
+```bash
+POD=$(kubectl -n openclaw-fleet get sandboxclaim oc-alice -o jsonpath='{.status.sandbox.name}')
+kubectl -n openclaw-fleet exec "$POD" -c openclaw -- cat /workspace/.openclaw/gateway-token
+```
+
 ### 5. Sleep, wake, update, delete
 
 ```sh

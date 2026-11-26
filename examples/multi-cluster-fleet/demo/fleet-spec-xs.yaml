@@ -1,0 +1,67 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# XS fleet spec — the "prove the joint fleet + image-streaming story on a personal
+# GKE project" rung. Sized to run on 3 clusters × 5 e2-standard-8 nodes
+# provisioned by `deploy/create-gke-standard-fleet.sh` at PROFILE=xs.
+#
+# Placement policy: image-affinity. Combined with `--enable-image-streaming`
+# on the sandbox node pools, this gives the compound win:
+#
+#   1. Fleet layer:  MD5(image) mod 3 → same image always lands on same cluster
+#   2. Image-streaming layer: gcfsd streams image layers into an on-node cache
+#                     that stays hot across subsequent claims of the same image
+#
+# Six templates with six distinct image strings so hash(image) mod 3
+# distributes as evenly as possible across the three clusters (expected
+# 2/2/2, but the hash is deterministic so any imbalance is stable and
+# reproducible). The `image` field on each model is what image-affinity
+# hashes — it does NOT have to match the container image on the
+# SandboxTemplate. Templates in example-templates-xs.yaml all use busybox;
+# the image string here is purely a routing key.
+
+# Total warm sandboxes across the fleet. Hamilton splits this by cluster
+# weight, then per-pool sizing distributes each cluster's slice across the
+# templates placed there. With 6 templates × ~100 per pool cap × 3 clusters,
+# 300 fleet-wide keeps every pool at ~50 replicas.
+max_concurrent: 300
+
+# Ceiling on any single warm pool. Well under the 5-node × 110 max-pods
+# per cluster = 550 slot capacity so there's headroom for concurrent
+# claims (each active claim uses one slot beyond the warm pool).
+max_pool: 100
+
+# The whole point of the XS spec.
+placement_policy: image-affinity
+
+# Leave 0 (default). image-affinity handles distribution deterministically
+# via hash; min_clusters > 0 would override the selector and defeat the
+# affinity story.
+min_clusters: 0
+
+cluster_weights:
+  std-multi-1: 1.0
+  std-multi-2: 1.0
+  std-multi-3: 1.0
+
+# Six distinct image strings — the hash of these is what pins each template
+# to a cluster. Real workloads use their actual image URIs here.
+models:
+  - image: gcr.io/example/swebench-django:v1
+    template_name: sb-tmpl-a
+    target_tasks: 100
+  - image: gcr.io/example/swebench-flask:v1
+    template_name: sb-tmpl-b
+    target_tasks: 100
+  - image: gcr.io/example/swebench-sympy:v1
+    template_name: sb-tmpl-c
+    target_tasks: 100
+  - image: gcr.io/example/swebench-numpy:v1
+    template_name: sb-tmpl-d
+    target_tasks: 100
+  - image: gcr.io/example/swebench-pandas:v1
+    template_name: sb-tmpl-e
+    target_tasks: 100
+  - image: gcr.io/example/swebench-requests:v1
+    template_name: sb-tmpl-f
+    target_tasks: 100

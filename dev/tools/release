@@ -139,13 +139,49 @@ def check_install_manifest_drift(
         sys.exit(1)
 
 
+def _glob_release_yamls(k8s_dir="k8s"):
+    """Return the list of YAML files under *k8s_dir* that are release assets.
+
+    Excludes kustomization files (they describe assembly, not resources) and the
+    hardening/ subdirectory (those are supplementary policies, not part of the
+    flat sandbox/extensions release assets).
+    """
+    return [
+        f
+        for f in glob.glob(os.path.join(k8s_dir, "**/*.yaml"), recursive=True)
+        if os.path.basename(f) not in ("kustomization.yaml", "kustomization.yml")
+        and not os.path.relpath(f, k8s_dir).startswith("hardening/")
+    ]
+
+
+def build_release_create_cmd(tag, asset_paths, notes_file=None):
+    """Builds the `gh release create` command for a draft release.
+
+    When a curated notes file is provided (which already includes New
+    Contributors and the Full Changelog link), omit `--generate-notes` so
+    GitHub does not append a duplicate raw `## What's Changed` PR list.
+    """
+    cmd = ["gh", "release", "create", tag, *asset_paths]
+    if notes_file:
+        cmd.extend(["--notes-file", notes_file])
+    else:
+        cmd.append("--generate-notes")
+    cmd.extend([
+        "--title", tag,
+        "--verify-tag",
+        "--draft",
+        "--repo", "kubernetes-sigs/agent-sandbox",
+    ])
+    return cmd
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate release manifests.")
     parser.add_argument("--tag", required=True, help="The git tag for the release.")
     parser.add_argument("--publish", action="store_true", help="Publish the release to GitHub.")
     parser.add_argument(
         "--model",
-        default=os.getenv("GEMINI_MODEL", "gemini-3.7-flash"),
+        default=os.getenv("GEMINI_MODEL", "gemini-4-neon"),
         help="Gemini model to use for generating release notes.",
     )
     args = parser.parse_args()
@@ -155,15 +191,7 @@ def main():
     if not os.path.exists("release_assets"):
         os.makedirs("release_assets")
 
-    # kustomization.yaml files describe how to assemble the manifests (see the
-    # all-in-one sandbox-with-extensions.yaml below); they are not themselves
-    # resources, so they must not be concatenated into the flat sandbox/extensions
-    # assets.
-    all_yaml_files = [
-        f
-        for f in glob.glob("k8s/**/*.yaml", recursive=True)
-        if os.path.basename(f) not in ("kustomization.yaml", "kustomization.yml")
-    ]
+    all_yaml_files = _glob_release_yamls("k8s")
     image_url = f"registry.k8s.io/agent-sandbox/agent-sandbox-controller:{args.tag}"
 
     def replace_image(text):
@@ -299,23 +327,11 @@ def main():
                 print("⚠️ Falling back to default GitHub notes on release creation.")
                 notes_file = None
 
-            cmd = [
-                "gh", "release", "create", tag,
-                core_path,
-                extensions_path,
-                all_in_one_path,
-            ]
-
-            if notes_file:
-                cmd.extend(["--notes-file", notes_file])
-
-            cmd.extend([
-                "--generate-notes",
-                "--title", tag,
-                "--verify-tag",
-                "--draft",
-                "--repo", "kubernetes-sigs/agent-sandbox",
-            ])
+            cmd = build_release_create_cmd(
+                tag,
+                [core_path, extensions_path, all_in_one_path],
+                notes_file=notes_file,
+            )
 
             run_command(cmd)
 

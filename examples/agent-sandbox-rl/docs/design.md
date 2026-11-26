@@ -35,7 +35,7 @@ All code lives under this example:
   explicit dev version (`0.1.0.dev0`; switch to setuptools-scm on release). Deps:
   `k8s-agent-sandbox`, `kubernetes`, `pydantic>=2`. Extras: `swebench` →
   `datasets`; `metrics` → `prometheus-client` (lazy, no import side effects);
-  `async` → `k8s-agent-sandbox[async]`, `kubernetes_asyncio<34.0.0`; `tracing` →
+  `async` → `k8s-agent-sandbox[async]`, `kubernetes_asyncio<37.0.0`; `tracing` →
   `opentelemetry-api/sdk/exporter-otlp`; `test` → `pytest`, `pytest-asyncio`,
   `pytest-xdist`.
 

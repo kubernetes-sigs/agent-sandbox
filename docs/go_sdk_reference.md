@@ -11,42 +11,86 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [Variables](<#variables>)
 - [func NewTracerProvider\(ctx context.Context, serviceName string\) \(\*sdktrace.TracerProvider, error\)](<#NewTracerProvider>)
 - [type CallOption](<#CallOption>)
+  - [func WithAppend\(\) CallOption](<#WithAppend>)
+  - [func WithCreateOnly\(\) CallOption](<#WithCreateOnly>)
+  - [func WithEnv\(env map\[string\]string\) CallOption](<#WithEnv>)
   - [func WithMaxAttempts\(n int\) CallOption](<#WithMaxAttempts>)
+  - [func WithMaxDepth\(n int\) CallOption](<#WithMaxDepth>)
+  - [func WithPTY\(cols, rows uint32\) CallOption](<#WithPTY>)
+  - [func WithRecursive\(\) CallOption](<#WithRecursive>)
   - [func WithTimeout\(d time.Duration\) CallOption](<#WithTimeout>)
+  - [func WithWorkingDir\(dir string\) CallOption](<#WithWorkingDir>)
 - [type Client](<#Client>)
   - [func NewClient\(\_ context.Context, opts Options\) \(\*Client, error\)](<#NewClient>)
-  - [func \(c \*Client\) CreateSandbox\(ctx context.Context, warmPoolName, namespace string\) \(\*Sandbox, error\)](<#Client.CreateSandbox>)
+  - [func \(c \*Client\) CreateSandbox\(ctx context.Context, warmPoolName, namespace string, opts ...CreateOption\) \(\*Sandbox, error\)](<#Client.CreateSandbox>)
   - [func \(c \*Client\) DeleteAll\(ctx context.Context\)](<#Client.DeleteAll>)
   - [func \(c \*Client\) DeleteSandbox\(ctx context.Context, claimName, namespace string\) error](<#Client.DeleteSandbox>)
   - [func \(c \*Client\) EnableAutoCleanup\(\) \(stop func\(\)\)](<#Client.EnableAutoCleanup>)
   - [func \(c \*Client\) GetSandbox\(ctx context.Context, claimName, namespace string\) \(\*Sandbox, error\)](<#Client.GetSandbox>)
   - [func \(c \*Client\) ListActiveSandboxes\(\) \[\]Key](<#Client.ListActiveSandboxes>)
-  - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
+  - [func \(c \*Client\) ListAllSandboxes\(ctx context.Context, namespace string, opts ...ListOption\) \(\[\]string, error\)](<#Client.ListAllSandboxes>)
 - [type Commands](<#Commands>)
   - [func \(c \*Commands\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Commands.Run>)
+  - [func \(c \*Commands\) Start\(ctx context.Context, command string, opts ...CallOption\) \(handle \*ProcessHandle, err error\)](<#Commands.Start>)
 - [type ConnectionStrategy](<#ConnectionStrategy>)
 - [type Connectivity](<#Connectivity>)
+- [type CreateOption](<#CreateOption>)
+  - [func WithAdoptExisting\(\) CreateOption](<#WithAdoptExisting>)
+  - [func WithClaimEnv\(env \[\]extv1beta1.EnvVar\) CreateOption](<#WithClaimEnv>)
+  - [func WithClaimLabels\(labels map\[string\]string\) CreateOption](<#WithClaimLabels>)
+  - [func WithClaimName\(name string\) CreateOption](<#WithClaimName>)
+  - [func WithPodAnnotations\(annotations map\[string\]string\) CreateOption](<#WithPodAnnotations>)
+  - [func WithPodLabels\(labels map\[string\]string\) CreateOption](<#WithPodLabels>)
+  - [func WithSandboxReadyTimeout\(d time.Duration\) CreateOption](<#WithSandboxReadyTimeout>)
+  - [func WithShutdownAfter\(d time.Duration\) CreateOption](<#WithShutdownAfter>)
+  - [func WithShutdownPolicy\(p extv1beta1.ShutdownPolicy\) CreateOption](<#WithShutdownPolicy>)
+  - [func WithTTLSecondsAfterFinished\(seconds int32\) CreateOption](<#WithTTLSecondsAfterFinished>)
+  - [func WithVolumeClaimTemplates\(templates \[\]sandboxv1beta1.PersistentVolumeClaimTemplate\) CreateOption](<#WithVolumeClaimTemplates>)
 - [type DirectStrategy](<#DirectStrategy>)
   - [func \(s \*DirectStrategy\) Close\(\) error](<#DirectStrategy.Close>)
   - [func \(s \*DirectStrategy\) Connect\(\_ context.Context\) \(string, error\)](<#DirectStrategy.Connect>)
 - [type ExecutionResult](<#ExecutionResult>)
 - [type FileEntry](<#FileEntry>)
+- [type FileEvent](<#FileEvent>)
+- [type FileEventType](<#FileEventType>)
 - [type FileType](<#FileType>)
 - [type Files](<#Files>)
+  - [func \(f \*Files\) Copy\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Copy>)
   - [func \(f \*Files\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Files.Delete>)
   - [func \(f \*Files\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Files.Exists>)
+  - [func \(f \*Files\) Extract\(ctx context.Context, path string, archive io.Reader, opts ...CallOption\) error](<#Files.Extract>)
   - [func \(f \*Files\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Files.List>)
+  - [func \(f \*Files\) Mkdir\(ctx context.Context, path string, parents bool, opts ...CallOption\) error](<#Files.Mkdir>)
+  - [func \(f \*Files\) Move\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Files.Move>)
   - [func \(f \*Files\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Files.Read>)
+  - [func \(f \*Files\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Files.ReadTo>)
+  - [func \(f \*Files\) Stat\(ctx context.Context, path string, opts ...CallOption\) \(\*FileEntry, error\)](<#Files.Stat>)
   - [func \(f \*Files\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Files.Write>)
   - [func \(f \*Files\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Files.WriteReader>)
 - [type HTTPError](<#HTTPError>)
   - [func \(e \*HTTPError\) Error\(\) string](<#HTTPError.Error>)
 - [type Handle](<#Handle>)
+- [type Health](<#Health>)
 - [type Info](<#Info>)
 - [type K8sHelper](<#K8sHelper>)
   - [func NewK8sHelper\(restConfig \*rest.Config, log logr.Logger\) \(\*K8sHelper, error\)](<#NewK8sHelper>)
+  - [func \(h \*K8sHelper\) WaitForSandboxReady\(ctx context.Context, sandboxName, namespace string\) error](<#K8sHelper.WaitForSandboxReady>)
 - [type Key](<#Key>)
+- [type ListOption](<#ListOption>)
+  - [func WithLabelSelector\(selector string\) ListOption](<#WithLabelSelector>)
+- [type Metadata](<#Metadata>)
 - [type Options](<#Options>)
+- [type ProcessEvent](<#ProcessEvent>)
+- [type ProcessEventType](<#ProcessEventType>)
+- [type ProcessHandle](<#ProcessHandle>)
+  - [func \(h \*ProcessHandle\) Close\(\) error](<#ProcessHandle.Close>)
+  - [func \(h \*ProcessHandle\) CloseStdin\(ctx context.Context\) error](<#ProcessHandle.CloseStdin>)
+  - [func \(h \*ProcessHandle\) ProcessID\(\) int32](<#ProcessHandle.ProcessID>)
+  - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
+  - [func \(h \*ProcessHandle\) ResizeTTY\(ctx context.Context, cols, rows uint32\) error](<#ProcessHandle.ResizeTTY>)
+  - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
+  - [func \(h \*ProcessHandle\) WriteStdin\(ctx context.Context, data \[\]byte\) error](<#ProcessHandle.WriteStdin>)
+- [type ProcessSignal](<#ProcessSignal>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
   - [func New\(\_ context.Context, opts Options\) \(\*Sandbox, error\)](<#New>)
@@ -54,21 +98,36 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func \(s \*Sandbox\) ClaimName\(\) string](<#Sandbox.ClaimName>)
   - [func \(s \*Sandbox\) Close\(ctx context.Context\) error](<#Sandbox.Close>)
   - [func \(s \*Sandbox\) Commands\(\) \*Commands](<#Sandbox.Commands>)
+  - [func \(s \*Sandbox\) Copy\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Sandbox.Copy>)
   - [func \(s \*Sandbox\) Delete\(ctx context.Context, path string, recursive bool, opts ...CallOption\) error](<#Sandbox.Delete>)
   - [func \(s \*Sandbox\) Disconnect\(ctx context.Context\) error](<#Sandbox.Disconnect>)
   - [func \(s \*Sandbox\) Exists\(ctx context.Context, path string, opts ...CallOption\) \(bool, error\)](<#Sandbox.Exists>)
+  - [func \(s \*Sandbox\) Extract\(ctx context.Context, path string, archive io.Reader, opts ...CallOption\) error](<#Sandbox.Extract>)
   - [func \(s \*Sandbox\) Files\(\) \*Files](<#Sandbox.Files>)
+  - [func \(s \*Sandbox\) Health\(ctx context.Context, opts ...CallOption\) \(\*Health, error\)](<#Sandbox.Health>)
   - [func \(s \*Sandbox\) IsReady\(\) bool](<#Sandbox.IsReady>)
+  - [func \(s \*Sandbox\) IsSuspended\(ctx context.Context\) \(bool, error\)](<#Sandbox.IsSuspended>)
   - [func \(s \*Sandbox\) List\(ctx context.Context, path string, opts ...CallOption\) \(\[\]FileEntry, error\)](<#Sandbox.List>)
+  - [func \(s \*Sandbox\) Metadata\(ctx context.Context, opts ...CallOption\) \(\*Metadata, error\)](<#Sandbox.Metadata>)
+  - [func \(s \*Sandbox\) Mkdir\(ctx context.Context, path string, parents bool, opts ...CallOption\) error](<#Sandbox.Mkdir>)
+  - [func \(s \*Sandbox\) Move\(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption\) error](<#Sandbox.Move>)
   - [func \(s \*Sandbox\) Open\(ctx context.Context\) \(retErr error\)](<#Sandbox.Open>)
   - [func \(s \*Sandbox\) PodIP\(\) string](<#Sandbox.PodIP>)
   - [func \(s \*Sandbox\) PodName\(\) string](<#Sandbox.PodName>)
   - [func \(s \*Sandbox\) Read\(ctx context.Context, path string, opts ...CallOption\) \(\[\]byte, error\)](<#Sandbox.Read>)
+  - [func \(s \*Sandbox\) ReadTo\(ctx context.Context, path string, destination io.Writer, opts ...CallOption\) \(int64, error\)](<#Sandbox.ReadTo>)
+  - [func \(s \*Sandbox\) Resume\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Resume>)
   - [func \(s \*Sandbox\) Run\(ctx context.Context, command string, opts ...CallOption\) \(\*ExecutionResult, error\)](<#Sandbox.Run>)
   - [func \(s \*Sandbox\) SandboxName\(\) string](<#Sandbox.SandboxName>)
   - [func \(s \*Sandbox\) ServiceFQDN\(\) string](<#Sandbox.ServiceFQDN>)
+  - [func \(s \*Sandbox\) Stat\(ctx context.Context, path string, opts ...CallOption\) \(\*FileEntry, error\)](<#Sandbox.Stat>)
+  - [func \(s \*Sandbox\) Suspend\(ctx context.Context, opts ...CallOption\) error](<#Sandbox.Suspend>)
+  - [func \(s \*Sandbox\) WatchDir\(ctx context.Context, path string, recursive bool, opts ...CallOption\) \(\<\-chan FileEvent, error\)](<#Sandbox.WatchDir>)
+  - [func \(s \*Sandbox\) Watchers\(\) \*Watchers](<#Sandbox.Watchers>)
   - [func \(s \*Sandbox\) Write\(ctx context.Context, path string, content \[\]byte, opts ...CallOption\) error](<#Sandbox.Write>)
   - [func \(s \*Sandbox\) WriteReader\(ctx context.Context, path string, content io.Reader, opts ...CallOption\) error](<#Sandbox.WriteReader>)
+- [type Watchers](<#Watchers>)
+  - [func \(w \*Watchers\) WatchDir\(ctx context.Context, path string, recursive bool, opts ...CallOption\) \(\_ \<\-chan FileEvent, retErr error\)](<#Watchers.WatchDir>)
 
 
 ### Constants
@@ -110,6 +169,8 @@ var (
     ErrNotReady         = errors.New("sandbox is not ready")
     ErrTimeout          = errors.New("operation timed out")
     ErrClaimFailed      = errors.New("claim creation failed")
+    ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+    ErrTemplateNotFound = errors.New("sandbox template not found")
     ErrPortForwardDied  = errors.New("port-forward connection lost")
     ErrNoSandboxService = errors.New("sandbox has no headless Service")
     ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
@@ -119,8 +180,13 @@ var (
     ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
     ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
     // ErrUnsupportedByRuntime is returned by operations the selected
-    // runtime cannot perform (e.g. Delete on the legacy python-runtime).
+    // runtime or connection cannot perform (e.g. Delete on the legacy
+    // python-runtime, or Run with RuntimeSandboxd and APIURL).
     ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
+    // ErrProcessProtocol indicates an invalid or incomplete process event stream.
+    ErrProcessProtocol = errors.New("invalid process event stream")
+    // ErrConcurrentRecv indicates that another Recv is already in progress.
+    ErrConcurrentRecv = errors.New("concurrent Recv on process handle")
 )
 ```
 
@@ -142,6 +208,37 @@ CallOption configures per\-call behavior for SDK operations.
 type CallOption func(*callOptions)
 ```
 
+<a name="WithAppend"></a>
+#### func [WithAppend](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithAppend() CallOption
+```
+
+WithAppend makes Files.Write or Files.WriteReader add to the end of the file instead of replacing it. An append is not atomic, and the call does not retry unless WithMaxAttempts is set, because a retry can add the content twice. Other operations ignore it. It cannot be combined with WithCreateOnly. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
+
+<a name="WithCreateOnly"></a>
+#### func [WithCreateOnly](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithCreateOnly() CallOption
+```
+
+WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412 HTTPError if the path already exists. The call does not retry unless WithMaxAttempts is set, because a retry after a lost response would fail with 412. Other operations ignore it. It cannot be combined with WithAppend. Returns ErrUnsupportedByRuntime on the legacy python\-runtime.
+
+<a name="WithEnv"></a>
+#### func [WithEnv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithEnv(env map[string]string) CallOption
+```
+
+WithEnv sets environment variables for a single Run or Commands.Start, merged over the sandbox's own environment \(a key given here wins\). Repeated calls accumulate. Both return ErrUnsupportedByRuntime on the legacy python\-runtime, which cannot carry them. Other operations ignore it.
+
+```
+result, err := client.Run(ctx, "echo $GREETING", sandbox.WithEnv(map[string]string{"GREETING": "hi"}))
+```
+
 <a name="WithMaxAttempts"></a>
 #### func [WithMaxAttempts](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -149,11 +246,38 @@ type CallOption func(*callOptions)
 func WithMaxAttempts(n int) CallOption
 ```
 
-WithMaxAttempts sets the maximum number of attempts for an operation. Values ≤0 are ignored and the default is used \(1 for Run, 6 for file operations\).
+WithMaxAttempts sets the maximum number of attempts for an operation. Values ≤0 are ignored and the default is used \(1 for Run, 6 for file operations\). Commands.Start rejects values greater than 1 because a non\-idempotent process creation cannot be safely replayed.
 
 ```
 result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 ```
+
+<a name="WithMaxDepth"></a>
+#### func [WithMaxDepth](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithMaxDepth(n int) CallOption
+```
+
+WithMaxDepth limits how many directory levels a recursive Files.List descends, where 1 lists only the directory's own entries. Values \<= 0 are ignored. It has no effect without WithRecursive.
+
+<a name="WithPTY"></a>
+#### func [WithPTY](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithPTY(cols, rows uint32) CallOption
+```
+
+WithPTY allocates a pseudo\-terminal for Commands.Start and merges stderr into stdout. Both dimensions must be in \[1, 65535\]. Run rejects the option; other operations ignore it.
+
+<a name="WithRecursive"></a>
+#### func [WithRecursive](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithRecursive() CallOption
+```
+
+WithRecursive makes Files.List include nested entries. Entry names are then paths relative to the listed directory. List returns ErrUnsupportedByRuntime on the legacy python\-runtime. Other operations ignore it.
 
 <a name="WithTimeout"></a>
 #### func [WithTimeout](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
@@ -162,7 +286,16 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 func WithTimeout(d time.Duration) CallOption
 ```
 
-WithTimeout sets the total timeout for a single operation, overriding the default RequestTimeout for that call.
+WithTimeout sets the total timeout for a single operation. HTTP operations override their default RequestTimeout. For Commands.Start it covers the entire stream, including startup; Start has no default timeout.
+
+<a name="WithWorkingDir"></a>
+#### func [WithWorkingDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithWorkingDir(dir string) CallOption
+```
+
+WithWorkingDir sets the working directory for Run or Commands.Start, relative to the sandbox root \(the default\). sandboxd rejects a directory that resolves outside the root. Both return ErrUnsupportedByRuntime on the legacy python\-runtime. Other operations ignore it.
 
 <a name="Client"></a>
 ### type [Client](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -188,10 +321,10 @@ NewClient creates a Client with shared configuration.
 #### func \(\*Client\) [CreateSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
 
 ```go
-func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string) (*Sandbox, error)
+func (c *Client) CreateSandbox(ctx context.Context, warmPoolName, namespace string, opts ...CreateOption) (*Sandbox, error)
 ```
 
-CreateSandbox provisions a new sandbox and returns a managed handle. On failure, the orphaned claim is cleaned up.
+CreateSandbox provisions a new sandbox and returns a managed handle. Optional CreateOption values override or merge onto the Client's base Options for this call. On failure, a claim with a generated name is cleaned up; a claim named with WithClaimName is left in place.
 
 <a name="Client.DeleteAll"></a>
 #### func \(\*Client\) [DeleteAll](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -218,7 +351,7 @@ DeleteSandbox closes the handle \(if tracked\) and deletes the claim.
 func (c *Client) EnableAutoCleanup() (stop func())
 ```
 
-EnableAutoCleanup calls DeleteAll on SIGINT/SIGTERM. Call the returned function to stop the signal handler.
+EnableAutoCleanup deletes tracked sandboxes on SIGINT/SIGTERM. Claims created with WithClaimName are caller\-owned: their handles are disconnected but the claims are kept. Call the returned function to stop the signal handler.
 
 <a name="Client.GetSandbox"></a>
 #### func \(\*Client\) [GetSandbox](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
@@ -242,10 +375,10 @@ ListActiveSandboxes returns tracked sandboxes, pruning inactive handles.
 #### func \(\*Client\) [ListAllSandboxes](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
 
 ```go
-func (c *Client) ListAllSandboxes(ctx context.Context, namespace string) ([]string, error)
+func (c *Client) ListAllSandboxes(ctx context.Context, namespace string, opts ...ListOption) ([]string, error)
 ```
 
-ListAllSandboxes lists all SandboxClaim names in the given namespace.
+ListAllSandboxes lists SandboxClaim names in the given namespace, optionally narrowed with WithLabelSelector.
 
 <a name="Commands"></a>
 ### type [Commands](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)
@@ -275,6 +408,17 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 
 WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run issues a single gRPC Execute regardless of the configured attempts.
 
+WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them. Run rejects WithPTY with an InvalidArgument error because Execute has no terminal; use Start to run a command on a pseudo\-terminal.
+
+<a name="Commands.Start"></a>
+#### func \(\*Commands\) [Start](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)
+
+```go
+func (c *Commands) Start(ctx context.Context, command string, opts ...CallOption) (handle *ProcessHandle, err error)
+```
+
+Start starts a sandboxd command and returns after receiving its process ID. It preserves Run's shell\-string, WithEnv and WithWorkingDir semantics. Use WithPTY to allocate a pseudo\-terminal. The caller must Recv through the exit event to io.EOF, or Close the handle. The context and an explicit WithTimeout cover the entire stream; there is no default RequestTimeout. Start never retries and rejects WithMaxAttempts \> 1. The legacy runtime and REST\-only connections return ErrUnsupportedByRuntime.
+
 <a name="ConnectionStrategy"></a>
 ### type [ConnectionStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go>)
 
@@ -303,7 +447,29 @@ const (
     // ConnectivityPortForward reaches the sandbox over a SPDY port-forward
     // brokered by the apiserver. Works from anywhere a kubeconfig does,
     // including a laptop or CI runner. Default.
+    //
+    // With RuntimeSandboxd the forward targets the sandbox pod itself, which
+    // does not work for Kata or gVisor pods: their workload does not listen in
+    // the pod's host-side network namespace. Use an in-cluster mode, or
+    // ConnectivityRouterPortForward.
+    // RuntimeLegacyPython forwards to the sandbox-router instead and is
+    // unaffected.
     ConnectivityPortForward Connectivity = "port-forward"
+
+    // ConnectivityRouterPortForward port-forwards the sandbox-router, which
+    // proxies sandboxd's REST API to SandboxdRESTPort and its gRPC API (Run,
+    // Start, and Watchers) to SandboxdGRPCPort. gRPC needs sandbox-router
+    // v1.0.9 or later. Requires RuntimeSandboxd. The legacy runtime already
+    // uses ConnectivityPortForward for the same tunnel. This is the laptop or
+    // CI path for Kata and gVisor sandboxes, which pod port-forward cannot
+    // reach.
+    //
+    // The router strips the Authorization header, so with --auth-token-* the
+    // SDK sends SandboxdAuthToken as X-Sandboxd-Token instead (sandboxd
+    // accepts both). The router also caps each REST request at its
+    // ProxyTimeout (default 180s), so raise ProxyTimeout for longer file
+    // transfers.
+    ConnectivityRouterPortForward Connectivity = "router-port-forward"
     // ConnectivityInClusterService dials the Sandbox's headless Service by
     // its in-cluster DNS name (Status.ServiceFQDN), taking the apiserver —
     // and, for RuntimeLegacyPython, the sandbox-router, off the data path.
@@ -331,6 +497,114 @@ const (
     ConnectivityInClusterPodIP Connectivity = "in-cluster-pod-ip"
 )
 ```
+
+<a name="CreateOption"></a>
+### type [CreateOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+CreateOption configures per\-sandbox options for Client.CreateSandbox, overriding or merging onto the Client's base Options for that call.
+
+```go
+type CreateOption func(*createOptions)
+```
+
+<a name="WithAdoptExisting"></a>
+#### func [WithAdoptExisting](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithAdoptExisting() CreateOption
+```
+
+WithAdoptExisting makes a single CreateSandbox call attach to an existing SandboxClaim named by WithClaimName instead of failing when it already exists. See Options.AdoptExisting for the checks applied to the existing claim.
+
+<a name="WithClaimEnv"></a>
+#### func [WithClaimEnv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithClaimEnv(env []extv1beta1.EnvVar) CreateOption
+```
+
+WithClaimEnv sets the environment variables injected into the SandboxClaim for a single CreateSandbox call, replacing Client\-level Options.Env.
+
+<a name="WithClaimLabels"></a>
+#### func [WithClaimLabels](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithClaimLabels(labels map[string]string) CreateOption
+```
+
+WithClaimLabels merges labels onto the SandboxClaim metadata for a single CreateSandbox call. Per\-call keys override colliding Client\-level Options.Labels keys; the SDK's created\-by label always wins. Repeated calls accumulate.
+
+<a name="WithClaimName"></a>
+#### func [WithClaimName](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithClaimName(name string) CreateOption
+```
+
+WithClaimName sets a deterministic SandboxClaim name for a single CreateSandbox call. See Options.ClaimName.
+
+<a name="WithPodAnnotations"></a>
+#### func [WithPodAnnotations](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithPodAnnotations(annotations map[string]string) CreateOption
+```
+
+WithPodAnnotations merges annotations onto spec.additionalPodMetadata.annotations for a single CreateSandbox call. Per\-call keys override colliding Client\-level Options.PodAnnotations keys. Repeated calls accumulate.
+
+<a name="WithPodLabels"></a>
+#### func [WithPodLabels](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithPodLabels(labels map[string]string) CreateOption
+```
+
+WithPodLabels merges labels onto spec.additionalPodMetadata.labels for a single CreateSandbox call. Per\-call keys override colliding Client\-level Options.PodLabels keys. Repeated calls accumulate.
+
+<a name="WithSandboxReadyTimeout"></a>
+#### func [WithSandboxReadyTimeout](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithSandboxReadyTimeout(d time.Duration) CreateOption
+```
+
+WithSandboxReadyTimeout sets how long a single CreateSandbox call waits for the sandbox to become ready, replacing Client\-level Options.SandboxReadyTimeout. Zero keeps the Client\-level value.
+
+<a name="WithShutdownAfter"></a>
+#### func [WithShutdownAfter](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithShutdownAfter(d time.Duration) CreateOption
+```
+
+WithShutdownAfter sets the claim lifetime for a single CreateSandbox call, replacing Client\-level Options.ShutdownAfter. Zero means no expiry.
+
+<a name="WithShutdownPolicy"></a>
+#### func [WithShutdownPolicy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithShutdownPolicy(p extv1beta1.ShutdownPolicy) CreateOption
+```
+
+WithShutdownPolicy sets spec.lifecycle.shutdownPolicy for a single CreateSandbox call, replacing Client\-level Options.ShutdownPolicy.
+
+<a name="WithTTLSecondsAfterFinished"></a>
+#### func [WithTTLSecondsAfterFinished](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithTTLSecondsAfterFinished(seconds int32) CreateOption
+```
+
+WithTTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished for a single CreateSandbox call, replacing Client\-level Options.TTLSecondsAfterFinished.
+
+<a name="WithVolumeClaimTemplates"></a>
+#### func [WithVolumeClaimTemplates](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithVolumeClaimTemplates(templates []sandboxv1beta1.PersistentVolumeClaimTemplate) CreateOption
+```
+
+WithVolumeClaimTemplates sets spec.volumeClaimTemplates on the SandboxClaim for a single CreateSandbox call, replacing Client\-level Options.VolumeClaimTemplates.
 
 <a name="DirectStrategy"></a>
 ### type [DirectStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go>)
@@ -381,6 +655,8 @@ FileEntry represents a file or directory entry in the sandbox. It is runtime\-ne
 
 ```go
 type FileEntry struct {
+    // Name is the entry's base name, or its path relative to the listed
+    // directory after a WithRecursive listing.
     Name    string
     Size    int64
     Type    FileType
@@ -389,6 +665,59 @@ type FileEntry struct {
     // the sandboxd runtime; empty on legacy.
     Mode string
 }
+```
+
+<a name="FileEvent"></a>
+### type [FileEvent](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+FileEvent describes a single filesystem change within a watched directory.
+
+```go
+type FileEvent struct {
+    // Type classifies the change.
+    Type FileEventType
+    // Path is the sandbox-relative path of the affected file or
+    // directory. For Rename events this is the old (source) path; the
+    // new path, when inside the watched tree, arrives as a separate
+    // Create event.
+    Path string
+    // Error carries a human-readable message for Error events; empty otherwise.
+    Error string
+}
+```
+
+<a name="FileEventType"></a>
+### type [FileEventType](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+FileEventType classifies a filesystem change observed by WatchDir.
+
+```go
+type FileEventType string
+```
+
+<a name="FileEventCreate"></a>
+
+```go
+const (
+    // FileEventCreate indicates a new file or directory was created.
+    FileEventCreate FileEventType = "create"
+    // FileEventWrite indicates an existing file's contents were modified.
+    FileEventWrite FileEventType = "write"
+    // FileEventRemove indicates a file or directory was removed.
+    FileEventRemove FileEventType = "remove"
+    // FileEventRename indicates a file or directory was renamed or moved
+    // out of the watched tree. Path carries the OLD (source) name; when
+    // the new name lands inside the watched tree it arrives as a separate
+    // FileEventCreate. Pair the two to reconstruct renames.
+    FileEventRename FileEventType = "rename"
+    // FileEventChmod indicates permissions or ownership changed.
+    FileEventChmod FileEventType = "chmod"
+    // FileEventError indicates a watch error. Terminal errors are the
+    // last event before the stream ends; non-fatal ones (event overflow,
+    // unwatchable subdirectories in recursive mode) arrive mid-stream
+    // and the watch continues.
+    FileEventError FileEventType = "error"
+)
 ```
 
 <a name="FileType"></a>
@@ -420,6 +749,15 @@ type Files struct {
 }
 ```
 
+<a name="Files.Copy"></a>
+#### func \(\*Files\) [Copy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Copy(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Copy copies the file or directory at source to destination, with the same destination rules, retry behavior, and runtime support as Move.
+
 <a name="Files.Delete"></a>
 #### func \(\*Files\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
 
@@ -440,6 +778,17 @@ func (f *Files) Exists(ctx context.Context, path string, opts ...CallOption) (bo
 
 Exists checks if a file or directory exists at the given path in the sandbox.
 
+<a name="Files.Extract"></a>
+#### func \(\*Files\) [Extract](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Extract(ctx context.Context, path string, archive io.Reader, opts ...CallOption) error
+```
+
+Extract unpacks a tar archive, optionally gzipped, into the directory at path, creating it when missing. "/" names the sandbox root. The archive is streamed once. Extract does not retry, and WithMaxAttempts above 1 is an error, because a reader cannot be replayed. The unpack is not atomic, so a failure leaves the entries written so far. The archive size is capped by MaxUploadSize.
+
+Only supported by the sandboxd runtime.
+
 <a name="Files.List"></a>
 #### func \(\*Files\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
 
@@ -447,7 +796,29 @@ Exists checks if a file or directory exists at the given path in the sandbox.
 func (f *Files) List(ctx context.Context, path string, opts ...CallOption) ([]FileEntry, error)
 ```
 
-List returns the contents of a directory in the sandbox.
+List returns the contents of a directory in the sandbox. WithRecursive includes nested entries, and WithMaxDepth limits how deep it goes. Both need the sandboxd runtime.
+
+<a name="Files.Mkdir"></a>
+#### func \(\*Files\) [Mkdir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Mkdir(ctx context.Context, path string, parents bool, opts ...CallOption) error
+```
+
+Mkdir creates a directory in the sandbox. It succeeds when the directory already exists, so it retries like Delete. When parents is false, a missing parent directory fails with a 404 HTTPError.
+
+Only supported by the sandboxd runtime.
+
+<a name="Files.Move"></a>
+#### func \(\*Files\) [Move](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Move(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Move renames the file or directory at source to destination, creating missing parent directories of destination. An existing destination fails with a 409 HTTPError unless overwrite is true, which replaces a file but never a directory.
+
+Move does not retry unless WithMaxAttempts is set, because a repeat after a lost response fails with 404. Only supported by the sandboxd runtime.
 
 <a name="Files.Read"></a>
 #### func \(\*Files\) [Read](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -456,7 +827,27 @@ List returns the contents of a directory in the sandbox.
 func (f *Files) Read(ctx context.Context, path string, opts ...CallOption) ([]byte, error)
 ```
 
-Read downloads a file from the sandbox.
+Read downloads a file from the sandbox and returns its complete contents. With the sandboxd runtime, reading a directory fails with a 409 HTTPError. Reading the sandbox root \("/" or "."\) is the exception: it fails locally before any request, so the error is not an HTTPError.
+
+<a name="Files.ReadTo"></a>
+#### func \(\*Files\) [ReadTo](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) ReadTo(ctx context.Context, path string, destination io.Writer, opts ...CallOption) (int64, error)
+```
+
+ReadTo downloads a file into a caller\-owned destination without buffering the complete response. It returns the number of bytes written. The destination is never closed. If the response exceeds MaxDownloadSize, ReadTo writes at most MaxDownloadSize bytes and returns an error. Data written before an error or context cancellation remains in the destination.
+
+<a name="Files.Stat"></a>
+#### func \(\*Files\) [Stat](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
+
+```go
+func (f *Files) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error)
+```
+
+Stat returns the type, size, mode, and modification time of the file or directory at path. "/" names the sandbox root. A missing path fails with a 404 HTTPError.
+
+Only supported by the sandboxd runtime.
 
 <a name="Files.Write"></a>
 #### func \(\*Files\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/files.go>)
@@ -467,7 +858,7 @@ func (f *Files) Write(ctx context.Context, path string, content []byte, opts ...
 
 Write uploads content to the sandbox.
 
-With the legacy runtime the path must be a plain filename without directory separators \(e.g., "script.py", not "dir/script.py"\). The sandboxd runtime supports relative paths and creates parent directories automatically.
+With the legacy runtime the path must be a plain filename without directory separators \(e.g., "script.py", not "dir/script.py"\). The sandboxd runtime supports relative paths and creates parent directories automatically. On sandboxd, WithAppend and WithCreateOnly add to the file or fail if it exists.
 
 The entire content is buffered in memory to support retries on transient failures. Content exceeding MaxUploadSize \(default 256 MB\) is rejected before any network I/O.
 
@@ -524,6 +915,19 @@ type Handle interface {
 }
 ```
 
+<a name="Health"></a>
+### type [Health](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+Health is the sandboxd runtime's report from GET /v1/health.
+
+```go
+type Health struct {
+    Status string `json:"status"`
+    // UptimeSeconds is how long sandboxd has been running.
+    UptimeSeconds int64 `json:"uptime_seconds"`
+}
+```
+
 <a name="Info"></a>
 ### type [Info](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -566,6 +970,15 @@ func NewK8sHelper(restConfig *rest.Config, log logr.Logger) (*K8sHelper, error)
 
 NewK8sHelper creates a K8sHelper by loading kubeconfig and constructing all required clientsets. If restConfig is non\-nil it is used directly; otherwise in\-cluster config is tried first, then \~/.kube/config.
 
+<a name="K8sHelper.WaitForSandboxReady"></a>
+#### func \(\*K8sHelper\) [WaitForSandboxReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/k8s.go>)
+
+```go
+func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namespace string) error
+```
+
+WaitForSandboxReady waits until the named Sandbox has a true Ready condition. sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not connect to the runtime. Use a context deadline to bound the wait; cancellation and deadline errors are detectable with errors.Is. A missing Sandbox is waited for, while deletion observed during the watch returns ErrSandboxDeleted. A terminal Ready=False reason such as PodFailed returns ErrClaimFailed. API list/watch failures are retried until ctx ends.
+
 <a name="Key"></a>
 ### type [Key](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/client.go>)
 
@@ -575,6 +988,38 @@ Key identifies a tracked sandbox in the registry.
 type Key struct {
     Namespace string
     ClaimName string
+}
+```
+
+<a name="ListOption"></a>
+### type [ListOption](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ListOption configures Client.ListAllSandboxes.
+
+```go
+type ListOption func(*listOptions)
+```
+
+<a name="WithLabelSelector"></a>
+#### func [WithLabelSelector](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithLabelSelector(selector string) ListOption
+```
+
+WithLabelSelector restricts the listing to claims matching a Kubernetes label selector, for example "app=agent,tier\!=dev". Pair it with Options.Labels, which stamps labels on the claims the client creates.
+
+<a name="Metadata"></a>
+### type [Metadata](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+Metadata is the non\-sensitive, workload\-scoped configuration sandboxd serves from GET /v1/metadata.
+
+```go
+type Metadata struct {
+    // Env holds the environment variables sandboxd exposes: only names
+    // matching its --metadata-env-prefix, minus anything that looks like a
+    // credential. It is never nil.
+    Env map[string]string `json:"env"`
 }
 ```
 
@@ -592,17 +1037,39 @@ type Options struct {
     // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
     WarmPoolName string
 
+    // ClaimName is an optional deterministic name for the SandboxClaim.
+    // When empty, Kubernetes generates a unique name with prefix "sandbox-claim-".
+    // When set and a SandboxClaim with this name already exists in Namespace,
+    // Open fails with ErrClaimFailed unless AdoptExisting is also set.
+    // A named claim is caller-owned: a failed Open and
+    // Client.EnableAutoCleanup leave it in place; Close still deletes it.
+    // Must be a valid Kubernetes DNS subdomain (lowercase, [a-z0-9.-]).
+    // NewClient rejects it; use WithClaimName with Client.CreateSandbox.
+    ClaimName string
+
+    // AdoptExisting makes Open attach to an existing SandboxClaim named
+    // ClaimName when creating it returns HTTP 409 Conflict, instead of
+    // failing. The existing claim must reference the same WarmPoolName and
+    // must not be terminating, and Open fails if it is replaced or starts
+    // terminating before its sandbox name resolves. Creation options are not
+    // reapplied to an adopted claim.
+    // Requires ClaimName. NewClient rejects it; use WithAdoptExisting with
+    // Client.CreateSandbox.
+    AdoptExisting bool
+
     // Runtime selects the in-sandbox runtime API. Default: RuntimeLegacyPython.
-    // RuntimeSandboxd talks to the sandbox pod rather than the sandbox-router,
-    // so GatewayName is not supported with it. APIURL remains available as an
-    // advanced/testing escape hatch for the REST endpoint.
+    // RuntimeSandboxd talks to sandboxd on the sandbox pod, so GatewayName is
+    // not supported with it. APIURL remains available as an advanced/testing
+    // escape hatch for the REST endpoint only: Run needs the gRPC endpoint and
+    // returns ErrUnsupportedByRuntime with it.
     Runtime Runtime
 
     // Connectivity selects the transport. Default: ConnectivityPortForward.
     //
     // The in-cluster values conflict with both GatewayName and APIURL, and
     // require that this process runs inside the same cluster as the sandbox
-    // pods.
+    // pods. ConnectivityRouterPortForward also conflicts with GatewayName and
+    // APIURL.
     Connectivity Connectivity
 
     // SandboxdRESTPort is the pod port of sandboxd's Filesystem & Runtime
@@ -613,9 +1080,22 @@ type Options struct {
     // Only used with RuntimeSandboxd. Default: 9090.
     SandboxdGRPCPort int
 
+    // SandboxdAuthToken is the token for a sandboxd started with
+    // --auth-token-sha256 or --auth-token-file. The SDK sends it on every
+    // REST request and gRPC call, as "Authorization: Bearer <token>" or, with
+    // ConnectivityRouterPortForward, as "X-Sandboxd-Token" because the router
+    // strips Authorization. Only used with RuntimeSandboxd. Must be printable
+    // ASCII with no spaces. The SDK never logs it. It is not encrypted on the
+    // wire. Default: none.
+    SandboxdAuthToken string
+
     // Namespace where the SandboxClaim will be created. Default: "default".
     // Must be a valid Kubernetes DNS label (lowercase, [a-z0-9-]).
     Namespace string
+
+    // RouterNamespace is where port-forward modes find sandbox-router-svc
+    // (shipped manifests use "agent-sandbox-system"). Default: Namespace.
+    RouterNamespace string
 
     // GatewayName enables Gateway mode. The client watches this Gateway resource
     // for an external IP, then routes through the sandbox-router.
@@ -640,6 +1120,43 @@ type Options struct {
     // Env is the list of environment variables to inject into the SandboxClaim.
     // Setting Env forces a cold start from the warm pool template.
     Env []extv1beta1.EnvVar
+
+    // Labels are added to every SandboxClaim this client creates, so they can
+    // be selected later (see WithLabelSelector). The SDK's own created-by label
+    // always wins over a colliding key.
+    Labels map[string]string
+
+    // ShutdownAfter expires every SandboxClaim this client creates that long
+    // after creation, so a crashed client cannot leak sandboxes. The claim
+    // gets spec.lifecycle.shutdownTime and the Delete shutdown policy; the
+    // deadline is rounded up to a whole second. Zero (the default) means no expiry.
+    ShutdownAfter time.Duration
+
+    // ShutdownPolicy sets spec.lifecycle.shutdownPolicy on every SandboxClaim
+    // this client creates: Delete, DeleteForeground, or Retain. Empty means
+    // Delete when ShutdownAfter or TTLSecondsAfterFinished is set. The API's own
+    // default for an omitted policy is Retain.
+    ShutdownPolicy extv1beta1.ShutdownPolicy
+
+    // TTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished on
+    // every SandboxClaim this client creates. Nil (the default) leaves it unset.
+    TTLSecondsAfterFinished *int32
+
+    // PodLabels are propagated to the backing Sandbox Pod via
+    // spec.additionalPodMetadata.labels (unlike Labels, which are placed on the
+    // SandboxClaim object itself). Label keys must carry a domain prefix from
+    // the controller's label-domain allowlist (default: sandbox.users.io).
+    PodLabels map[string]string
+
+    // PodAnnotations are propagated to the backing Sandbox Pod via
+    // spec.additionalPodMetadata.annotations.
+    PodAnnotations map[string]string
+
+    // VolumeClaimTemplates is a list of persistent volume claim templates to
+    // create for the sandbox via spec.volumeClaimTemplates. Setting
+    // VolumeClaimTemplates forces a cold start because warm pool pods do not
+    // have these volumes.
+    VolumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate
 
     // SandboxReadyTimeout is how long to wait for the sandbox to become ready. Default: 180s.
     SandboxReadyTimeout time.Duration
@@ -666,7 +1183,7 @@ type Options struct {
     // Default: 60s.
     PerAttemptTimeout time.Duration
 
-    // MaxDownloadSize is the maximum response body size for Read().
+    // MaxDownloadSize is the maximum response body size for Read() and ReadTo().
     // Run() uses a fixed 16 MB decode limit; List() and Exists() use a
     // fixed 8 MB internal limit. Default: 256 MB.
     MaxDownloadSize int64
@@ -713,10 +1230,145 @@ type Options struct {
     // pod IP is available. Use in environments with strict network policies,
     // service meshes, or secure overlays where direct pod-to-pod IP routing is
     // restricted but service-based DNS routing works correctly.
+    //
+    // ConnectivityRouterPortForward sends X-Sandbox-Pod-IP by default, which
+    // makes the router dial the stored pod IP directly and skip its cache and
+    // DNS lookup. If the sandbox pod was rescheduled, that stale IP may now
+    // belong to another pod. Set DisablePodIPRouting: true when the router runs
+    // with --cache-enabled or the Sandbox has a headless Service
+    // (spec.service: true), so the router resolves the live pod by cache or
+    // DNS instead.
     // Note: this only affects router-based transports that send X-Sandbox-* headers.
     // Default: false (header is sent when router headers are enabled and a pod IP is present).
     DisablePodIPRouting bool
 }
+```
+
+<a name="ProcessEvent"></a>
+### type [ProcessEvent](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ProcessEvent contains one raw output chunk or the command's exit code. Output chunks need not be complete lines or valid UTF\-8. Events from stdout and stderr do not have a guaranteed global ordering.
+
+```go
+type ProcessEvent struct {
+    Type ProcessEventType
+    // Data is populated only for stdout/stderr and remains valid after Recv.
+    Data []byte
+    // ExitCode is populated only for exit events. A nonzero code is not an error.
+    ExitCode int
+}
+```
+
+<a name="ProcessEventType"></a>
+### type [ProcessEventType](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ProcessEventType identifies an output or exit event from a streaming command.
+
+```go
+type ProcessEventType string
+```
+
+<a name="ProcessEventStdout"></a>
+
+```go
+const (
+    ProcessEventStdout ProcessEventType = "stdout"
+    ProcessEventStderr ProcessEventType = "stderr"
+    ProcessEventExit   ProcessEventType = "exit"
+)
+```
+
+<a name="ProcessHandle"></a>
+### type [ProcessHandle](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+ProcessHandle owns one Start stream, not the Sandbox or shared connection. Consume its events through io.EOF or call Close when abandoning the stream.
+
+```go
+type ProcessHandle struct {
+    // contains filtered or unexported fields
+}
+```
+
+<a name="ProcessHandle.Close"></a>
+#### func \(\*ProcessHandle\) [Close](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) Close() error
+```
+
+Close cancels only this session and is idempotent. A nil error acknowledges local cleanup, not synchronous remote process termination. For graceful shutdown, send a signal before cancelling the stream instead.
+
+<a name="ProcessHandle.CloseStdin"></a>
+#### func \(\*ProcessHandle\) [CloseStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) CloseStdin(ctx context.Context) error
+```
+
+CloseStdin sends EOF on the process's standard input. The daemon rejects it with FailedPrecondition for a PTY process.
+
+<a name="ProcessHandle.ProcessID"></a>
+#### func \(\*ProcessHandle\) [ProcessID](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) ProcessID() int32
+```
+
+ProcessID returns the daemon\-local virtual ID, not an OS PID. It cannot identify a process across daemon restarts.
+
+<a name="ProcessHandle.Recv"></a>
+#### func \(\*ProcessHandle\) [Recv](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) Recv() (*ProcessEvent, error)
+```
+
+Recv returns the next stdout, stderr or exit event. An exit event must be followed by io.EOF to confirm that the RPC also completed successfully. Nonzero exit codes are results; RPC and protocol failures remain errors. Only one Recv may be active; a second returns ErrConcurrentRecv without ending the stream. SendSignal and Close may run concurrently with Recv.
+
+<a name="ProcessHandle.ResizeTTY"></a>
+#### func \(\*ProcessHandle\) [ResizeTTY](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) ResizeTTY(ctx context.Context, cols, rows uint32) error
+```
+
+ResizeTTY sets the process's terminal size in columns and rows. Both dimensions must be in \[1, 65535\]. The daemon returns FailedPrecondition for a process without a PTY. The context controls only this RPC.
+
+<a name="ProcessHandle.SendSignal"></a>
+#### func \(\*ProcessHandle\) [SendSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) error
+```
+
+SendSignal sends SIGINT, SIGTERM or SIGKILL to this process group using its original connection. Success means the signal was sent, not that the process exited. Its context controls only this RPC; failure does not cancel Start. Keep receiving events to observe the exit and the final RPC status.
+
+<a name="ProcessHandle.WriteStdin"></a>
+#### func \(\*ProcessHandle\) [WriteStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error
+```
+
+WriteStdin sends data to the process's standard input in chunks of at most 1 MiB. Calls on one handle are serialized; a call waiting its turn returns when its context is done. It is not retried: if it fails partway, an unknown prefix of data has already been delivered. The context controls only these RPCs and does not cancel Start.
+
+<a name="ProcessSignal"></a>
+### type [ProcessSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+ProcessSignal is a supported POSIX signal for a sandboxd process group.
+
+```go
+type ProcessSignal string
+```
+
+<a name="SignalSIGINT"></a>
+
+```go
+const (
+    SignalSIGINT  ProcessSignal = "SIGINT"
+    SignalSIGTERM ProcessSignal = "SIGTERM"
+    SignalSIGKILL ProcessSignal = "SIGKILL"
+)
 ```
 
 <a name="Runtime"></a>
@@ -801,6 +1453,15 @@ func (s *Sandbox) Commands() *Commands
 
 Commands returns the command execution sub\-object.
 
+<a name="Sandbox.Copy"></a>
+#### func \(\*Sandbox\) [Copy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Copy(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Copy copies a file or directory \(sandboxd runtime only\). See Files.Copy.
+
 <a name="Sandbox.Delete"></a>
 #### func \(\*Sandbox\) [Delete](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -828,6 +1489,15 @@ func (s *Sandbox) Exists(ctx context.Context, path string, opts ...CallOption) (
 
 
 
+<a name="Sandbox.Extract"></a>
+#### func \(\*Sandbox\) [Extract](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Extract(ctx context.Context, path string, archive io.Reader, opts ...CallOption) error
+```
+
+Extract unpacks a tar archive into a directory \(sandboxd runtime only\). See Files.Extract.
+
 <a name="Sandbox.Files"></a>
 #### func \(\*Sandbox\) [Files](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -836,6 +1506,15 @@ func (s *Sandbox) Files() *Files
 ```
 
 Files returns the file operations sub\-object.
+
+<a name="Sandbox.Health"></a>
+#### func \(\*Sandbox\) [Health](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Health(ctx context.Context, opts ...CallOption) (*Health, error)
+```
+
+Health returns sandboxd's report from GET /v1/health. It returns an HTTPError while sandboxd is shutting down, and ErrUnsupportedByRuntime on the legacy python\-runtime. It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
 
 <a name="Sandbox.IsReady"></a>
 #### func \(\*Sandbox\) [IsReady](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
@@ -846,6 +1525,15 @@ func (s *Sandbox) IsReady() bool
 
 IsReady returns true if the sandbox is ready for communication.
 
+<a name="Sandbox.IsSuspended"></a>
+#### func \(\*Sandbox\) [IsSuspended](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)
+
+```go
+func (s *Sandbox) IsSuspended(ctx context.Context) (bool, error)
+```
+
+IsSuspended reports whether the Sandbox CR asks the controller to keep the sandbox suspended \(spec.operatingMode is Suspended\). It reflects the desired state, not whether the pod has finished terminating; Suspend waits for that.
+
 <a name="Sandbox.List"></a>
 #### func \(\*Sandbox\) [List](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -855,6 +1543,33 @@ func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]
 
 
 
+<a name="Sandbox.Metadata"></a>
+#### func \(\*Sandbox\) [Metadata](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Metadata(ctx context.Context, opts ...CallOption) (*Metadata, error)
+```
+
+Metadata returns the workload\-scoped configuration sandboxd serves from GET /v1/metadata \(sandboxd runtime only; the legacy python\-runtime returns ErrUnsupportedByRuntime\). It does not retry unless WithMaxAttempts is set. Not part of the Handle interface to avoid breaking existing implementers.
+
+<a name="Sandbox.Mkdir"></a>
+#### func \(\*Sandbox\) [Mkdir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Mkdir(ctx context.Context, path string, parents bool, opts ...CallOption) error
+```
+
+Mkdir creates a directory, and its missing parents when parents is true \(sandboxd runtime only\). See Files.Mkdir.
+
+<a name="Sandbox.Move"></a>
+#### func \(\*Sandbox\) [Move](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Move(ctx context.Context, source, destination string, overwrite bool, opts ...CallOption) error
+```
+
+Move renames a file or directory \(sandboxd runtime only\). See Files.Move.
+
 <a name="Sandbox.Open"></a>
 #### func \(\*Sandbox\) [Open](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -862,7 +1577,7 @@ func (s *Sandbox) List(ctx context.Context, path string, opts ...CallOption) ([]
 func (s *Sandbox) Open(ctx context.Context) (retErr error)
 ```
 
-Open creates a SandboxClaim and waits for the sandbox to become ready, then discovers the API URL based on the configured connection mode. On failure after claim creation, the claim is automatically deleted; if deletion also fails, call Close\(\) to retry.
+Open creates a SandboxClaim and waits for the sandbox to become ready, then discovers the API URL based on the configured connection mode. On failure after claim creation, a claim with a generated name is automatically deleted; if deletion also fails, call Close\(\) to retry. A claim named by ClaimName is caller\-owned and is left in place.
 
 <a name="Sandbox.PodIP"></a>
 #### func \(\*Sandbox\) [PodIP](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
@@ -891,6 +1606,26 @@ func (s *Sandbox) Read(ctx context.Context, path string, opts ...CallOption) ([]
 
 
 
+<a name="Sandbox.ReadTo"></a>
+#### func \(\*Sandbox\) [ReadTo](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) ReadTo(ctx context.Context, path string, destination io.Writer, opts ...CallOption) (int64, error)
+```
+
+ReadTo streams a file into a caller\-owned io.Writer without buffering the complete response. The destination is never closed.
+
+<a name="Sandbox.Resume"></a>
+#### func \(\*Sandbox\) [Resume](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)
+
+```go
+func (s *Sandbox) Resume(ctx context.Context, opts ...CallOption) error
+```
+
+Resume makes a suspended sandbox runnable again: it sets the Sandbox's spec.operatingMode back to Running, waits for the sandbox to become Ready, and re\-establishes connectivity so the caller can keep using the same handle.
+
+Resume is idempotent. On a sandbox that is already running it does not patch: Resume waits for the sandbox to report Ready at its current generation and leaves a connected transport alone, unless the pod behind the sandbox changed — another client may have suspended and resumed it — in which case Resume rebuilds the transport. A handle that lost its transport always reconnects. Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
+
 <a name="Sandbox.Run"></a>
 #### func \(\*Sandbox\) [Run](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -918,6 +1653,44 @@ func (s *Sandbox) ServiceFQDN() string
 
 ServiceFQDN returns the in\-cluster DNS name of the Sandbox's headless Service, or "" when it has none \(spec.service unset or false\). Not part of the Info interface, which is frozen for backward compatibility.
 
+<a name="Sandbox.Stat"></a>
+#### func \(\*Sandbox\) [Stat](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Stat(ctx context.Context, path string, opts ...CallOption) (*FileEntry, error)
+```
+
+Stat returns the type, size, mode, and modification time of a file or directory \(sandboxd runtime only\). See Files.Stat.
+
+<a name="Sandbox.Suspend"></a>
+#### func \(\*Sandbox\) [Suspend](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/operatingmode.go>)
+
+```go
+func (s *Sandbox) Suspend(ctx context.Context, opts ...CallOption) error
+```
+
+Suspend puts the sandbox into the suspended state: it sets the Sandbox's spec.operatingMode to Suspended \(unless already set\), closes the transport, and waits for the Suspended condition, which the controller sets once the backing pod has terminated. The claim and sandbox identity are preserved, so Resume brings the same sandbox back.
+
+Suspend is idempotent and also completes a suspension requested outside the SDK: it waits for the pod to terminate and closes a live transport instead of returning early. Pass WithTimeout to override Options.SandboxReadyTimeout as the wait budget.
+
+<a name="Sandbox.WatchDir"></a>
+#### func \(\*Sandbox\) [WatchDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) WatchDir(ctx context.Context, path string, recursive bool, opts ...CallOption) (<-chan FileEvent, error)
+```
+
+WatchDir streams filesystem events for a sandbox\-relative directory path. When recursive is true, subdirectories are watched too. The returned channel is closed when ctx is cancelled or the watch ends. Requires the sandboxd runtime. Convenience alias for Watchers\(\).WatchDir.
+
+<a name="Sandbox.Watchers"></a>
+#### func \(\*Sandbox\) [Watchers](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
+
+```go
+func (s *Sandbox) Watchers() *Watchers
+```
+
+Watchers returns the filesystem event streaming sub\-object. Requires the sandboxd runtime; WatchDir calls return an error on the legacy runtime.
+
 <a name="Sandbox.Write"></a>
 #### func \(\*Sandbox\) [Write](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/sandbox.go>)
 
@@ -935,5 +1708,33 @@ func (s *Sandbox) WriteReader(ctx context.Context, path string, content io.Reade
 ```
 
 WriteReader streams content from an io.Reader without buffering the entire payload. Streaming uploads use a single request attempt because a generic reader cannot be replayed safely. Passing WithMaxAttempts with a value greater than 1 returns an error; it is not silently reduced to one attempt.
+
+<a name="Watchers"></a>
+### type [Watchers](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+Watchers provides filesystem event streaming on a sandbox.
+
+```go
+type Watchers struct {
+    // contains filtered or unexported fields
+}
+```
+
+<a name="Watchers.WatchDir"></a>
+#### func \(\*Watchers\) [WatchDir](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/watcher.go>)
+
+```go
+func (w *Watchers) WatchDir(ctx context.Context, path string, recursive bool, opts ...CallOption) (_ <-chan FileEvent, retErr error)
+```
+
+WatchDir streams filesystem events for the given sandbox\-relative directory path. When recursive is true, subdirectories are watched too: directories created during the watch are added automatically and removed ones dropped. Events are delivered on the returned channel until the context is cancelled, the watched directory is removed, or an error occurs. The channel is closed when no more events will arrive.
+
+A nil return does not mean the watch was established: server\-side rejections such as NOT\_FOUND \(path does not exist\) and PERMISSION\_DENIED \(path escapes the sandbox root\) arrive on the first Recv and are delivered as a terminal FileEvent with Type == FileEventError before the channel is closed. Callers must therefore consume the channel and inspect events even when WatchDir returns without error.
+
+The caller MUST consume events from the channel \(or cancel ctx\) to avoid leaking the background goroutine. When ctx is cancelled, the background goroutine exits and the channel is closed; events already buffered in the channel remain consumable, but events still in flight on the stream may be dropped.
+
+An explicit WithTimeout covers the entire stream lifetime; there is no default timeout. WatchDir never retries and rejects WithMaxAttempts \> 1, like Commands.Start.
+
+With the legacy runtime \(non\-sandboxd\), WatchDir returns an error because the legacy python\-runtime does not implement FileWatcherService.
 
 Generated by [gomarkdoc](<https://github.com/princjef/gomarkdoc>)

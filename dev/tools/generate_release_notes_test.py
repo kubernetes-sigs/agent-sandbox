@@ -1,0 +1,425 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Unit tests for dev/tools/generate-release-notes."""
+
+import importlib.util
+import os
+import unittest
+from importlib.machinery import SourceFileLoader
+from unittest import mock
+
+# generate-release-notes is an extensionless script, so load it via importlib
+# with an explicit SourceFileLoader. It is import-safe: main() only runs under
+# `if __name__ == "__main__"`, and google-genai is imported lazily.
+_SCRIPT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "generate-release-notes"
+)
+_loader = SourceFileLoader("generate_release_notes", _SCRIPT_PATH)
+_spec = importlib.util.spec_from_loader("generate_release_notes", _loader)
+generate_release_notes = importlib.util.module_from_spec(_spec)
+_loader.exec_module(generate_release_notes)
+
+
+class GetContributorsTest(unittest.TestCase):
+    def test_skips_bot_authors(self):
+        # Author objects as `gh pr view --json author` returns them.
+        prs_data = {
+            2013: {"author": {"is_bot": True, "login": "app/dependabot"}},
+            2079: {
+                "author": {
+                    "id": "MDQ6VXNlcjQ4NzY4Njc=",
+                    "is_bot": False,
+                    "login": "janetkuo",
+                    "name": "Janet Kuo",
+                }
+            },
+        }
+        self.assertEqual(
+            generate_release_notes.get_contributors(prs_data), ["@janetkuo"]
+        )
+
+    def test_dedupes_and_sorts_handles(self):
+        prs_data = {
+            1: {"author": {"is_bot": False, "login": "tomergee"}},
+            2: {"author": {"is_bot": False, "login": "ericcurtin"}},
+            3: {"author": {"is_bot": False, "login": "tomergee"}},
+        }
+        self.assertEqual(
+            generate_release_notes.get_contributors(prs_data),
+            ["@ericcurtin", "@tomergee"],
+        )
+
+
+class SelectPreviousReleaseTagTest(unittest.TestCase):
+    def test_prefers_latest_when_different_from_current(self):
+        releases = [
+            {"tagName": "v1.0.12", "isLatest": False, "isDraft": True, "isPrerelease": False},
+            {"tagName": "v1.0.11", "isLatest": True, "isDraft": False, "isPrerelease": False},
+            {"tagName": "v1.0.10", "isLatest": False, "isDraft": False, "isPrerelease": False},
+        ]
+        self.assertEqual(
+            generate_release_notes.select_previous_release_tag(releases, "v1.0.12"),
+            "v1.0.11",
+        )
+
+    def test_skips_current_tag_when_already_latest(self):
+        releases = [
+            {"tagName": "v1.0.12", "isLatest": True, "isDraft": False, "isPrerelease": False},
+            {"tagName": "v1.0.12-rc1", "isLatest": False, "isDraft": False, "isPrerelease": True},
+            {"tagName": "v1.0.11", "isLatest": False, "isDraft": False, "isPrerelease": False},
+        ]
+        self.assertEqual(
+            generate_release_notes.select_previous_release_tag(releases, "v1.0.12"),
+            "v1.0.11",
+        )
+
+
+class CommitClassificationAndSignalsTest(unittest.TestCase):
+    def test_classify_commit_files(self):
+        self.assertEqual(
+            generate_release_notes.classify_commit_files(
+                ["docs/api.md", "site/content/docs/troubleshooting/_index.md"]
+            ),
+            "docs-only",
+        )
+        self.assertEqual(
+            generate_release_notes.classify_commit_files(
+                ["clients/go/sandbox/client_test.go", "clients/go/sandbox/sandbox_test.go"]
+            ),
+            "tests-only",
+        )
+        self.assertEqual(
+            generate_release_notes.classify_commit_files(
+                ["dev/ci/shared/kops-gcp-lifecycle.sh"]
+            ),
+            "ci-or-tooling-only",
+        )
+        self.assertEqual(
+            generate_release_notes.classify_commit_files(
+                ["site/package.json", "site/package-lock.json"], is_bot=True
+            ),
+            "bot-dependency-update",
+        )
+        self.assertEqual(
+            generate_release_notes.classify_commit_files(
+                ["packages/sandboxd/pkg/server/filesystem.go", "packages/sandboxd/pkg/server/filesystem_test.go"]
+            ),
+            "code-or-manifests",
+        )
+
+    def test_parse_helm_chart_version_change(self):
+        diff = (
+            "--- a/helm/Chart.yaml\n"
+            "+++ b/helm/Chart.yaml\n"
+            "@@ -1,5 +1,5 @@\n"
+            " apiVersion: v2\n"
+            " name: agent-sandbox\n"
+            "-version: 0.1.4\n"
+            "+version: 0.1.5\n"
+        )
+        self.assertEqual(
+            generate_release_notes.parse_helm_chart_version_change(diff),
+            ("0.1.4", "0.1.5"),
+        )
+        self.assertIsNone(
+            generate_release_notes.parse_helm_chart_version_change("no version change")
+        )
+
+    def test_truncate_text_on_newline(self):
+        text = "line1\nline2\nline3\nline4\n" + ("x" * 100)
+        truncated = generate_release_notes.truncate_text(text, 60)
+        self.assertLessEqual(len(truncated), 60)
+        self.assertIn("[diff truncated,", truncated)
+
+    def test_diff_file_priority_orders_api_code_examples_docs(self):
+        paths = [
+            "clients/go/README.md",
+            "examples/demo/main.py",
+            "clients/go/sandbox/sandbox.go",
+            "extensions/api/v1beta1/sandboxwarmpool_types.go",
+            "docs/api.md",
+            "packages/sandboxd/spec/filesystem/v1/filesystem.yaml",
+        ]
+        ordered = sorted(paths, key=generate_release_notes.diff_file_priority)
+        self.assertEqual(
+            ordered,
+            [
+                "extensions/api/v1beta1/sandboxwarmpool_types.go",
+                "packages/sandboxd/spec/filesystem/v1/filesystem.yaml",
+                "clients/go/sandbox/sandbox.go",
+                "examples/demo/main.py",
+                "clients/go/README.md",
+                "docs/api.md",
+            ],
+        )
+
+    def test_budget_commit_diff_prioritizes_api_and_caps_large_files(self):
+        readme_diff = (
+            "diff --git a/clients/go/README.md b/clients/go/README.md\n"
+            + "+doc line\n" * 60
+        )
+        big_helper_diff = (
+            "diff --git a/clients/go/sandbox/operatingmode.go b/clients/go/sandbox/operatingmode.go\n"
+            + "+helper line\n" * 200
+        )
+        api_diff = (
+            "diff --git a/clients/go/sandbox/sandbox.go b/clients/go/sandbox/sandbox.go\n"
+            "+func (s *Sandbox) Suspend(ctx context.Context) error\n"
+        )
+        combined = "\n".join([readme_diff, big_helper_diff, api_diff])
+        result = generate_release_notes.budget_commit_diff(
+            combined, max_chars=1500, max_file_chars=600
+        )
+        # sandbox.go is kept in full even though operatingmode.go was huge and
+        # README.md sorted alphabetically earlier.
+        self.assertIn("func (s *Sandbox) Suspend(ctx context.Context) error", result)
+        self.assertLess(
+            result.index("clients/go/sandbox/sandbox.go"),
+            result.index("clients/go/README.md"),
+        )
+        self.assertIn("[diff truncated,", result)
+
+    def test_budget_commit_diff_keeps_small_single_file_untruncated(self):
+        single = (
+            "diff --git a/clients/go/sandbox/sandbox.go b/clients/go/sandbox/sandbox.go\n"
+            + "+code\n" * 200
+        )
+        result = generate_release_notes.budget_commit_diff(
+            single, max_chars=5000, max_file_chars=400
+        )
+        # Fits inside max_chars, so it is not needlessly truncated by max_file_chars.
+        self.assertNotIn("[diff truncated,", result)
+        self.assertEqual(result, single.strip())
+
+    def test_budget_commit_diff_stays_within_max_chars_with_many_omitted_files(self):
+        sections = [
+            f"diff --git a/pkg/sub/file_{i:04d}.go b/pkg/sub/file_{i:04d}.go\n"
+            + ("+some changed line in this file\n" * 20)
+            for i in range(500)
+        ]
+        result = generate_release_notes.budget_commit_diff(
+            "\n".join(sections), max_chars=2000, max_file_chars=500
+        )
+        self.assertLessEqual(len(result), 2000)
+        self.assertIn("file diff(s) omitted due to commit budget", result)
+
+    def test_get_commits_uses_first_parent(self):
+        fake_stdout = (
+            "\x1eaaaa1111\n"
+            "Merge pull request #2163 from aditya-shantanu/feat/test\n"
+            "body text\n"
+        )
+        with mock.patch.object(
+            generate_release_notes.subprocess,
+            "run",
+            return_value=mock.Mock(stdout=fake_stdout),
+        ) as mock_run:
+            commits = generate_release_notes.get_commits("v1.0.10", "v1.0.11")
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--first-parent", cmd)
+        self.assertNotIn("--no-merges", cmd)
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(commits[0]["pr_number"], 2163)
+
+    def test_get_pr_numbers_preserves_order(self):
+        commits = [
+            {"title": "feat: second (#20)", "pr_number": 20},
+            {"title": "feat: first (#10)", "pr_number": 10},
+            {"title": "fix: dup (#20)", "pr_number": 20},
+        ]
+        self.assertEqual(generate_release_notes.get_pr_numbers(commits), [20, 10])
+
+
+class FooterAndAssemblyTest(unittest.TestCase):
+    def test_extract_github_footer_drops_whats_changed(self):
+        generated = (
+            "## What's Changed\n"
+            "* feat: something by @alice in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "## New Contributors\n"
+            "* @alice made their first contribution in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12\n"
+        )
+        footer = generate_release_notes.extract_github_footer(
+            generated, "v1.0.11", "v1.0.12"
+        )
+        self.assertNotIn("What's Changed", footer)
+        self.assertIn("### New Contributors\n* @alice", footer)
+        self.assertIn(
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12",
+            footer,
+        )
+
+    def test_extract_github_footer_without_new_contributors(self):
+        generated = (
+            "## What's Changed\n"
+            "* feat: something by @alice in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12\n"
+        )
+        footer = generate_release_notes.extract_github_footer(
+            generated, "v1.0.11", "v1.0.12"
+        )
+        self.assertEqual(
+            footer,
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12",
+        )
+
+    def test_extract_github_footer_fallback_when_empty(self):
+        footer = generate_release_notes.extract_github_footer("", "v1.0.11", "v1.0.12")
+        self.assertEqual(
+            footer,
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12",
+        )
+
+    def test_strip_markdown_fences(self):
+        wrapped = "```markdown\nHello world\n```"
+        self.assertEqual(
+            generate_release_notes.strip_markdown_fences(wrapped), "Hello world"
+        )
+        self.assertEqual(
+            generate_release_notes.strip_markdown_fences("Plain text"), "Plain text"
+        )
+
+    def test_assemble_release_notes_strips_duplicate_sections_and_appends_footer(self):
+        gemini_output = (
+            "Summary paragraph.\n\n"
+            "### Installation\ninstall cmds\n\n"
+            "### Contributors\n@alice\n\n"
+            "## What's Changed\n* junk\n\n"
+            "### New Contributors\n* @hallucinated\n\n"
+            "**Full Changelog**: https://example.com/wrong"
+        )
+        footer = (
+            "### New Contributors\n"
+            "* @alice made their first contribution in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12"
+        )
+        result = generate_release_notes.assemble_release_notes(
+            tag="v1.0.12",
+            gemini_notes=gemini_output,
+            installation_notes="### Installation\ninstall cmds",
+            contributors=["@alice"],
+            footer=footer,
+        )
+        self.assertNotIn("What's Changed", result)
+        self.assertNotIn("@hallucinated", result)
+        self.assertNotIn("example.com/wrong", result)
+        self.assertIn("### New Contributors\n* @alice", result)
+        self.assertEqual(result.count("**Full Changelog**:"), 1)
+
+    def test_extract_github_whats_changed(self):
+        generated = (
+            "## What's Changed\n"
+            "* feat: something by @alice in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "## New Contributors\n"
+            "* @alice made their first contribution in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12\n"
+        )
+        section = generate_release_notes.extract_github_whats_changed(generated)
+        self.assertEqual(
+            section,
+            "## What's Changed\n"
+            "* feat: something by @alice in https://github.com/kubernetes-sigs/agent-sandbox/pull/1",
+        )
+        self.assertEqual(generate_release_notes.extract_github_whats_changed(""), "")
+
+    def test_format_commit_fallback_changes(self):
+        commits = [
+            {"title": "feat: one (#1)"},
+            {"title": "fix: two (#2)"},
+        ]
+        self.assertEqual(
+            generate_release_notes.format_commit_fallback_changes(commits),
+            "## What's Changed\n* feat: one (#1)\n* fix: two (#2)",
+        )
+        self.assertEqual(generate_release_notes.format_commit_fallback_changes([]), "")
+
+    def test_assemble_release_notes_uses_fallback_changes_when_gemini_fails(self):
+        fallback = "## What's Changed\n* feat: one (#1)"
+        footer = (
+            "### New Contributors\n"
+            "* @alice made their first contribution in https://github.com/kubernetes-sigs/agent-sandbox/pull/1\n\n"
+            "**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12"
+        )
+        result = generate_release_notes.assemble_release_notes(
+            tag="v1.0.12",
+            gemini_notes=None,
+            installation_notes="### Installation\ninstall cmds",
+            contributors=["@alice"],
+            footer=footer,
+            fallback_changes=fallback,
+        )
+        self.assertIn("## What's Changed\n* feat: one (#1)", result)
+        self.assertIn("### Installation\ninstall cmds", result)
+        self.assertIn("### Contributors\nWe extend our sincere thanks", result)
+        self.assertIn("### New Contributors\n* @alice", result)
+        self.assertLess(result.index("## What's Changed"), result.index("### Installation"))
+
+    def test_assemble_release_notes_omits_fallback_changes_when_gemini_succeeds(self):
+        result = generate_release_notes.assemble_release_notes(
+            tag="v1.0.12",
+            gemini_notes="Curated summary.\n\n### Installation\ninstall cmds\n\n### Contributors\n@alice",
+            installation_notes="### Installation\ninstall cmds",
+            contributors=["@alice"],
+            footer="**Full Changelog**: https://github.com/kubernetes-sigs/agent-sandbox/compare/v1.0.11...v1.0.12",
+            fallback_changes="## What's Changed\n* feat: one (#1)",
+        )
+        self.assertNotIn("What's Changed", result)
+        self.assertIn("Curated summary.", result)
+
+    def test_enrich_commits_skips_diff_for_tests_and_bots(self):
+        commits = [
+            {"sha": "aaa11111", "title": "cleanup: tests (#1)", "body": "", "pr_number": 1},
+            {"sha": "bbb22222", "title": "build(deps): bump (#2)", "body": "", "pr_number": 2},
+            {"sha": "ccc33333", "title": "feat: real change (#3)", "body": "", "pr_number": 3},
+        ]
+        prs_data = {
+            1: {"author": {"is_bot": False, "login": "alice"}, "labels": [], "body": "test cleanup"},
+            2: {"author": {"is_bot": True, "login": "app/dependabot"}, "labels": [], "body": "bump"},
+            3: {"author": {"is_bot": False, "login": "bob"}, "labels": [], "body": "real pr"},
+        }
+        files_by_sha = {
+            "aaa11111": ["clients/go/sandbox/client_test.go"],
+            "bbb22222": ["site/package.json"],
+            "ccc33333": ["packages/sandboxd/pkg/server/filesystem.go"],
+        }
+        with mock.patch.object(
+            generate_release_notes,
+            "get_commit_files",
+            side_effect=lambda sha: files_by_sha[sha],
+        ), mock.patch.object(
+            generate_release_notes,
+            "get_commit_stat",
+            return_value="1 file changed",
+        ), mock.patch.object(
+            generate_release_notes,
+            "get_commit_diff",
+            return_value="+added line",
+        ) as mock_diff:
+            enriched = generate_release_notes.enrich_commits(commits, prs_data)
+
+        self.assertEqual(enriched[0]["scope"], "tests-only")
+        self.assertEqual(enriched[0]["diff"], "")
+        self.assertEqual(enriched[1]["scope"], "bot-dependency-update")
+        self.assertEqual(enriched[1]["diff"], "")
+        self.assertEqual(enriched[2]["scope"], "code-or-manifests")
+        self.assertEqual(enriched[2]["diff"], "+added line")
+        mock_diff.assert_called_once_with(
+            "ccc33333", max_chars=generate_release_notes.MAX_DIFF_CHARS_PER_COMMIT
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

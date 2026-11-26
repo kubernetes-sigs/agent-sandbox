@@ -15,9 +15,14 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/llm"
+	"sigs.k8s.io/agent-sandbox/examples/sandboxed-tools/pkg/sessions"
 )
 
 // newTestSession returns a Session backed by a scratch backup directory.
@@ -178,5 +183,60 @@ func TestPruneBackups_ZeroKeepCountDeletesEverything(t *testing.T) {
 
 	if got := remainingBackups(t, session); len(got) != 0 {
 		t.Errorf("remaining backups = %v, want 0", got)
+	}
+}
+
+func TestNewAndLoadSession_Metadata(t *testing.T) {
+	ctx := t.Context()
+	store := sessions.NewFileStore(t.TempDir())
+	harness := NewHarness(nil, nil, nil, RunOptions{Namespace: "ns", HomeDir: "/home/x"})
+
+	if _, err := harness.LoadSession(ctx, store, "missing"); !errors.Is(err, sessions.ErrNotFound) {
+		t.Errorf("LoadSession(missing) err = %v, want ErrNotFound", err)
+	}
+
+	// A new session persists the metadata it was built with, stamping the
+	// creation time.
+	before := time.Now()
+	session, err := harness.NewSession(ctx, store, "child1", sessions.Metadata{Parent: "parent1", Toolset: "geminicli"})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if session.Metadata.Parent != "parent1" || session.Metadata.Toolset != "geminicli" {
+		t.Errorf("new session metadata = %+v, want parent1/geminicli", session.Metadata)
+	}
+	if session.Metadata.CreatedAt.Before(before) {
+		t.Errorf("CreatedAt = %v, want >= %v", session.Metadata.CreatedAt, before)
+	}
+
+	// Reusing an existing session name in NewSession fails.
+	if _, err := harness.NewSession(ctx, store, "child1", sessions.Metadata{Toolset: "basic"}); err == nil {
+		t.Error("NewSession with existing session name should fail")
+	}
+
+	// Loading the session restores the stored metadata.
+	resumed, err := harness.LoadSession(ctx, store, "child1")
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	if !resumed.Metadata.CreatedAt.Equal(session.Metadata.CreatedAt) || resumed.Metadata.Parent != "parent1" || resumed.Metadata.Toolset != "geminicli" {
+		t.Errorf("resumed metadata = %+v, want the stored %+v", resumed.Metadata, session.Metadata)
+	}
+
+	// A session recorded before metadata existed loads with zero metadata
+	// rather than being backfilled.
+	content := "hello"
+	if err := store.AppendMessages(ctx, "legacy", llm.Message{Role: "user", Content: &content}); err != nil {
+		t.Fatalf("AppendMessages: %v", err)
+	}
+	legacy, err := harness.LoadSession(ctx, store, "legacy")
+	if err != nil {
+		t.Fatalf("LoadSession (legacy): %v", err)
+	}
+	if legacy.Metadata != (sessions.Metadata{}) {
+		t.Errorf("legacy metadata = %+v, want zero", legacy.Metadata)
+	}
+	if _, err := harness.NewSession(ctx, store, "legacy", sessions.Metadata{Toolset: "basic"}); err == nil {
+		t.Error("NewSession on existing legacy session should fail")
 	}
 }

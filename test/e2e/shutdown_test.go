@@ -45,7 +45,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
@@ -101,6 +101,13 @@ func TestSandboxShutdownTime(t *testing.T) {
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonNotSuspended,
 					Message:            "Sandbox is not suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonExpired,
+					Message:            "Sandbox has expired",
 				},
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionReady),

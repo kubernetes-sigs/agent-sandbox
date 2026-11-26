@@ -21,8 +21,9 @@ When you create a sandbox, a persistent Kubernetes Pod is provisioned and identi
   - **Purpose:** Create a new sandbox.
 
 - **`execute_command`**
-  - **Arguments:** `sandbox_claim_name` (string), `namespace` (string), `command` (string — shell command or python inline script), `timeout` (int — seconds before the command times out, optional).
-  - **Returns:** JSON object containing `stdout`, `stderr`, and `exit_code`, or JSON with an `error` field.
+  - **Arguments:** `sandbox_claim_name` (string), `namespace` (string), `command` (string — shell command or python inline script), `timeout` (int — seconds before the command times out, optional), `max_output_chars` (int, optional, default 30000, minimum 128, maximum 300000).
+  - **Returns:** JSON object containing `stdout`, `stderr`, `exit_code`, `stdout_total_chars`, `stderr_total_chars`, `stdout_truncated`, and `stderr_truncated`, or JSON with an `error` field.
+  - **Output budget:** Limits the combined stdout/stderr Unicode code points, including omission markers. Both streams initially share the budget equally, with unused capacity reassigned to the other stream. Oversized streams retain equal-sized beginning and end excerpts (at most one extra character at the end), separated by `[... N characters omitted ...]`. The `*_total_chars` fields report SDK output lengths before this tool truncates them; `*_truncated` indicates whether the returned output is partial.
   - **Purpose:** Executes commands inside the provisioned sandbox.
 
 - **`delete_sandbox`**
@@ -39,6 +40,11 @@ When you create a sandbox, a persistent Kubernetes Pod is provisioned and identi
   -  **Arguments:** `sandbox_claim_name` (string), `namespace` (string), `path` (string), `timeout` (int, optional).
   -  **Returns:** JSON object containing field `exists`.
   -  **Purpose:** Check whether a file or directory exists in a sandbox.
+
+- **`get_sandbox_health`**
+  - **Arguments:** `sandbox_claim_name` (string), `namespace` (string), `timeout` (int, optional).
+  - **Returns:** JSON object containing fields `healthy`, `uptime_seconds`, and `message`.
+  - **Purpose:** Report whether `sandboxd` is serving inside a sandbox. This complements `get_sandbox_status`, which reports Kubernetes readiness: a sandbox whose Pod is Ready can still report `healthy` false here, because `sandboxd` stops serving while it shuts down. Read `healthy` false as a normal state and decide whether to wait or create a new sandbox. Requires the sandboxd runtime.
 
 - **`get_sandbox_status`**
   - **Arguments:** `sandbox_claim_name` (string), `namespace` (string).

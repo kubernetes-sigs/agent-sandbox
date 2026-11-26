@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from kubernetes.client import ApiException
 from pydantic import BaseModel
@@ -135,14 +135,17 @@ class SandboxWithSnapshotSupport(Sandbox):
         A sandbox is considered suspended if the spec.operatingMode is set to Suspended.
         """
         try:
-            sandbox_cr = (
+            # Custom-object responses are typed ``object`` by the generated
+            # client (kubernetes >= 37); they are the decoded JSON dict.
+            sandbox_cr = cast(
+                dict[str, Any],
                 self.k8s_helper.custom_objects_api.get_namespaced_custom_object(
                     group=SANDBOX_API_GROUP,
                     version=SANDBOX_API_VERSION,
                     namespace=self.namespace,
                     plural=SANDBOX_PLURAL_NAME,
                     name=self.sandbox_id,
-                )
+                ),
             )
             spec_operating_mode = sandbox_cr.get("spec", {}).get(
                 "operatingMode", OPERATING_MODE_RUNNING
@@ -161,7 +164,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                     f"Sandbox '{self.sandbox_id}' is in the process of resuming/starting (spec.operatingMode='{spec_operating_mode}' but no podIPs assigned)."
                 )
 
-            return is_spec_suspended
+            return bool(is_spec_suspended)
         except Exception as e:
             logger.error(
                 f"Failed to check if Sandbox '{self.sandbox_id}' is suspended: {e}"
@@ -190,17 +193,23 @@ class SandboxWithSnapshotSupport(Sandbox):
         return None
 
     @record_latency(sandbox_client_suspend_latency_ms)
-    def suspend(self, snapshot_before_suspend: bool = True, wait_timeout: int = 180) -> SuspendResponse:
+    def suspend(  # type: ignore[override]  # Returns a response model; the base method returns None.
+        self, snapshot_before_suspend: bool = True, wait_timeout: int = 180,
+        *, timeout: int | None = None,
+    ) -> SuspendResponse:
         """
         Suspends the sandbox.
 
         Args:
             snapshot_before_suspend: Whether to take a snapshot of the sandbox before suspending it. Defaults to True.
             wait_timeout: The maximum time in seconds to wait for termination. Defaults to 180.
+            timeout: Keyword-only wait timeout. Takes precedence over wait_timeout when given.
 
         Returns:
             SuspendResponse: An object containing the success status, potential snapshot response, and any error details.
         """
+        if timeout is not None:
+            wait_timeout = timeout
         if self.is_suspended():
             logger.info(f"Sandbox '{self.sandbox_id}' is already suspended.")
             self._skip_latency_metric = True
@@ -252,7 +261,7 @@ class SandboxWithSnapshotSupport(Sandbox):
                 pod = self.k8s_helper.core_v1_api.read_namespaced_pod(
                     pod_name_to_wait, self.namespace
                 )
-                pod_uid_to_wait = pod.metadata.uid
+                pod_uid_to_wait = pod.metadata.uid if pod.metadata else None
             except ApiException as e:
                 if e.status != 404:
                     logger.error(f"Error getting pod UID before suspend: {e}")
@@ -401,16 +410,21 @@ class SandboxWithSnapshotSupport(Sandbox):
         )
 
     @record_latency(sandbox_client_resume_latency_ms)
-    def resume(self, wait_timeout: int = 180) -> ResumeResponse:
+    def resume(  # type: ignore[override]  # Returns a response model; the base method returns None.
+        self, wait_timeout: int = 180, *, timeout: int | None = None,
+    ) -> ResumeResponse:
         """
         Resumes the sandbox from the latest available snapshot.
 
         Args:
             wait_timeout: The maximum time in seconds to wait for the pod to become ready. Defaults to 180.
+            timeout: Keyword-only wait timeout. Takes precedence over wait_timeout when given.
 
         Returns:
             ResumeResponse: An object containing the success status, restoration details, and any error information.
         """
+        if timeout is not None:
+            wait_timeout = timeout
         if not self.is_suspended():
             logger.info(f"Sandbox '{self.sandbox_id}' is already running (not suspended).")
             self._skip_latency_metric = True
@@ -444,7 +458,10 @@ class SandboxWithSnapshotSupport(Sandbox):
                     }
                 }
             }
-            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+            claim_name = self.claim_name
+            if not claim_name:
+                raise RuntimeError("Cannot patch SandboxClaim: claim_name is not set")
+            self.k8s_helper.patch_sandbox_claim(claim_name, self.namespace, body)
         except Exception as e:
             logger.error(f"Failed to clean up restore annotation before resuming: {e}")
             return ResumeResponse(
@@ -515,7 +532,10 @@ class SandboxWithSnapshotSupport(Sandbox):
                     }
                 }
             }
-            self.k8s_helper.patch_sandbox_claim(self.claim_name, self.namespace, body)
+            claim_name = self.claim_name
+            if not claim_name:
+                raise RuntimeError("Cannot patch SandboxClaim: claim_name is not set")
+            self.k8s_helper.patch_sandbox_claim(claim_name, self.namespace, body)
 
             if not wait_for_sandbox_propagation(
                 self.k8s_helper, self.namespace, self.sandbox_id, snapshot_uid

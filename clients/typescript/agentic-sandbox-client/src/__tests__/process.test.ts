@@ -1,0 +1,857 @@
+// Copyright 2026 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+import * as http2 from "node:http2";
+import type * as net from "node:net";
+import { create } from "@bufbuild/protobuf";
+import { Code, ConnectError, type ConnectRouter } from "@connectrpc/connect";
+import {
+  connectNodeAdapter,
+  Http2SessionManager,
+} from "@connectrpc/connect-node";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ExecuteResponseSchema,
+  InitEventSchema,
+  type ProcessConfig,
+  ProcessService,
+  StartResponseSchema,
+} from "../_proto/process/v1/process_pb.js";
+import {
+  FileEventSchema,
+  FileEventType,
+  FileWatcherService,
+  type WatchDirRequest,
+} from "../_proto/watcher/v1/watcher_pb.js";
+import {
+  SandboxClosedError,
+  SandboxConnectionError,
+  SandboxdRpcError,
+} from "../exceptions.js";
+import { ProcessClient, StreamLocalFailure } from "../process.js";
+
+/**
+ * `disruptFirstExecute` severs the transport on the first Execute request
+ * instead of letting `routes` handle it, before any response is sent — this
+ * is what a real mid-call disconnect looks like (server-side session
+ * teardown, or a raw socket reset), as opposed to an application-level gRPC
+ * error the router returns intentionally.
+ */
+async function startH2Server(
+  routes: (router: ConnectRouter) => void,
+  opts?: { disruptFirstExecute?: "session" | "socket" | "stream" },
+): Promise<{ baseUrl: string; close(): Promise<void> }> {
+  const inner = connectNodeAdapter({ routes });
+  let triggered = false;
+  let lastRawSocket: net.Socket | undefined;
+  const server = http2.createServer((req, res) => {
+    if (
+      !triggered &&
+      opts?.disruptFirstExecute &&
+      req.url === "/process.v1.ProcessService/Execute"
+    ) {
+      triggered = true;
+      if (opts.disruptFirstExecute === "session") {
+        req.stream.session?.destroy();
+      } else if (opts.disruptFirstExecute === "stream") {
+        // How macOS delivers a session teardown.
+        req.stream.session?.goaway(http2.constants.NGHTTP2_NO_ERROR);
+        req.stream.close(http2.constants.NGHTTP2_NO_ERROR);
+      } else {
+        // req.stream.session.socket is a Proxy that throws
+        // ERR_HTTP2_NO_SOCKET_MANIPULATION on destroy(); use the raw socket
+        // captured via the server's "connection" event instead, and
+        // resetAndDestroy() so the client observes an actual ECONNRESET
+        // rather than a clean FIN.
+        lastRawSocket?.resetAndDestroy();
+      }
+      return;
+    }
+    inner(req, res);
+  });
+  server.on("connection", (socket: net.Socket) => {
+    lastRawSocket = socket;
+  });
+  // After a GOAWAY the client may leave its session open, which would make
+  // server.close() wait on it; destroy sessions ourselves on close.
+  const sessions = new Set<http2.ServerHttp2Session>();
+  server.on("session", (session) => {
+    sessions.add(session);
+    session.once("close", () => sessions.delete(session));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("failed to bind");
+  return {
+    baseUrl: `http://127.0.0.1:${addr.port}`,
+    close: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+        for (const session of sessions) session.destroy();
+      }),
+  };
+}
+
+let activeServer: Awaited<ReturnType<typeof startH2Server>> | undefined;
+let activeClient: ProcessClient | undefined;
+
+afterEach(async () => {
+  activeClient?.abort();
+  activeClient = undefined;
+  await activeServer?.close();
+  activeServer = undefined;
+});
+
+describe("ProcessClient.run", () => {
+  it("sends the argv as-is (no shell wrapping) and returns stdout/stderr/exitCode", async () => {
+    let received: ProcessConfig | undefined;
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (req) => {
+          received = req.config;
+          return create(ExecuteResponseSchema, {
+            exitCode: 0,
+            stdout: new TextEncoder().encode("hello world\n"),
+            stderr: new Uint8Array(),
+          });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    const result = await activeClient.run(
+      { command: ["echo", "hello world"] },
+      30_000,
+      new AbortController().signal,
+    );
+    expect(result).toEqual({
+      exitCode: 0,
+      stdout: "hello world\n",
+      stderr: "",
+    });
+    expect(received?.command).toEqual(["echo", "hello world"]);
+    expect(received?.envVars).toEqual({});
+    expect(received?.cwd).toBeUndefined();
+  });
+
+  it("passes env and cwd through to ProcessConfig", async () => {
+    let received: ProcessConfig | undefined;
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (req) => {
+          received = req.config;
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await activeClient.run(
+      { command: ["env"], env: { FOO: "bar", EMPTY: "" }, cwd: "work/dir" },
+      30_000,
+      new AbortController().signal,
+    );
+    expect(received?.command).toEqual(["env"]);
+    expect(received?.envVars).toEqual({ FOO: "bar", EMPTY: "" });
+    expect(received?.cwd).toBe("work/dir");
+  });
+
+  it("returns a non-zero exit code as a normal result, not a thrown error", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: () =>
+          create(ExecuteResponseSchema, {
+            exitCode: 3,
+            stdout: new Uint8Array(),
+            stderr: new TextEncoder().encode("failed\n"),
+          }),
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    const result = await activeClient.run(
+      { command: ["false"] },
+      30_000,
+      new AbortController().signal,
+    );
+    expect(result.exitCode).toBe(3);
+    expect(result.stderr).toBe("failed\n");
+  });
+
+  it("maps sandboxd's NOT_FOUND for a missing executable to SandboxdRpcError", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: () => {
+          throw new ConnectError(
+            "failed to execute command: command or path not found",
+            Code.NotFound,
+          );
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await expect(
+      activeClient.run(
+        { command: ["definitely-not-a-real-command"] },
+        30_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxdRpcError && err.code === "not_found",
+    );
+  });
+
+  it("maps a response exceeding readMaxBytes to resource_exhausted", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: () =>
+          create(ExecuteResponseSchema, {
+            exitCode: 0,
+            stdout: new Uint8Array(64 * 1024),
+            stderr: new Uint8Array(),
+          }),
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      // Small enough that the real decoded message size trips the transport's
+      // own wire-level limit — this exercises the actual gRPC/h2 stack, not a
+      // client-side pre-check.
+      maxCommandOutputSize: 16,
+    });
+    await expect(
+      activeClient.run(
+        { command: ["big"] },
+        30_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({
+      code: "resource_exhausted",
+    } satisfies Partial<SandboxdRpcError>);
+  });
+
+  it("lets one cancelled concurrent call not affect the other", async () => {
+    let releaseSlow: (() => void) | undefined;
+    const slowGate = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: async (req) => {
+          if (req.config?.command?.[0] === "slow") {
+            await slowGate;
+          }
+          return create(ExecuteResponseSchema, {
+            exitCode: 0,
+            stdout: new TextEncoder().encode(req.config?.command?.[0] ?? ""),
+            stderr: new Uint8Array(),
+          });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    const cancelController = new AbortController();
+    const slowRun = activeClient.run(
+      { command: ["slow"] },
+      30_000,
+      cancelController.signal,
+    );
+    const fastRun = activeClient.run(
+      { command: ["fast"] },
+      30_000,
+      new AbortController().signal,
+    );
+
+    cancelController.abort(new Error("caller cancelled"));
+    // Must reject with the caller's own abort reason, not get reclassified
+    // as a transport failure just because Connect reports it as Canceled.
+    await expect(slowRun).rejects.toThrow("caller cancelled");
+    await expect(fastRun).resolves.toEqual({
+      exitCode: 0,
+      stdout: "fast",
+      stderr: "",
+    });
+    releaseSlow?.();
+  });
+
+  it("classifies a server-side HTTP/2 session teardown as a connection error", async () => {
+    activeServer = await startH2Server(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () => create(ExecuteResponseSchema, {}),
+        });
+      },
+      { disruptFirstExecute: "session" },
+    );
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    // Asserts the actual Connect code that reached classifyError(), not just
+    // the outcome — this is what makes the test a genuine regression guard:
+    // Code.Canceled must be classified alongside Unavailable, not fall
+    // through to SandboxdRpcError.
+    await expect(
+      activeClient.run(
+        { command: ["echo", "hi"] },
+        30_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxConnectionError &&
+        err.kind === "socket" &&
+        err.cause instanceof ConnectError &&
+        err.cause.code === Code.Canceled,
+    );
+  });
+
+  it("classifies a clean stream close with no response as a connection error", async () => {
+    activeServer = await startH2Server(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () => create(ExecuteResponseSchema, {}),
+        });
+      },
+      { disruptFirstExecute: "stream" },
+    );
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await expect(
+      activeClient.run(
+        { command: ["echo", "hi"] },
+        2_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxConnectionError &&
+        err.kind === "socket" &&
+        err.cause instanceof ConnectError &&
+        err.cause.code === Code.Canceled,
+    );
+  });
+
+  it("classifies a server-side raw socket reset (ECONNRESET) as a connection error", async () => {
+    activeServer = await startH2Server(
+      (router) => {
+        router.service(ProcessService, {
+          execute: () => create(ExecuteResponseSchema, {}),
+        });
+      },
+      { disruptFirstExecute: "socket" },
+    );
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    await expect(
+      activeClient.run(
+        { command: ["echo", "hi"] },
+        30_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SandboxConnectionError &&
+        err.kind === "socket" &&
+        err.cause instanceof ConnectError &&
+        err.cause.code === Code.Aborted,
+    );
+  });
+
+  it("throws SandboxClosedError for any call after abort()", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: () =>
+          create(ExecuteResponseSchema, {
+            exitCode: 0,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+          }),
+      });
+    });
+    const client = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    client.abort();
+    await expect(
+      client.run(
+        { command: ["echo", "hi"] },
+        30_000,
+        new AbortController().signal,
+      ),
+    ).rejects.toBeInstanceOf(SandboxClosedError);
+  });
+});
+
+describe("ProcessClient authorization", () => {
+  const exitMsg = (exitCode: number) =>
+    create(StartResponseSchema, {
+      event: { case: "exit", value: { exitCode } },
+    });
+  const initMsg = () =>
+    create(StartResponseSchema, {
+      event: {
+        case: "init",
+        value: create(InitEventSchema, { processId: 7 }),
+      },
+    });
+
+  // Rejects like sandboxd's interceptors do, so a missing or wrong header
+  // reaches the client as a real UNAUTHENTICATED status.
+  function requireBearer(ctx: { requestHeader: Headers }, token: string) {
+    if (ctx.requestHeader.get("authorization") !== `Bearer ${token}`) {
+      throw new ConnectError(
+        "missing or invalid bearer token",
+        Code.Unauthenticated,
+      );
+    }
+  }
+
+  async function startAuthClient(authorization: string | undefined) {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          requireBearer(ctx, "tok-1");
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+        start: async function* (_req, ctx) {
+          requireBearer(ctx, "tok-1");
+          yield initMsg();
+          yield exitMsg(0);
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+      authorization,
+    });
+    return activeClient;
+  }
+
+  it("sends the Authorization header on unary and streaming calls", async () => {
+    const client = await startAuthClient("Bearer tok-1");
+    const signal = new AbortController().signal;
+
+    await expect(
+      client.run({ command: ["true"] }, 30_000, signal),
+    ).resolves.toMatchObject({ exitCode: 0 });
+
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      signal,
+    );
+    expect(started.pid).toBe(7);
+    expect(await started.events.next()).toEqual({
+      done: false,
+      value: { type: "exit", exitCode: 0 },
+    });
+  });
+
+  it("surfaces a missing or wrong token as an unauthenticated SandboxdRpcError", async () => {
+    for (const authorization of [undefined, "Bearer wrong-token"]) {
+      const client = await startAuthClient(authorization);
+      const signal = new AbortController().signal;
+
+      const unary = await client
+        .run({ command: ["true"] }, 30_000, signal)
+        .catch((e: unknown) => e);
+      expect(unary).toBeInstanceOf(SandboxdRpcError);
+      expect(unary).toMatchObject({ code: "unauthenticated" });
+
+      const stream = await client
+        .start({ command: ["true"] }, undefined, signal)
+        .catch((e: unknown) => e);
+      expect(stream).toBeInstanceOf(SandboxdRpcError);
+      expect(stream).toMatchObject({ code: "unauthenticated" });
+      expect(String((unary as Error).message)).not.toContain("wrong-token");
+
+      activeClient?.abort();
+      await activeServer?.close();
+    }
+  });
+});
+
+describe("ProcessClient routingMetadata", () => {
+  it("sends sandbox-router routing metadata on unary calls", async () => {
+    const seen: Array<Record<string, string | null>> = [];
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          seen.push({
+            id: ctx.requestHeader.get("x-sandbox-id"),
+            namespace: ctx.requestHeader.get("x-sandbox-namespace"),
+            port: ctx.requestHeader.get("x-sandbox-port"),
+            podIp: ctx.requestHeader.get("x-sandbox-pod-ip"),
+            token: ctx.requestHeader.get("x-sandboxd-token"),
+          });
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+      routingMetadata: {
+        "x-sandbox-id": "sb-kata",
+        "x-sandbox-namespace": "default",
+        "x-sandbox-port": "19090",
+        "x-sandbox-pod-ip": "10.244.0.7",
+        "x-sandboxd-token": "tok-sandboxd-9a2f",
+      },
+    });
+
+    await activeClient.run(
+      { command: ["true"] },
+      30_000,
+      new AbortController().signal,
+    );
+
+    expect(seen).toEqual([
+      {
+        id: "sb-kata",
+        namespace: "default",
+        port: "19090",
+        podIp: "10.244.0.7",
+        token: "tok-sandboxd-9a2f",
+      },
+    ]);
+  });
+
+  it("sends no routing metadata when none is configured", async () => {
+    const seen: Array<Record<string, string | null>> = [];
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {
+        execute: (_req, ctx) => {
+          seen.push({
+            id: ctx.requestHeader.get("x-sandbox-id"),
+          });
+          return create(ExecuteResponseSchema, { exitCode: 0 });
+        },
+      });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    await activeClient.run(
+      { command: ["true"] },
+      30_000,
+      new AbortController().signal,
+    );
+
+    expect(seen).toEqual([{ id: null }]);
+  });
+});
+
+describe("ProcessClient.start", () => {
+  const initMsg = () =>
+    create(StartResponseSchema, {
+      event: {
+        case: "init",
+        value: create(InitEventSchema, { processId: 42 }),
+      },
+    });
+  const exitMsg = (exitCode: number) =>
+    create(StartResponseSchema, {
+      event: { case: "exit", value: { exitCode } },
+    });
+
+  async function startClient(
+    start: (req: never, ctx: { signal: AbortSignal }) => AsyncIterable<never>,
+  ): Promise<ProcessClient> {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, { start: start as never });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    return activeClient;
+  }
+
+  it("returns the pid, then events ending with exit and a clean end", async () => {
+    const client = await startClient(async function* () {
+      yield initMsg() as never;
+      yield exitMsg(0) as never;
+    });
+
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      new AbortController().signal,
+    );
+
+    expect(started.pid).toBe(42);
+    expect(await started.events.next()).toEqual({
+      done: false,
+      value: { type: "exit", exitCode: 0 },
+    });
+    expect((await started.events.next()).done).toBe(true);
+  });
+
+  it("rejects a stream whose first message is not an InitEvent", async () => {
+    const client = await startClient(async function* () {
+      yield exitMsg(0) as never;
+    });
+
+    const err = await client
+      .start({ command: ["true"] }, undefined, new AbortController().signal)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(StreamLocalFailure);
+    expect((err as StreamLocalFailure).error).toMatchObject({
+      name: "SandboxConnectionError",
+      kind: "protocol",
+    });
+  });
+
+  it("rejects output that arrives after the ExitEvent", async () => {
+    const client = await startClient(async function* () {
+      yield initMsg() as never;
+      yield exitMsg(0) as never;
+      yield create(StartResponseSchema, {
+        event: { case: "stdout", value: new Uint8Array([1]) },
+      }) as never;
+    });
+    const started = await client.start(
+      { command: ["true"] },
+      undefined,
+      new AbortController().signal,
+    );
+
+    await started.events.next();
+
+    const err = await started.events.next().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StreamLocalFailure);
+    expect((err as StreamLocalFailure).error).toMatchObject({
+      kind: "protocol",
+    });
+  });
+
+  it("throws the signal's own reason when the caller aborts the stream", async () => {
+    const client = await startClient(async function* (_req, ctx) {
+      yield initMsg() as never;
+      await new Promise<void>((resolve) =>
+        ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller gave up");
+    const started = await client.start(
+      { command: ["sleep"] },
+      undefined,
+      controller.signal,
+    );
+    const next = started.events.next();
+
+    controller.abort(reason);
+
+    await expect(next).rejects.toBe(reason);
+  });
+
+  it("surfaces an application error before Init as SandboxdRpcError", async () => {
+    const client = await startClient(() => {
+      throw new ConnectError("nope", Code.PermissionDenied);
+    });
+
+    await expect(
+      client.start({ command: ["x"] }, undefined, new AbortController().signal),
+    ).rejects.toMatchObject({
+      name: "SandboxdRpcError",
+      code: "permission_denied",
+    });
+  });
+});
+
+describe("ProcessClient.watchDir", () => {
+  async function startClient(
+    watchDir: (
+      req: WatchDirRequest,
+      ctx: { signal: AbortSignal },
+    ) => AsyncIterable<never>,
+  ): Promise<ProcessClient> {
+    activeServer = await startH2Server((router) => {
+      router.service(FileWatcherService, { watchDir: watchDir as never });
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+    return activeClient;
+  }
+
+  it("sends path and recursive, names every event type, and ends with the stream", async () => {
+    let received: WatchDirRequest | undefined;
+    const client = await startClient(async function* (req) {
+      received = req;
+      for (const type of [
+        FileEventType.CREATE,
+        FileEventType.WRITE,
+        FileEventType.REMOVE,
+        FileEventType.RENAME,
+        FileEventType.CHMOD,
+      ]) {
+        yield create(FileEventSchema, { type, path: "src/a.txt" }) as never;
+      }
+      yield create(FileEventSchema, {
+        type: FileEventType.ERROR,
+        error: "watched directory was removed",
+      }) as never;
+    });
+
+    const events = await client.watchDir(
+      "src",
+      true,
+      new AbortController().signal,
+    );
+    const seen = [];
+    while (true) {
+      const step = await events.next();
+      if (step.done) break;
+      seen.push(step.value);
+    }
+
+    expect(received).toMatchObject({ path: "src", recursive: true });
+    expect(seen.map((e) => e.type)).toEqual([
+      "create",
+      "write",
+      "remove",
+      "rename",
+      "chmod",
+      "error",
+    ]);
+    expect(seen[0]).toEqual({ type: "create", path: "src/a.txt", error: "" });
+    expect(seen[5]).toEqual({
+      type: "error",
+      path: "",
+      error: "watched directory was removed",
+    });
+  });
+
+  it("reports an event type it does not know as unknown(<number>)", async () => {
+    const client = await startClient(async function* () {
+      yield create(FileEventSchema, {
+        type: 99 as FileEventType,
+        path: "a",
+      }) as never;
+    });
+
+    const events = await client.watchDir(
+      ".",
+      false,
+      new AbortController().signal,
+    );
+
+    expect((await events.next()).value).toEqual({
+      type: "unknown(99)",
+      path: "a",
+      error: "",
+    });
+  });
+
+  it("reports a runtime without the watcher service as unimplemented", async () => {
+    activeServer = await startH2Server((router) => {
+      router.service(ProcessService, {});
+    });
+    activeClient = new ProcessClient({
+      grpcBaseUrl: activeServer.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    const events = await activeClient.watchDir(
+      ".",
+      false,
+      new AbortController().signal,
+    );
+
+    const err = await events.next().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SandboxdRpcError);
+    expect(err).toMatchObject({ code: "unimplemented" });
+  });
+
+  it("reports an unreachable sandboxd before returning the iterator", async () => {
+    const server = await startH2Server(() => {});
+    await server.close();
+    activeClient = new ProcessClient({
+      grpcBaseUrl: server.baseUrl,
+      maxCommandOutputSize: 1024 * 1024,
+    });
+
+    const err = await activeClient
+      .watchDir(".", false, new AbortController().signal)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SandboxConnectionError);
+    expect(err).toMatchObject({ kind: "unavailable" });
+  });
+
+  it("stops waiting for a stalled connection when the signal aborts", async () => {
+    const client = await startClient(async function* () {});
+    const connect = vi
+      .spyOn(Http2SessionManager.prototype, "connect")
+      .mockReturnValue(new Promise(() => {}));
+    const controller = new AbortController();
+    const reason = new Error("startup budget spent");
+
+    const opening = client.watchDir(".", false, controller.signal);
+    await vi.waitFor(() => expect(connect).toHaveBeenCalled());
+    controller.abort(reason);
+
+    await expect(opening).rejects.toBe(reason);
+    connect.mockRestore();
+  });
+
+  it("throws the signal's own reason when the caller aborts the stream", async () => {
+    const client = await startClient(async function* (_req, ctx) {
+      yield create(FileEventSchema, {
+        type: FileEventType.CREATE,
+        path: "a",
+      }) as never;
+      await new Promise<void>((resolve) =>
+        ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller gave up");
+    const events = await client.watchDir(".", false, controller.signal);
+    await events.next();
+    const next = events.next();
+
+    controller.abort(reason);
+
+    await expect(next).rejects.toBe(reason);
+  });
+});

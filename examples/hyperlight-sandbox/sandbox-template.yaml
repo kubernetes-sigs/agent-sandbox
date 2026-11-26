@@ -1,0 +1,170 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A SandboxTemplate whose pods run the sandbox runtime in a Hyperlight micro-VM,
+# and a SandboxWarmPool that keeps two of them ready to claim.
+#
+# The pods are ordinary pods on the node's container runtime, with no
+# RuntimeClass and no privilege. The container is hluk, the micro-VM monitor,
+# and the guest it boots or resumes. All it needs is /dev/kvm, which the
+# Hyperlight device plugin hands out as the hyperlight.dev/hypervisor
+# resource. See the README.
+#
+# ${IMAGE} is either image the README builds. The rootfs image boots the guest
+# in seconds. The snapshot image resumes a saved guest with its imports done,
+# in tens of milliseconds. Tag it with the hluk release it was built for. A
+# snapshot only loads under the hluk that saved it, and a new tag per release
+# keeps nodes from running a cached image of the previous one. Apply it as:
+#   export IMAGE=<registry>/python-runtime-sandbox-hyperlight:hluk-v0.20.1-snapshot
+#   envsubst < sandbox-template.yaml | kubectl apply -f -
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: hyperlight-runtime-template
+  namespace: default
+spec:
+  # The controller's default policy admits only the sandbox-router. This one
+  # also admits pods labelled app.kubernetes.io/name=hyperlight-client in the
+  # same namespace on the runtime's port, for the README's curl. Its egress is
+  # the default's, public addresses only, plus the cluster DNS. The guest gets
+  # the pod's resolver, and a resolver it cannot reach makes every lookup wait
+  # out its timeouts rather than fail.
+  networkPolicy:
+    ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: agent-sandbox-system
+        podSelector:
+          matchLabels:
+            app: sandbox-router
+    - from:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: hyperlight-client
+      ports:
+      - protocol: TCP
+        port: 8888
+    egress:
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+      ports:
+      - protocol: UDP
+        port: 53
+      - protocol: TCP
+        port: 53
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except:
+          - 10.0.0.0/8
+          - 172.16.0.0/12
+          - 192.168.0.0/16
+          - 169.254.0.0/16
+      - ipBlock:
+          cidr: ::/0
+          except:
+          - fc00::/7
+          - fe80::/10
+  podTemplate:
+    metadata:
+      labels:
+        sandbox: hyperlight
+    spec:
+      # Where the device plugin found KVM. The plugin labels nothing itself.
+      # You label the node when you install the plugin.
+      nodeSelector:
+        hyperlight.dev/hypervisor: kvm
+      automountServiceAccountToken: false
+      # The user the device plugin creates /dev/kvm for, its DEVICE_UID and
+      # DEVICE_GID, 65534 by default. The image runs as that user too.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: python-runtime
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8888
+          name: http
+        # Ready once the runtime in the guest answers, not when hluk starts.
+        # Booting the rootfs image takes seconds.
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8888
+          periodSeconds: 1
+        # A guest that has wedged answers nothing, not even an error, so the
+        # kubelet restarts the container after a minute of silence. That is a
+        # fresh boot or restore, with the workspace gone. The rootfs image takes
+        # about ten seconds to boot, hence the delay.
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8888
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 6
+        # hluk opens /dev/kvm and its own files, and nothing else. The guest's
+        # files live in its memory, so the container's filesystem can be
+        # read-only and every capability dropped.
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "2Gi"
+          limits:
+            cpu: "1"
+            # The memory limit sizes the guest. The rootfs image runs hluk with
+            # --scratch-mb max, so the guest gets the limit less the 64 MiB hluk
+            # keeps for itself, and the two never disagree. The agent rootfs is
+            # unpacked into that memory, so keep the limit at 1600Mi or above.
+            # The snapshot image keeps the 1536 MiB the snapshot was saved
+            # with, so the limit has to hold that plus hluk's 64 MiB. hluk says
+            # so on stderr when it does not.
+            memory: "2Gi"
+            # One allocation of the shared /dev/kvm, from the device plugin.
+            hyperlight.dev/hypervisor: "1"
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: hyperlight-runtime-warmpool
+  namespace: default
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: hyperlight-runtime-template
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: hyperlight-claim
+  namespace: default
+spec:
+  warmPoolRef:
+    name: hyperlight-runtime-warmpool

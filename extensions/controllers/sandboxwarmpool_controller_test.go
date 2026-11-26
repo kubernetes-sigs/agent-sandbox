@@ -17,9 +17,11 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,11 +35,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // Create a test scheme with extensions types registered.
@@ -294,6 +299,234 @@ func TestReconcilePool(t *testing.T) {
 	}
 }
 
+func TestReconcilePool_MissingTemplate(t *testing.T) {
+	poolName := "testing-pool"
+	poolNamespace := "default"
+	templateName := "does-not-exist"
+	replicas := int32(1)
+	poolUID := types.UID("warmpool-uid-1570")
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	newPool := func() *extensionsv1beta1.SandboxWarmPool {
+		return &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: poolNamespace,
+				UID:       poolUID,
+			},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas: &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{
+					Name: templateName,
+				},
+			},
+		}
+	}
+
+	t.Run("missing template emits one warning and creates nothing", func(t *testing.T) {
+		warmPool := newPool()
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Equal(t, missingTemplateRequeueDelay, requeue)
+		require.Equal(t, 0, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, poolUID))
+		require.Equal(t, int32(0), warmPool.Status.Replicas)
+		require.Equal(t, int32(0), warmPool.Status.ReadyReplicas)
+
+		select {
+		case e := <-recorder.Events:
+			require.Contains(t, e, reasonSandboxTemplateError)
+			require.Contains(t, e, corev1.EventTypeWarning)
+			require.Contains(t, e, `SandboxTemplate "does-not-exist" not found`)
+		default:
+			t.Fatal("expected a SandboxTemplateError event for a missing template")
+		}
+
+		requeue, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Equal(t, missingTemplateRequeueDelay, requeue)
+		select {
+		case e := <-recorder.Events:
+			t.Fatalf("unexpected duplicate event while the template is still missing: %s", e)
+		default:
+		}
+	})
+
+	t.Run("template appearing resumes progress and creates sandboxes", func(t *testing.T) {
+		warmPool := newPool()
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		_, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		select {
+		case e := <-recorder.Events:
+			require.Contains(t, e, reasonSandboxTemplateError)
+		default:
+			t.Fatal("expected a SandboxTemplateError event before the template appears")
+		}
+
+		template := createTemplate(poolNamespace)
+		template.Name = templateName
+		require.NoError(t, r.Create(ctx, template))
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Zero(t, requeue)
+		require.Equal(t, int(replicas), countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, poolUID))
+
+		select {
+		case e := <-recorder.Events:
+			require.Contains(t, e, reasonWarmPoolProgressing)
+			require.Contains(t, e, corev1.EventTypeNormal)
+		default:
+			t.Fatal("expected a WarmPoolProgressing event once the template appears")
+		}
+	})
+
+	t.Run("full pool does not warn or requeue for a missing template", func(t *testing.T) {
+		warmPool := newPool()
+		existing := createPoolSandbox(poolName, poolNamespace, poolNameHash, nil, "-full")
+		existing.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+			Name:       poolName,
+			UID:        poolUID,
+			Controller: new(true),
+		}}
+		existing.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionTrue,
+		}}
+
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme, existing),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Zero(t, requeue, "a full pool must not requeue for a missing template")
+		require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, poolUID))
+		require.Equal(t, int32(1), warmPool.Status.Replicas)
+
+		select {
+		case e := <-recorder.Events:
+			t.Fatalf("a full pool must not emit an event for a missing template: %s", e)
+		default:
+		}
+	})
+
+	// A short pool (create deficit) whose member is unschedulable past grace,
+	// and whose template is missing, has two independent blockers. Both
+	// warnings must fire together. Restoring the template clears only the
+	// template reason: the unschedulable hold stays, so nothing is emitted
+	// and the held sandbox is not replaced.
+	t.Run("short pool with unschedulable member and missing template emits both warnings", func(t *testing.T) {
+		short := int32(2)
+		warmPool := newPool()
+		warmPool.Spec.Replicas = &short
+
+		base := time.Now().Truncate(time.Second)
+		held := createPoolSandbox(poolName, poolNamespace, poolNameHash, nil, "-held")
+		held.UID = "uid-held"
+		held.CreationTimestamp = metav1.Time{Time: base.Add(-10 * time.Minute)}
+		held.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionFalse,
+				Reason:             corev1.PodReasonUnschedulable,
+				LastTransitionTime: metav1.NewTime(base),
+			},
+		}
+		held.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: extensionsv1beta1.GroupVersion.String(),
+			Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+			Name:       poolName,
+			UID:        poolUID,
+			Controller: new(true),
+		}}
+
+		recorder := events.NewFakeRecorder(16)
+		r := SandboxWarmPoolReconciler{
+			Client:       newFakeClient(scheme, held),
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+			now:          func() time.Time { return base },
+		}
+		ctx := context.Background()
+
+		requeue, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Equal(t, min(missingTemplateRequeueDelay, DefaultUnschedulableRecheckInterval), requeue)
+		require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, poolNamespace, poolNameHash, poolUID),
+			"the unschedulable member is held and the missing template blocks the deficit create")
+
+		seen := map[string]bool{}
+		for range 2 {
+			select {
+			case e := <-recorder.Events:
+				require.Contains(t, e, corev1.EventTypeWarning)
+				switch {
+				case strings.Contains(e, reasonSandboxTemplateError):
+					seen[reasonSandboxTemplateError] = true
+				case strings.Contains(e, reasonWarmPoolNotProgressing):
+					seen[reasonWarmPoolNotProgressing] = true
+				default:
+					t.Fatalf("unexpected event: %s", e)
+				}
+			default:
+				t.Fatal("expected SandboxTemplateError and WarmPoolNotProgressing warnings")
+			}
+		}
+		require.True(t, seen[reasonSandboxTemplateError], "missing template must warn while the pool is short")
+		require.True(t, seen[reasonWarmPoolNotProgressing], "unschedulable member past grace must warn alongside the missing template")
+		select {
+		case e := <-recorder.Events:
+			t.Fatalf("unexpected extra event: %s", e)
+		default:
+		}
+
+		template := createTemplate(poolNamespace)
+		template.Name = templateName
+		require.NoError(t, r.Create(ctx, template))
+
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: held.Name}, &sandboxv1beta1.Sandbox{}),
+			"restoring the template must leave the unschedulable hold in place")
+		select {
+		case e := <-recorder.Events:
+			t.Fatalf("restoring the template must emit nothing while the unschedulable hold remains: %s", e)
+		default:
+		}
+	})
+}
+
 func TestReconcilePoolControllerRef(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"
@@ -429,6 +662,52 @@ func TestReconcilePoolControllerRef(t *testing.T) {
 			require.Equal(t, tc.expectedReplicas, warmPool.Status.Replicas, "status replicas mismatch")
 		})
 	}
+}
+
+// Several pools may share one SandboxTemplate (for example a small and a large
+// pool). Each must size, scale and clean up on its own.
+func TestReconcilePoolsSharingTemplate(t *testing.T) {
+	namespace := "default"
+	template := createTemplate(namespace)
+	scheme := newTestScheme()
+
+	poolA, poolB := newTestPool("pool-a", template.Name, 3), newTestPool("pool-b", template.Name, 2)
+	hashA, hashB := sandboxcontrollers.NameHash(poolA.Name), sandboxcontrollers.NameHash(poolB.Name)
+
+	r := SandboxWarmPoolReconciler{
+		Client:       newFakeClient(scheme, template),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	ctx := context.Background()
+	names := func(poolNameHash string) []string {
+		return poolSandboxNames(ctx, t, r.Client, namespace, poolNameHash)
+	}
+
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
+	require.Equal(t, 3, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashA, poolA.UID))
+	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashB, poolB.UID))
+	namesA, namesB := names(hashA), names(hashB)
+
+	// Reconciling an already converged pool leaves both pools untouched.
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
+	require.ElementsMatch(t, namesA, names(hashA))
+	require.ElementsMatch(t, namesB, names(hashB))
+
+	// Scaling one pool down does not touch the other.
+	poolA.Spec.Replicas = new(int32(1))
+	settlePool(ctx, t, &r, poolA)
+	require.Equal(t, 1, countPoolOwnedSandboxes(ctx, t, r.Client, namespace, hashA, poolA.UID))
+	require.ElementsMatch(t, namesB, names(hashB))
+	namesA = names(hashA)
+
+	// Emptying one pool does not touch the other either.
+	poolB.Spec.Replicas = new(int32(0))
+	settlePool(ctx, t, &r, poolB)
+	require.Empty(t, names(hashB))
+	require.ElementsMatch(t, namesA, names(hashA))
 }
 
 func TestPoolLabelValueInIntegration(t *testing.T) {
@@ -1175,6 +1454,61 @@ func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {
 	}
 }
 
+// Updating one template must roll out only the pools that reference it.
+// TestFindWarmPoolsForTemplate covers which pools the update enqueues.
+func TestReconcilePool_TemplateUpdateDoesNotAffectOtherPools(t *testing.T) {
+	namespace := "default"
+	scheme := newTestScheme()
+
+	templateA, templateB := createTemplate(namespace), createTemplate(namespace)
+	templateA.Name, templateB.Name = "template-a", "template-b"
+	poolA := newTestPool("pool-a", templateA.Name, 2)
+	poolB := newTestPool("pool-b", templateB.Name, 2)
+	for _, pool := range []*extensionsv1beta1.SandboxWarmPool{poolA, poolB} {
+		pool.Spec.UpdateStrategy = &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+			Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+		}
+	}
+	hashA, hashB := sandboxcontrollers.NameHash(poolA.Name), sandboxcontrollers.NameHash(poolB.Name)
+
+	r := SandboxWarmPoolReconciler{
+		Client:       newFakeClient(scheme, templateA, templateB),
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	ctx := context.Background()
+	names := func(poolNameHash string) []string {
+		return poolSandboxNames(ctx, t, r.Client, namespace, poolNameHash)
+	}
+
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
+	namesA, namesB := names(hashA), names(hashB)
+	require.Len(t, namesA, 2)
+	require.Len(t, namesB, 2)
+
+	updated := &extensionsv1beta1.SandboxTemplate{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(templateA), updated))
+	updated.Spec.PodTemplate.Spec.Containers[0].Image = "image-v2"
+	require.NoError(t, r.Update(ctx, updated))
+
+	settlePool(ctx, t, &r, poolA)
+	settlePool(ctx, t, &r, poolB)
+
+	// Pool A's sandboxes are all replacements that run the new image.
+	newNamesA := names(hashA)
+	require.Len(t, newNamesA, 2)
+	for _, name := range newNamesA {
+		require.NotContains(t, namesA, name, "pool A sandbox should have been recreated")
+		sb := &sandboxv1beta1.Sandbox{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, sb))
+		require.Equal(t, "image-v2", sb.Spec.PodTemplate.Spec.Containers[0].Image)
+	}
+
+	// Pool B keeps its original sandboxes.
+	require.ElementsMatch(t, namesB, names(hashB))
+}
+
 func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 	poolName := "test-pool"
 	poolNamespace := "default"
@@ -1285,6 +1619,7 @@ func TestReconcilePool_TemplateRefUpdate_SameSpec(t *testing.T) {
 		// Sandboxes should be recreated (new names) because TemplateRef changed
 		require.False(t, initialSandboxNames[sb.Name], "Sandbox should have been recreated with new name")
 		require.Equal(t, sandboxcontrollers.NameHash(templateName2), sb.Labels[sandboxTemplateRefHash], "Sandbox should have updated template ref hash label")
+		require.Equal(t, templateName2, sb.Annotations[sandboxv1beta1.SandboxTemplateRefAnnotation], "Sandbox should have updated template ref annotation")
 		// The pod spec is identical, so the image remains image-v1
 		require.Equal(t, "image-v1", sb.Spec.PodTemplate.Spec.Containers[0].Image, "Sandbox should retain original image since spec is identical")
 	}
@@ -2279,6 +2614,40 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 			},
 			expectedResult: false,
 		},
+		{
+			name: "Failed Pod policy drift should NOT match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRecreate,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
+			},
+			expectedResult: false,
+		},
+		{
+			name: "Failed Pod policy Retain and omitted policy should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+			},
+			expectedResult: true,
+		},
+		{
+			name: "Failed Pod policy omitted policy and Retain should match",
+			templateSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: basePodTemplate,
+			},
+			actualSandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate:     basePodTemplate,
+				FailedPodPolicy: sandboxv1beta1.FailedPodPolicyRetain,
+			},
+			expectedResult: true,
+		},
 	}
 
 	for _, tt := range testCases {
@@ -2300,7 +2669,7 @@ func TestCompareSandboxBlueprint(t *testing.T) {
 // comparison logic is not tracked for drift, so a warm sandbox will not be detected
 // as stale when that field changes.
 func TestSandboxBlueprintFieldsAreCompared(t *testing.T) {
-	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service"}
+	expectedFields := []string{"PodTemplate", "VolumeClaimTemplates", "Service", "FailedPodPolicy"}
 
 	var actualFields []string
 	blueprintType := reflect.TypeFor[sandboxv1beta1.SandboxBlueprint]()
@@ -2350,6 +2719,44 @@ func countPoolOwnedSandboxes(ctx context.Context, t *testing.T, c client.Client,
 		}
 	}
 	return count
+}
+
+// poolSandboxNames returns the names of the sandboxes that carry the pool label.
+// Tests compare names rather than counts so that a pool deleting and recreating
+// another pool's sandboxes cannot go unnoticed.
+func poolSandboxNames(ctx context.Context, t *testing.T, c client.Client, namespace, poolNameHash string) []string {
+	t.Helper()
+	list := &sandboxv1beta1.SandboxList{}
+	require.NoError(t, c.List(ctx, list, &client.ListOptions{Namespace: namespace}))
+	var names []string
+	for _, sb := range list.Items {
+		if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
+			names = append(names, sb.Name)
+		}
+	}
+	return names
+}
+
+// newTestPool returns a pool that references the named template.
+func newTestPool(name, templateName string, replicas int32) *extensionsv1beta1.SandboxWarmPool {
+	return &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID(name + "-uid")},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+		},
+	}
+}
+
+// settlePool reconciles the pool twice so it converges. Under Recreate the
+// first pass deletes stale sandboxes and the second creates the replacements.
+func settlePool(ctx context.Context, t *testing.T, r *SandboxWarmPoolReconciler, pool *extensionsv1beta1.SandboxWarmPool) {
+	t.Helper()
+	for range 2 {
+		_, err := r.reconcilePool(ctx, pool)
+		require.NoError(t, err)
+		syncPoolExpectations(r, pool)
+	}
 }
 
 func newReplenishTestPool(replicas int32) *extensionsv1beta1.SandboxWarmPool {
@@ -2961,5 +3368,164 @@ func TestReconcilePoolMaxRefillRate(t *testing.T) {
 		require.NoError(t, err)
 		require.Zero(t, requeue, "replacement fits in the initial bucket")
 		require.Equal(t, 2, countOwned(t, r, warmPool))
+	})
+}
+
+func TestReconcileFlushesStatusOnReconcilePoolError(t *testing.T) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	const templateName = "test-template"
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	newPoolAndSandboxes := func(replicas int32) (*extensionsv1beta1.SandboxWarmPool, *extensionsv1beta1.SandboxTemplate, []*sandboxv1beta1.Sandbox) {
+		template := createTemplate(poolNamespace)
+		warmPool := &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       poolName,
+				Namespace:  poolNamespace,
+				UID:        "warmpool-uid-1850",
+				Generation: 2,
+			},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas:    &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: templateName},
+			},
+		}
+		makeReady := func(suffix string) *sandboxv1beta1.Sandbox {
+			sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, suffix)
+			sb.UID = types.UID("uid" + suffix)
+			sb.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+				Name:       poolName,
+				UID:        warmPool.UID,
+				Controller: new(true),
+			}}
+			sb.Status.Conditions = []metav1.Condition{{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			}}
+			return sb
+		}
+		return warmPool, template, []*sandboxv1beta1.Sandbox{makeReady("-aaa"), makeReady("-bbb")}
+	}
+
+	t.Run("flushes status.replicas and status.readyReplicas when slowStartBatch create fails mid-batch", func(t *testing.T) {
+		warmPool, template, existing := newPoolAndSandboxes(4)
+		createErr := errors.New("apf throttled: 429 Too Many Requests")
+		var creates atomic.Int32
+
+		baseClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+			WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+			WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+			WithRuntimeObjects(warmPool, template, existing[0], existing[1]).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+						if creates.Add(1) == 2 {
+							return createErr
+						}
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}).
+			Build()
+
+		r := &SandboxWarmPoolReconciler{
+			Client:       baseClient,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		}
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: poolNamespace, Name: poolName}})
+		require.ErrorIs(t, err, createErr)
+
+		var updated extensionsv1beta1.SandboxWarmPool
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: poolName}, &updated))
+		require.Equal(t, int32(2), updated.Status.Replicas, "observed active replicas must be persisted despite create batch error")
+		require.Equal(t, int32(2), updated.Status.ReadyReplicas, "observed ready replicas must be persisted despite create batch error")
+		require.Equal(t, int64(2), updated.Status.ObservedGeneration)
+		require.Equal(t, warmPoolSandboxLabel+"="+poolNameHash, updated.Status.Selector)
+	})
+
+	t.Run("joins reconcilePool and updateStatus errors when both fail", func(t *testing.T) {
+		warmPool, template, existing := newPoolAndSandboxes(4)
+		createErr := errors.New("apf throttled: 429 Too Many Requests")
+		statusErr := errors.New("status patch failed")
+
+		baseClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+			WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+			WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+			WithRuntimeObjects(warmPool, template, existing[0], existing[1]).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+						return createErr
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+				SubResourcePatch: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ client.Patch, _ ...client.SubResourcePatchOption) error {
+					return statusErr
+				},
+			}).
+			Build()
+
+		r := &SandboxWarmPoolReconciler{
+			Client:       baseClient,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		}
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: poolNamespace, Name: poolName}})
+		require.ErrorIs(t, err, createErr)
+		require.ErrorIs(t, err, statusErr)
+	})
+
+	t.Run("does not overwrite existing status when initial Sandbox list fails", func(t *testing.T) {
+		warmPool, template, existing := newPoolAndSandboxes(2)
+		warmPool.Status = extensionsv1beta1.SandboxWarmPoolStatus{
+			Replicas:           2,
+			ReadyReplicas:      2,
+			ObservedGeneration: 2,
+			Selector:           warmPoolSandboxLabel + "=" + poolNameHash,
+		}
+		listErr := errors.New("informer list failed")
+		var statusPatches atomic.Int32
+
+		baseClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+			WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+			WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+			WithRuntimeObjects(warmPool, template, existing[0], existing[1]).
+			WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*sandboxv1beta1.SandboxList); ok {
+						return listErr
+					}
+					return c.List(ctx, list, opts...)
+				},
+				SubResourcePatch: func(ctx context.Context, c client.Client, _ string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					statusPatches.Add(1)
+					return c.Status().Patch(ctx, obj, patch, opts...)
+				},
+			}).
+			Build()
+
+		r := &SandboxWarmPoolReconciler{
+			Client:       baseClient,
+			Scheme:       scheme,
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		}
+
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: poolNamespace, Name: poolName}})
+		require.ErrorIs(t, err, listErr)
+		require.Zero(t, statusPatches.Load(), "updateStatus must be a no-op when reconcilePool fails before mutating status")
 	})
 }

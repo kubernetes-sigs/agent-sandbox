@@ -33,11 +33,12 @@ import (
 const _ = grpc.SupportPackageIsVersion7
 
 const (
-	ProcessService_Start_FullMethodName      = "/process.v1.ProcessService/Start"
-	ProcessService_Execute_FullMethodName    = "/process.v1.ProcessService/Execute"
-	ProcessService_WriteStdin_FullMethodName = "/process.v1.ProcessService/WriteStdin"
-	ProcessService_SendSignal_FullMethodName = "/process.v1.ProcessService/SendSignal"
-	ProcessService_ResizeTTY_FullMethodName  = "/process.v1.ProcessService/ResizeTTY"
+	ProcessService_Start_FullMethodName             = "/process.v1.ProcessService/Start"
+	ProcessService_Execute_FullMethodName           = "/process.v1.ProcessService/Execute"
+	ProcessService_ExecuteWithLimits_FullMethodName = "/process.v1.ProcessService/ExecuteWithLimits"
+	ProcessService_WriteStdin_FullMethodName        = "/process.v1.ProcessService/WriteStdin"
+	ProcessService_SendSignal_FullMethodName        = "/process.v1.ProcessService/SendSignal"
+	ProcessService_ResizeTTY_FullMethodName         = "/process.v1.ProcessService/ResizeTTY"
 )
 
 // ProcessServiceClient is the client API for ProcessService service.
@@ -51,6 +52,9 @@ type ProcessServiceClient interface {
 	// Execute runs a short-lived command synchronously to completion and returns stdout,
 	// stderr, and the exit code atomically. Use when real-time streaming is not required.
 	Execute(ctx context.Context, in *ExecuteRequest, opts ...grpc.CallOption) (*ExecuteResponse, error)
+	// ExecuteWithLimits captures bounded output and reports execution outcomes.
+	// Older runtimes reject this method instead of ignoring requested limits.
+	ExecuteWithLimits(ctx context.Context, in *ExecuteWithLimitsRequest, opts ...grpc.CallOption) (*ExecuteWithLimitsResponse, error)
 	// WriteStdin sends standard input bytes or EOF to an active running process.
 	// Note: Any stdout/stderr produced by the process in response to this input
 	// flows continuously through the active Start stream rather than WriteStdinResponse.
@@ -112,6 +116,15 @@ func (c *processServiceClient) Execute(ctx context.Context, in *ExecuteRequest, 
 	return out, nil
 }
 
+func (c *processServiceClient) ExecuteWithLimits(ctx context.Context, in *ExecuteWithLimitsRequest, opts ...grpc.CallOption) (*ExecuteWithLimitsResponse, error) {
+	out := new(ExecuteWithLimitsResponse)
+	err := c.cc.Invoke(ctx, ProcessService_ExecuteWithLimits_FullMethodName, in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *processServiceClient) WriteStdin(ctx context.Context, in *WriteStdinRequest, opts ...grpc.CallOption) (*WriteStdinResponse, error) {
 	out := new(WriteStdinResponse)
 	err := c.cc.Invoke(ctx, ProcessService_WriteStdin_FullMethodName, in, out, opts...)
@@ -150,6 +163,9 @@ type ProcessServiceServer interface {
 	// Execute runs a short-lived command synchronously to completion and returns stdout,
 	// stderr, and the exit code atomically. Use when real-time streaming is not required.
 	Execute(context.Context, *ExecuteRequest) (*ExecuteResponse, error)
+	// ExecuteWithLimits captures bounded output and reports execution outcomes.
+	// Older runtimes reject this method instead of ignoring requested limits.
+	ExecuteWithLimits(context.Context, *ExecuteWithLimitsRequest) (*ExecuteWithLimitsResponse, error)
 	// WriteStdin sends standard input bytes or EOF to an active running process.
 	// Note: Any stdout/stderr produced by the process in response to this input
 	// flows continuously through the active Start stream rather than WriteStdinResponse.
@@ -172,6 +188,9 @@ func (UnimplementedProcessServiceServer) Start(*StartRequest, ProcessService_Sta
 }
 func (UnimplementedProcessServiceServer) Execute(context.Context, *ExecuteRequest) (*ExecuteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Execute not implemented")
+}
+func (UnimplementedProcessServiceServer) ExecuteWithLimits(context.Context, *ExecuteWithLimitsRequest) (*ExecuteWithLimitsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExecuteWithLimits not implemented")
 }
 func (UnimplementedProcessServiceServer) WriteStdin(context.Context, *WriteStdinRequest) (*WriteStdinResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method WriteStdin not implemented")
@@ -230,6 +249,24 @@ func _ProcessService_Execute_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ProcessServiceServer).Execute(ctx, req.(*ExecuteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ProcessService_ExecuteWithLimits_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecuteWithLimitsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProcessServiceServer).ExecuteWithLimits(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ProcessService_ExecuteWithLimits_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProcessServiceServer).ExecuteWithLimits(ctx, req.(*ExecuteWithLimitsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -298,6 +335,10 @@ var ProcessService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Execute",
 			Handler:    _ProcessService_Execute_Handler,
+		},
+		{
+			MethodName: "ExecuteWithLimits",
+			Handler:    _ProcessService_ExecuteWithLimits_Handler,
 		},
 		{
 			MethodName: "WriteStdin",

@@ -15,6 +15,8 @@
 
 import re
 
+from .models import AdditionalPodMetadata
+
 
 # Kubernetes label validation: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
 _LABEL_NAME_RE = re.compile(r"^[A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9]$|^[A-Za-z0-9]$")
@@ -23,20 +25,20 @@ LABEL_NAME_MAX_LENGTH = 63
 LABEL_PREFIX_MAX_LENGTH = 253
 
 
-def validate_label_name(name: str, context: str):
+def validate_label_name(name: str, context: str) -> None:
     """Validates a label name segment (key or value) against k8s constraints."""
     if len(name) > LABEL_NAME_MAX_LENGTH:
         raise ValueError(
             f"Label {context} '{name}' exceeds max length of {LABEL_NAME_MAX_LENGTH} characters."
         )
-    if not _LABEL_NAME_RE.match(name):
+    if not _LABEL_NAME_RE.fullmatch(name):
         raise ValueError(
             f"Label {context} '{name}' contains invalid characters. "
             f"Must start and end with alphanumeric, and contain only [-A-Za-z0-9_.]."
         )
 
 
-def validate_labels(labels: dict[str, str]):
+def validate_labels(labels: dict[str, str]) -> None:
     """Validates label keys and values against Kubernetes constraints."""
     for key, value in labels.items():
         if not key:
@@ -49,7 +51,7 @@ def validate_labels(labels: dict[str, str]):
                 raise ValueError(
                     f"Label key prefix '{prefix}' is invalid or exceeds {LABEL_PREFIX_MAX_LENGTH} characters."
                 )
-            if not _LABEL_PREFIX_RE.match(prefix):
+            if not _LABEL_PREFIX_RE.fullmatch(prefix):
                 raise ValueError(
                     f"Label key prefix '{prefix}' must be a valid DNS subdomain."
                 )
@@ -67,7 +69,7 @@ def validate_labels(labels: dict[str, str]):
 def build_pod_metadata(
     pod_labels: dict[str, str] | None,
     pod_annotations: dict[str, str] | None,
-) -> dict | None:
+) -> AdditionalPodMetadata | None:
     """Assembles the ``spec.additionalPodMetadata`` payload.
 
     ``pod_labels`` are validated with the same RFC-1123 rules as claim
@@ -81,9 +83,10 @@ def build_pod_metadata(
     if pod_labels:
         validate_labels(pod_labels)
 
-    pod_metadata: dict = {}
-    if pod_labels:
-        pod_metadata["labels"] = pod_labels
-    if pod_annotations:
-        pod_metadata["annotations"] = pod_annotations
-    return pod_metadata or None
+    if not pod_labels and not pod_annotations:
+        return None
+
+    return AdditionalPodMetadata(
+        labels=pod_labels or None,
+        annotations=pod_annotations or None,
+    )

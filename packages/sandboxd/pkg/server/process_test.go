@@ -22,6 +22,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,10 +48,15 @@ import (
 func newProcessClient(t *testing.T, rootDir string) processv1.ProcessServiceClient {
 	t.Helper()
 
-	lis := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
 	processv1.RegisterProcessServiceServer(grpcServer,
 		NewProcessServer(rootDir, processmanager.NewProcessRegistry(), 0, logr.Discard()))
+	return connectProcessClient(t, grpcServer)
+}
+
+func connectProcessClient(t *testing.T, grpcServer *grpc.Server) processv1.ProcessServiceClient {
+	t.Helper()
+	lis := bufconn.Listen(1024 * 1024)
 	go func() { _ = grpcServer.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough:///bufnet",
@@ -197,6 +204,16 @@ func TestExecuteExitCode(t *testing.T) {
 	require.Equal(t, int32(3), resp.GetExitCode())
 }
 
+func TestExecuteSignalExitCode(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+
+	resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", "kill -9 $$"}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(128+9), resp.GetExitCode())
+}
+
 func TestExecuteEnvAndCwd(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
@@ -240,6 +257,42 @@ func TestExecuteCwdEscapeDenied(t *testing.T) {
 	require.Equal(t, codes.PermissionDenied, status.Code(err))
 }
 
+func TestExecuteCwdUnderRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	cwd := "f.txt/child"
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"true"}, Cwd: &cwd},
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), err)
+}
+
+func TestExecuteCwdIsRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	cwd := "f.txt"
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"true"}, Cwd: &cwd},
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err), err)
+}
+
+func TestExecuteCommandPathUnderRegularFile(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	client := newProcessClient(t, root)
+
+	_, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"f.txt/prog"}},
+	})
+	require.Equal(t, codes.NotFound, status.Code(err), err)
+	require.ErrorContains(t, err, "not a directory")
+}
+
 func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	client := newProcessClient(t, t.TempDir())
 
@@ -255,6 +308,43 @@ func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	require.Equal(t, "out\n", res.stdout.String())
 	require.Equal(t, "err\n", res.stderr.String())
 	require.Equal(t, int32(7), res.exitCode)
+}
+
+func TestStartClosesOutputPipes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux /proc file descriptors")
+	}
+	// Disable GC so finalizers can't close the leaked readers and hide the leak.
+	previousGC := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(previousGC) })
+	client := newProcessClient(t, t.TempDir())
+
+	pipeCount := func() int {
+		t.Helper()
+		entries, err := os.ReadDir("/proc/self/fd")
+		require.NoError(t, err)
+		count := 0
+		for _, entry := range entries {
+			target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+			if err == nil && strings.HasPrefix(target, "pipe:[") {
+				count++
+			}
+		}
+		return count
+	}
+
+	before := pipeCount()
+	stream, err := client.Start(testCtx(t), &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{
+			"sh", "-c", "printf stdout; printf stderr >&2",
+		}},
+	})
+	require.NoError(t, err)
+	result := drainStart(t, stream)
+	require.Equal(t, "stdout", result.stdout.String())
+	require.Equal(t, "stderr", result.stderr.String())
+	require.Equal(t, int32(0), result.exitCode)
+	require.Equal(t, before, pipeCount(), "completed streams must close both output readers")
 }
 
 func TestWriteStdinAndEOF(t *testing.T) {
@@ -281,6 +371,33 @@ func TestWriteStdinAndEOF(t *testing.T) {
 
 	res := drainStart(t, stream)
 	require.Equal(t, "piped-through", res.stdout.String())
+	require.Equal(t, int32(0), res.exitCode)
+}
+
+func TestWriteStdinEOFWithPTYRejected(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	stream, err := client.Start(ctx, &processv1.StartRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"cat"}},
+		Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+	})
+	require.NoError(t, err)
+	pid := recvInit(t, stream)
+
+	_, err = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: pid,
+		Payload:   &processv1.WriteStdinRequest_Eof{Eof: &emptypb.Empty{}},
+	})
+	require.Equal(t, codes.FailedPrecondition, status.Code(err), "err: %v", err)
+
+	// The terminal is still usable: Ctrl-D through the PTY ends cat normally.
+	_, err = client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+		ProcessId: pid,
+		Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("\x04")},
+	})
+	require.NoError(t, err)
+	res := drainStart(t, stream)
 	require.Equal(t, int32(0), res.exitCode)
 }
 
@@ -324,7 +441,7 @@ func TestSendSignalUnspecifiedRejected(t *testing.T) {
 	})
 	require.NoError(t, err)
 	res := drainStart(t, stream)
-	require.NotEqual(t, int32(0), res.exitCode)
+	require.Equal(t, int32(128+9), res.exitCode)
 }
 
 func TestSendSignalTerminatesProcess(t *testing.T) {
@@ -385,6 +502,65 @@ func TestStartWithPTY(t *testing.T) {
 	res := drainStart(t, stream)
 	require.Equal(t, int32(0), res.exitCode)
 	require.Contains(t, res.stdout.String(), "24 80")
+}
+
+// ptyRaceIterations is how many short-lived PTY processes the race regression
+// tests start. The races they guard against (#1803) only show up on some runs,
+// so a single run would pass most of the time even without the fix.
+const ptyRaceIterations = 50
+
+// TestStartWithPTY_DeliversAllOutputOfShortLivedProcess guards against the PTY
+// being closed as soon as the child is reaped, which discarded output the
+// kernel still had buffered, so the client saw exit code 0 and truncated or
+// empty output.
+func TestStartWithPTY_DeliversAllOutputOfShortLivedProcess(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	for i := range ptyRaceIterations {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
+			stream, err := client.Start(ctx, &processv1.StartRequest{
+				// The output is larger than the PTY buffer, so the child is
+				// still writing its tail when it exits; that tail is what a
+				// premature close drops.
+				Config: &processv1.ProcessConfig{Command: []string{"seq", "1", "2000"}},
+				Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+			})
+			require.NoError(t, err)
+
+			res := drainStart(t, stream)
+			require.Equal(t, int32(0), res.exitCode)
+			// The line discipline turns "\n" into "\r\n".
+			lines := strings.Split(strings.TrimRight(res.stdout.String(), "\r\n"), "\r\n")
+			require.Len(t, lines, 2000, "last line: %q", lines[len(lines)-1])
+		})
+	}
+}
+
+// TestStartWithPTY_InitialSizeVisibleImmediately guards against the requested
+// window size being applied after the child started, so a child that queries
+// it right away saw 0x0.
+func TestStartWithPTY_InitialSizeVisibleImmediately(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	ctx := testCtx(t)
+
+	for i := range ptyRaceIterations {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			t.Parallel()
+			stream, err := client.Start(ctx, &processv1.StartRequest{
+				// Exec stty directly rather than through sh so the size is
+				// read as early as possible.
+				Config: &processv1.ProcessConfig{Command: []string{"stty", "size"}},
+				Pty:    &processv1.PTY{Cols: 80, Rows: 24},
+			})
+			require.NoError(t, err)
+
+			res := drainStart(t, stream)
+			require.Equal(t, int32(0), res.exitCode)
+			require.Equal(t, "24 80\r\n", res.stdout.String())
+		})
+	}
 }
 
 func TestResizeTTYWithPTY(t *testing.T) {
@@ -531,4 +707,16 @@ func TestExecute_KillsGrandchildrenOnCancel(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return isProcessDead(grandchildPID)
 	}, 10*time.Second, 50*time.Millisecond, "grandchild process %d should have been killed", grandchildPID)
+}
+
+func TestExecuteAbsoluteCwdWithFilesystemRoot(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	client := newProcessClient(t, "/")
+
+	resp, err := client.Execute(testCtx(t), &processv1.ExecuteRequest{
+		Config: &processv1.ProcessConfig{Command: []string{"pwd"}, Cwd: &dir},
+	})
+	require.NoError(t, err)
+	require.Equal(t, dir, strings.TrimSpace(string(resp.GetStdout())))
 }

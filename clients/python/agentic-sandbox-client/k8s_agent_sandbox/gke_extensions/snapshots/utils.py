@@ -330,7 +330,7 @@ def wait_for_pod_ready(
 
 
 def wait_for_sandbox_propagation(
-    k8s_helper,
+    k8s_helper: Any,
     namespace: str,
     sandbox_id: str,
     snapshot_uid: str | None,
@@ -370,7 +370,7 @@ def wait_for_sandbox_propagation(
     return False
 
 
-def normalize_datetime(v):
+def normalize_datetime(v: Any) -> datetime | None:
     """Normalizes a datetime object or ISO string to a timezone-aware UTC datetime."""
     if v is None:
         return None

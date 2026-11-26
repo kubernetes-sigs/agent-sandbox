@@ -15,7 +15,9 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -24,7 +26,9 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -45,6 +49,7 @@ const clientAnnotation = "agents.x-k8s.io/client-first-requested-at"
 // sandboxState holds the identity metadata returned when a sandbox becomes ready.
 type sandboxState struct {
 	SandboxName string
+	UID         types.UID
 	PodName     string
 	PodIP       string
 	ServiceFQDN string
@@ -139,46 +144,96 @@ func stampClientRequestTime(annotations map[string]string, now time.Time) map[st
 	return annotations
 }
 
-// createClaim creates a SandboxClaim and returns its generated name.
-func (h *K8sHelper) createClaim(ctx context.Context, namespace, warmPoolName string, env []extv1beta1.EnvVar, tracer trace.Tracer, svcName string) (string, error) {
-	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
-	defer span.End()
-
-	var annotations map[string]string
-	if traceCtx := traceContextJSON(ctx); traceCtx != "" {
-		annotations = map[string]string{
-			"opentelemetry.io/trace-context": traceCtx,
-		}
+// claimLifecycle returns the claim lifecycle from opts, or nil when opts sets
+// none of ShutdownAfter, ShutdownPolicy, and TTLSecondsAfterFinished. The API
+// keeps whole seconds and truncates, so the deadline is rounded up to keep a
+// short ShutdownAfter from expiring early. The policy defaults to Delete
+// because the API's own default, Retain, would leave every expired claim behind.
+func claimLifecycle(now time.Time, opts *Options) *extv1beta1.Lifecycle {
+	if opts.ShutdownAfter <= 0 && opts.ShutdownPolicy == "" && opts.TTLSecondsAfterFinished == nil {
+		return nil
 	}
-	annotations = stampClientRequestTime(annotations, time.Now())
+	lifecycle := &extv1beta1.Lifecycle{
+		ShutdownPolicy:          cmp.Or(opts.ShutdownPolicy, extv1beta1.ShutdownPolicyDelete),
+		TTLSecondsAfterFinished: opts.TTLSecondsAfterFinished,
+	}
+	if opts.ShutdownAfter > 0 {
+		shutdownTime := metav1.NewTime(now.Add(opts.ShutdownAfter).Add(time.Second - 1).Truncate(time.Second))
+		lifecycle.ShutdownTime = &shutdownTime
+	}
+	return lifecycle
+}
+
+// newClaim builds the SandboxClaim that Open creates from opts. The claim
+// shares opts' maps and slices, so callers must not mutate its spec.
+func newClaim(opts *Options, now time.Time) *extv1beta1.SandboxClaim {
+	claimLabels := make(map[string]string, len(opts.Labels)+1)
+	maps.Copy(claimLabels, opts.Labels)
+	claimLabels[sandboxv1beta1.CreatedByLabel] = "go-client"
 
 	claim := &extv1beta1.SandboxClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "sandbox-claim-",
-			Namespace:    namespace,
-			Annotations:  annotations,
-			Labels: map[string]string{
-				sandboxv1beta1.CreatedByLabel: "go-client",
-			},
+			Namespace:   opts.Namespace,
+			Annotations: stampClientRequestTime(nil, now),
+			Labels:      claimLabels,
 		},
 		Spec: extv1beta1.SandboxClaimSpec{
 			WarmPoolRef: extv1beta1.SandboxWarmPoolRef{
-				Name: warmPoolName,
+				Name: opts.WarmPoolName,
 			},
-			Env: env,
+			Env:                  opts.Env,
+			Lifecycle:            claimLifecycle(now, opts),
+			VolumeClaimTemplates: opts.VolumeClaimTemplates,
 		},
 	}
+	if opts.ClaimName != "" {
+		claim.Name = opts.ClaimName
+	} else {
+		claim.GenerateName = "sandbox-claim-"
+	}
+	if len(opts.PodLabels) > 0 {
+		claim.Spec.AdditionalPodMetadata.Labels = opts.PodLabels
+	}
+	if len(opts.PodAnnotations) > 0 {
+		claim.Spec.AdditionalPodMetadata.Annotations = opts.PodAnnotations
+	}
+	return claim
+}
 
+// createClaim creates claim and returns the stored object. Errors, including
+// AlreadyExists, are wrapped in ErrClaimFailed.
+func (h *K8sHelper) createClaim(ctx context.Context, claim *extv1beta1.SandboxClaim, tracer trace.Tracer, svcName string) (*extv1beta1.SandboxClaim, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "create_claim")
+	defer span.End()
+
+	if traceCtx := traceContextJSON(ctx); traceCtx != "" {
+		claim.Annotations["opentelemetry.io/trace-context"] = traceCtx
+	}
+
+	namespace := claim.Namespace
 	created, err := h.ExtensionsClient.SandboxClaims(namespace).Create(ctx, claim, metav1.CreateOptions{})
 	if err != nil {
 		recordError(span, err)
-		return "", fmt.Errorf("%w: warmpool=%s namespace=%s: %w", ErrClaimFailed, warmPoolName, namespace, err)
+		return nil, fmt.Errorf("%w: warmpool=%s namespace=%s: %w", ErrClaimFailed, claim.Spec.WarmPoolRef.Name, namespace, err)
 	}
 
-	name := created.Name
+	span.SetAttributes(AttrClaimName.String(created.Name))
+	h.Log.Info("claim created", "claim", created.Name, "namespace", namespace)
+	return created, nil
+}
+
+// getClaim fetches a SandboxClaim.
+func (h *K8sHelper) getClaim(ctx context.Context, name, namespace string, tracer trace.Tracer, svcName string) (*extv1beta1.SandboxClaim, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "get_claim")
+	defer span.End()
+
+	claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		recordError(span, err)
+		return nil, err
+	}
 	span.SetAttributes(AttrClaimName.String(name))
-	h.Log.Info("claim created", "claim", name, "namespace", namespace)
-	return name, nil
+	return claim, nil
 }
 
 // deleteClaim deletes a SandboxClaim. Returns nil if the claim is already gone.
@@ -198,9 +253,107 @@ func (h *K8sHelper) deleteClaim(ctx context.Context, name, namespace string) err
 	return nil
 }
 
+// terminalReadyReasons are Ready=False reasons that the claim and Sandbox
+// controllers do not retry on their own (see computeReadyCondition in
+// extensions/controllers/sandboxclaim_controller.go). Transient reasons such as
+// AdoptionPending, SandboxMissing, SandboxNotReady and ReconcilerError are
+// left out because the controller recovers from them. PodTerminating is also
+// left out: it is transient while the Pod is being deleted, and the terminal
+// phase is reported on the Finished condition. Kept in sync with
+// TERMINAL_CLAIM_READY_REASONS in the Python and TypeScript SDKs.
+var terminalReadyReasons = map[string]bool{
+	"InvalidMetadata":                                true,
+	"EnvVarsInjectionRejected":                       true,
+	"VolumeClaimTemplatesError":                      true,
+	extv1beta1.ClaimExpiredReason:                    true,
+	sandboxv1beta1.SandboxReasonExpired:              true,
+	sandboxv1beta1.SandboxReasonInvalidConfiguration: true,
+	sandboxv1beta1.SandboxReasonPodFailed:            true,
+	sandboxv1beta1.SandboxReasonPodSucceeded:         true,
+}
+
+// currentNotReady returns the Ready=False condition, or nil if Ready is absent,
+// not False, or describes an older generation than the object's current spec.
+func currentNotReady(conditions []metav1.Condition, generation int64) *metav1.Condition {
+	ready := meta.FindStatusCondition(conditions, string(sandboxv1beta1.SandboxConditionReady))
+	if ready == nil || ready.Status != metav1.ConditionFalse {
+		return nil
+	}
+	if ready.ObservedGeneration != 0 && ready.ObservedGeneration < generation {
+		return nil
+	}
+	return ready
+}
+
+// terminalFailure returns ErrClaimFailed if ready carries a terminal reason.
+func terminalFailure(kind, name string, ready *metav1.Condition) error {
+	if ready == nil || !terminalReadyReasons[ready.Reason] {
+		return nil
+	}
+	return fmt.Errorf("%w: %s %s has terminal reason %s: %s", ErrClaimFailed, kind, name, ready.Reason, ready.Message)
+}
+
+// claimFailure returns an error if the claim reports a failure that waiting
+// longer cannot fix, so callers fail fast instead of burning the full timeout.
+func claimFailure(claim *extv1beta1.SandboxClaim) error {
+	ready := currentNotReady(claim.Status.Conditions, claim.Generation)
+	if ready == nil {
+		return nil
+	}
+	switch ready.Reason {
+	case "TemplateNotFound":
+		return fmt.Errorf("%w: claim %s: %s", ErrTemplateNotFound, claim.Name, ready.Message)
+	case "WarmPoolNotFound":
+		return fmt.Errorf("%w: claim %s: %s", ErrWarmPoolNotFound, claim.Name, ready.Message)
+	}
+	return terminalFailure("claim", claim.Name, ready)
+}
+
+// sandboxFailure is claimFailure for the Sandbox itself, which reports
+// terminal reasons (PodFailed, SandboxExpired, ...) only after the claim has
+// already resolved to its name.
+func sandboxFailure(sb *sandboxv1beta1.Sandbox) error {
+	return terminalFailure("sandbox", sb.Name, currentNotReady(sb.Status.Conditions, sb.Generation))
+}
+
+// claimIdentityFailure returns ErrSandboxDeleted when claim is no longer the
+// object Open created or adopted: a same-name replacement with another UID, or
+// the original being deleted. An empty expectedUID disables the check.
+func claimIdentityFailure(claim *extv1beta1.SandboxClaim, expectedUID types.UID) error {
+	if expectedUID == "" {
+		return nil
+	}
+	if claim.UID != expectedUID {
+		return fmt.Errorf("%w: claim %s was replaced (uid %s, want %s)", ErrSandboxDeleted, claim.Name, claim.UID, expectedUID)
+	}
+	if claim.DeletionTimestamp != nil {
+		return fmt.Errorf("%w: claim %s is terminating", ErrSandboxDeleted, claim.Name)
+	}
+	return nil
+}
+
+// sandboxIdentityFailure is claimIdentityFailure for the Sandbox CR: it
+// returns ErrSandboxDeleted when sb is a same-name replacement of the
+// sandbox the caller opened, or the original being deleted. An empty
+// expectedUID disables the check.
+func sandboxIdentityFailure(sb *sandboxv1beta1.Sandbox, expectedUID types.UID) error {
+	if expectedUID == "" {
+		return nil
+	}
+	if sb.UID != expectedUID {
+		return fmt.Errorf("%w: sandbox %s was replaced (uid %s, want %s)", ErrSandboxDeleted, sb.Name, sb.UID, expectedUID)
+	}
+	if sb.DeletionTimestamp != nil {
+		return fmt.Errorf("%w: sandbox %s is terminating", ErrSandboxDeleted, sb.Name)
+	}
+	return nil
+}
+
 // resolveSandboxName watches SandboxClaim status until the sandbox name is
 // populated. With warm pool, the sandbox name may differ from the claim name.
-func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (string, error) {
+// It returns early with a claimFailure error if the claim can never become ready,
+// and, when expectedUID is set, if the claim is replaced or starts terminating.
+func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace string, expectedUID types.UID, timeout time.Duration, tracer trace.Tracer, svcName string) (string, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "resolve_sandbox_name")
 	defer span.End()
 
@@ -217,6 +370,14 @@ func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace
 	for {
 		claim, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
 		if err == nil {
+			if failure := claimIdentityFailure(claim, expectedUID); failure != nil {
+				recordError(span, failure)
+				return "", failure
+			}
+			if failure := claimFailure(claim); failure != nil {
+				recordError(span, failure)
+				return "", failure
+			}
 			if name := claim.Status.SandboxStatus.Name; name != "" {
 				h.Log.Info("sandbox name resolved", "claim", claimName, "sandbox", name)
 				return name, nil
@@ -245,7 +406,7 @@ func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace
 			continue
 		}
 
-		name, done, watchErr := h.drainClaimWatch(ctx, watcher, claimName, timeout)
+		name, done, watchErr := h.drainClaimWatch(ctx, watcher, claimName, expectedUID, timeout)
 		watcher.Stop()
 		if done {
 			h.Log.Info("sandbox name resolved", "claim", claimName, "sandbox", name)
@@ -265,7 +426,7 @@ func (h *K8sHelper) resolveSandboxName(ctx context.Context, claimName, namespace
 	}
 }
 
-func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface, claimName string, timeout time.Duration) (string, bool, error) {
+func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface, claimName string, expectedUID types.UID, timeout time.Duration) (string, bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -285,6 +446,12 @@ func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface
 			if !ok {
 				continue
 			}
+			if failure := claimIdentityFailure(claim, expectedUID); failure != nil {
+				return "", false, failure
+			}
+			if failure := claimFailure(claim); failure != nil {
+				return "", false, failure
+			}
 			if name := claim.Status.SandboxStatus.Name; name != "" {
 				return name, true, nil
 			}
@@ -292,14 +459,127 @@ func (h *K8sHelper) drainClaimWatch(ctx context.Context, watcher watch.Interface
 	}
 }
 
-// waitForSandboxReady watches the Sandbox resource until it becomes ready.
-func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namespace string, timeout time.Duration, tracer trace.Tracer, svcName string) (*sandboxState, error) {
+// WaitForSandboxReady waits until the named Sandbox has a true Ready condition.
+// sandboxName is the backing Sandbox name, not the SandboxClaim name. It does not
+// connect to the runtime. Use a context deadline to bound the wait; cancellation
+// and deadline errors are detectable with errors.Is. A missing Sandbox is waited
+// for, while deletion observed during the watch returns ErrSandboxDeleted.
+// A terminal Ready=False reason such as PodFailed returns ErrClaimFailed.
+// API list/watch failures are retried until ctx ends.
+func (h *K8sHelper) WaitForSandboxReady(ctx context.Context, sandboxName, namespace string) error {
+	if sandboxName == "" || namespace == "" {
+		return fmt.Errorf("sandbox: sandbox name and namespace are required")
+	}
+	_, err := h.waitForSandboxState(ctx, sandboxName, namespace, "readiness", "", isSandboxReady)
+	return err
+}
+
+// waitForSandboxReady adds SDK tracing and timeout semantics to the shared
+// wait. When minGeneration is greater than zero, only a Ready condition
+// observed at that generation or later satisfies the wait; pass 0 to accept
+// any Ready=True. When expectedUID is set, a same-name replacement sandbox
+// fails the wait instead of satisfying it. When expectedMode is set, a
+// Ready=True stamped while spec.operatingMode points the other way — another
+// client re-suspended the sandbox mid-wait — does not satisfy the wait.
+func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namespace string, timeout time.Duration, minGeneration int64, expectedUID types.UID, expectedMode sandboxv1beta1.SandboxOperatingMode, tracer trace.Tracer, svcName string) (*sandboxState, error) {
 	ctx, span := startSpan(ctx, tracer, svcName, "wait_for_sandbox_ready")
 	defer span.End()
-
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	done := func(sb *sandboxv1beta1.Sandbox) bool {
+		if expectedMode != "" && sb.Spec.OperatingMode != expectedMode {
+			return false
+		}
+		if minGeneration > 0 {
+			return conditionObserved(sb, sandboxv1beta1.SandboxConditionReady, minGeneration)
+		}
+		return isSandboxReady(sb)
+	}
+	state, err := h.waitForSandboxState(ctx, sandboxName, namespace, "readiness", expectedUID, done)
+	if err != nil {
+		// Only a deadline maps to ErrTimeout. A caller cancellation (or a
+		// Close/Disconnect interrupt) must stay discoverable through
+		// errors.Is(err, context.Canceled), as in waitForSandboxSuspended.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("%w: sandbox %s did not become ready within %s: %v", ErrTimeout, sandboxName, timeout, err)
+		}
+		recordError(span, err)
+	}
+	return state, err
+}
+
+// waitForSandboxSuspended waits until the Sandbox reports the Suspended
+// condition, meaning the controller has terminated the backing pod. The
+// condition must have been observed at minGeneration or later, so a
+// Suspended=True left over from an earlier suspend cycle does not satisfy
+// the wait before the controller acts on the new patch. When expectedUID is
+// set, a same-name replacement sandbox fails the wait instead of satisfying
+// it.
+func (h *K8sHelper) waitForSandboxSuspended(ctx context.Context, sandboxName, namespace string, timeout time.Duration, minGeneration int64, expectedUID types.UID, tracer trace.Tracer, svcName string) error {
+	ctx, span := startSpan(ctx, tracer, svcName, "wait_for_sandbox_suspended")
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	done := func(sb *sandboxv1beta1.Sandbox) bool {
+		// A Suspended=True stamped while spec.operatingMode already points
+		// back to Running describes a suspension nobody wants anymore: the
+		// wait must not report success on it.
+		return sb.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended &&
+			conditionObserved(sb, sandboxv1beta1.SandboxConditionSuspended, minGeneration)
+	}
+	_, err := h.waitForSandboxState(ctx, sandboxName, namespace, "suspension", expectedUID, done)
+	if err != nil {
+		// Only a deadline maps to ErrTimeout. A caller cancellation (or a
+		// Close/Disconnect interrupt) must stay discoverable through
+		// errors.Is(err, context.Canceled).
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("%w: sandbox %s did not suspend within %s: %v", ErrTimeout, sandboxName, timeout, err)
+		}
+		recordError(span, err)
+	}
+	return err
+}
+
+// getSandbox reads the Sandbox CR.
+func (h *K8sHelper) getSandbox(ctx context.Context, name, namespace string) (*sandboxv1beta1.Sandbox, error) {
+	return h.AgentsClient.Sandboxes(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// patchSandboxOperatingMode sets spec.operatingMode on the Sandbox CR, which
+// is how a client asks the controller to suspend or resume the sandbox. It
+// returns the patched object so the caller can gate status waits on the
+// generation the controller must observe. When expectedUID is set, the patch
+// carries a JSON Patch test op on metadata.uid, so the API server rejects it
+// if a same-name replacement was created between the SDK's read and write;
+// an empty expectedUID leaves the patch unguarded.
+func (h *K8sHelper) patchSandboxOperatingMode(ctx context.Context, name, namespace string, mode sandboxv1beta1.SandboxOperatingMode, expectedUID types.UID, tracer trace.Tracer, svcName string) (*sandboxv1beta1.Sandbox, error) {
+	ctx, span := startSpan(ctx, tracer, svcName, "patch_operating_mode")
+	defer span.End()
+
+	patchType := types.MergePatchType
+	patch := []byte(fmt.Sprintf(`{"spec":{"operatingMode":%q}}`, mode))
+	if expectedUID != "" {
+		patchType = types.JSONPatchType
+		patch = []byte(fmt.Sprintf(`[{"op":"test","path":"/metadata/uid","value":%q},{"op":"add","path":"/spec/operatingMode","value":%q}]`, expectedUID, mode))
+	}
+	patched, err := h.AgentsClient.Sandboxes(namespace).Patch(ctx, name, patchType, patch, metav1.PatchOptions{})
+	if err != nil {
+		recordError(span, err)
+		return nil, fmt.Errorf("sandbox: failed to set operatingMode %s on %s: %w", mode, name, err)
+	}
+	h.Log.Info("operatingMode patched", "sandbox", name, "mode", mode)
+	return patched, nil
+}
+
+// waitForSandboxState shares the list/watch loop between SDK opens and public
+// waits. The done predicate selects the awaited state and desc names it in
+// error messages ("readiness", "suspension"). When expectedUID is set, a
+// sandbox that matches the name but not the UID — a same-name replacement
+// created while the wait ran — fails the wait instead of being evaluated
+// against done.
+func (h *K8sHelper) waitForSandboxState(ctx context.Context, sandboxName, namespace, desc string, expectedUID types.UID, done func(*sandboxv1beta1.Sandbox) bool) (*sandboxState, error) {
 	listOpts := metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("metadata.name=%s", sandboxName),
 	}
@@ -309,14 +589,23 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 	var lastConditions string
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("sandbox %s %s wait ended (last conditions: %s): %w", sandboxName, desc, lastConditions, err)
+		}
 		list, listErr := h.AgentsClient.Sandboxes(namespace).List(ctx, listOpts)
 		if listErr == nil {
 			for i := range list.Items {
 				if list.Items[i].Name != sandboxName {
 					continue
 				}
-				if isSandboxReady(&list.Items[i]) {
+				if failure := sandboxIdentityFailure(&list.Items[i], expectedUID); failure != nil {
+					return nil, failure
+				}
+				if done(&list.Items[i]) {
 					return extractState(&list.Items[i]), nil
+				}
+				if failure := sandboxFailure(&list.Items[i]); failure != nil {
+					return nil, failure
 				}
 				lastConditions = formatConditions(list.Items[i].Status.Conditions)
 			}
@@ -328,8 +617,7 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 		watcher, err := h.AgentsClient.Sandboxes(namespace).Watch(ctx, listOpts)
 		if err != nil {
 			if ctx.Err() != nil {
-				retErr := fmt.Errorf("%w: sandbox %s did not become ready within %s (last conditions: %s)", ErrTimeout, sandboxName, timeout, lastConditions)
-				recordError(span, retErr)
+				retErr := fmt.Errorf("sandbox %s %s wait ended (last conditions: %s): %w", sandboxName, desc, lastConditions, ctx.Err())
 				return nil, retErr
 			}
 			h.Log.V(1).Info("watch creation failed, retrying", "error", err, "sandbox", sandboxName)
@@ -342,13 +630,12 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 			continue
 		}
 
-		state, done, watchErr := h.drainSandboxWatch(ctx, watcher, sandboxName, timeout, &lastConditions)
+		state, reached, watchErr := h.drainSandboxWatch(ctx, watcher, sandboxName, &lastConditions, desc, expectedUID, done)
 		watcher.Stop()
-		if done {
+		if reached {
 			return state, nil
 		}
 		if watchErr != nil {
-			recordError(span, watchErr)
 			return nil, watchErr
 		}
 		h.Log.V(1).Info("sandbox watch closed, re-establishing", "sandbox", sandboxName)
@@ -362,11 +649,11 @@ func (h *K8sHelper) waitForSandboxReady(ctx context.Context, sandboxName, namesp
 	}
 }
 
-func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, sandboxName string, timeout time.Duration, lastConditions *string) (*sandboxState, bool, error) {
+func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interface, sandboxName string, lastConditions *string, desc string, expectedUID types.UID, done func(*sandboxv1beta1.Sandbox) bool) (*sandboxState, bool, error) {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, false, fmt.Errorf("%w: sandbox %s did not become ready within %s (last conditions: %s)", ErrTimeout, sandboxName, timeout, *lastConditions)
+			return nil, false, fmt.Errorf("sandbox %s %s wait ended (last conditions: %s): %w", sandboxName, desc, *lastConditions, ctx.Err())
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				return nil, false, nil
@@ -385,9 +672,15 @@ func (h *K8sHelper) drainSandboxWatch(ctx context.Context, watcher watch.Interfa
 			if sb.Name != sandboxName {
 				continue
 			}
+			if failure := sandboxIdentityFailure(sb, expectedUID); failure != nil {
+				return nil, false, failure
+			}
 			*lastConditions = formatConditions(sb.Status.Conditions)
-			if isSandboxReady(sb) {
+			if done(sb) {
 				return extractState(sb), true, nil
+			}
+			if failure := sandboxFailure(sb); failure != nil {
+				return nil, false, failure
 			}
 		}
 	}
@@ -400,7 +693,14 @@ func (h *K8sHelper) verifyClaimExists(ctx context.Context, name, namespace strin
 
 	_, err := h.ExtensionsClient.SandboxClaims(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		retErr := fmt.Errorf("%w: claim %s: %w", ErrSandboxDeleted, name, err)
+		// Only NotFound means the claim is gone. Any other error, such as a
+		// refused connection or a 503, says nothing about the claim.
+		var retErr error
+		if k8serrors.IsNotFound(err) {
+			retErr = fmt.Errorf("%w: claim %s: %w", ErrSandboxDeleted, name, err)
+		} else {
+			retErr = fmt.Errorf("get claim %s: %w", name, err)
+		}
 		recordError(span, retErr)
 		return retErr
 	}
@@ -436,9 +736,25 @@ func isSandboxReady(sb *sandboxv1beta1.Sandbox) bool {
 	return false
 }
 
+// conditionObserved reports whether the given condition is True and was
+// written by a controller that had observed generation minGeneration or
+// later. Without the generation floor, a condition left over from an
+// earlier spec would report success before the controller acts on the
+// current one — e.g. a Suspended=True from a previous suspend cycle, or a
+// Ready=True from before an interrupted suspend.
+func conditionObserved(sb *sandboxv1beta1.Sandbox, condType sandboxv1beta1.ConditionType, minGeneration int64) bool {
+	for _, cond := range sb.Status.Conditions {
+		if cond.Type == string(condType) && cond.Status == metav1.ConditionTrue {
+			return cond.ObservedGeneration >= minGeneration
+		}
+	}
+	return false
+}
+
 func extractState(sb *sandboxv1beta1.Sandbox) *sandboxState {
 	state := &sandboxState{
 		SandboxName: sb.Name,
+		UID:         sb.UID,
 	}
 	if sb.Annotations != nil {
 		state.Annotations = make(map[string]string, len(sb.Annotations))

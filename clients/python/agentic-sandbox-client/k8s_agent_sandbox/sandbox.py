@@ -13,18 +13,29 @@
 # limitations under the License.
 
 import logging
+import time
+from threading import Lock
+from typing import Any, Callable, Literal
 from .trace_manager import create_tracer_manager
+from .trace_manager import trace_span
 from .commands.command_executor import CommandExecutor
 from .files.filesystem import Filesystem
+from .watcher.file_watcher import FileWatcher
 from .models import (
     SandboxConnectionConfig,
+    SandboxFileConfig,
+    SandboxHealth,
     SandboxLocalTunnelConnectionConfig,
+    SandboxMetadata,
     SandboxTracerConfig,
 )
 from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION
+from .exceptions import SandboxError, SandboxNotFoundError
 from .utils import select_pod_ip, extract_sandbox_name_hash
+
+logger = logging.getLogger(__name__)
 
 
 class Sandbox:
@@ -37,6 +48,11 @@ class Sandbox:
     - Handling the underlying connection.
     - Integrating with OpenTelemetry for tracing operations.
     """
+
+    # The client that tracks this handle sets this hook, so terminate() can drop the
+    # client's entry once the claim is gone.
+    _on_terminated: Callable[["Sandbox"], None] | None = None
+
     def __init__(
         self,
         claim_name: str,
@@ -45,9 +61,11 @@ class Sandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: K8sHelper | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         # Sandbox Related Configuration
-        self.claim_name = claim_name
+        self.claim_name: str | None = claim_name
         self.sandbox_id = sandbox_id
         self.namespace = namespace
         self.connection_config = connection_config or SandboxLocalTunnelConnectionConfig()
@@ -62,6 +80,7 @@ class Sandbox:
             k8s_helper=self.k8s_helper,
             get_pod_ip=self.get_pod_ip,
             get_pod_name=self.get_pod_name,
+            get_service_fqdn=self.get_service_fqdn,
         )
 
         # Tracer initialization
@@ -71,13 +90,75 @@ class Sandbox:
 
         # Initialisation of namespaced engines
         self._commands: CommandExecutor | None = CommandExecutor(self.connector, self.tracer, self.trace_service_name)
-        self._files: Filesystem | None = Filesystem(self.connector, self.tracer, self.trace_service_name)
+        self._files: Filesystem | None = Filesystem(
+            self.connector, self.tracer, self.trace_service_name,
+            **({"file_config": file_config} if file_config is not None else {}),
+        )
+        self._watcher: FileWatcher | None = FileWatcher(self.connector, self.tracer, self.trace_service_name)
         
         # Internal state tracking
+        self._lifecycle_uid: str | None = None
+        self._lifecycle_lock = Lock()
         self._is_closed = False
         self._pod_name: str | None = None
         self._sandbox_name_hash: str | None = None
         
+    def suspend(self, *, timeout: int = 180) -> None:
+        """Suspend the Sandbox and wait for the controller to report `Suspended`.
+
+        This handle stays active. `timeout` covers the wait for the condition and
+        for another suspend or resume call on this handle to finish.
+        """
+        self._change_operating_mode("Suspended", timeout)
+
+    def resume(self, *, timeout: int = 180) -> None:
+        """Resume the Sandbox and wait for the controller to report `Ready`."""
+        self._change_operating_mode("Running", timeout)
+
+    def is_suspended(self) -> bool:
+        """Return whether the requested operating mode is `Suspended`."""
+        return self._read_lifecycle()[1] == "Suspended"
+
+    def _read_lifecycle(self) -> tuple[dict[str, Any], str]:
+        """Return the Sandbox and its requested operating mode,
+        and raise if the Sandbox was replaced.
+        """
+        resource = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace)
+        if resource is None:
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' no longer exists")
+        uid = resource["metadata"]["uid"]
+        if self._lifecycle_uid not in (None, uid):
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' was replaced")
+        self._lifecycle_uid = uid
+        return resource, resource.get("spec", {}).get("operatingMode", "Running")
+
+    def _change_operating_mode(self, mode: Literal["Running", "Suspended"], timeout: int) -> None:
+        if self._is_closed:
+            raise RuntimeError("Sandbox connection is closed")
+        start = time.monotonic()
+        if not self._lifecycle_lock.acquire(timeout=max(0, timeout)):
+            raise TimeoutError("Timed out waiting for the lifecycle lock")
+        try:
+            resource, current_mode = self._read_lifecycle()
+            if current_mode != mode:
+                resource = self.k8s_helper.patch_sandbox_operating_mode(
+                    self.sandbox_id, self.namespace, mode, resource["metadata"]["uid"],
+                )
+            if "Suspended" in (mode, current_mode):
+                self.connector.close()
+                self._pod_name = None
+            self.k8s_helper.wait_for_sandbox_ready(
+                self.sandbox_id, self.namespace, max(0, timeout - int(time.monotonic() - start)),
+                condition="Suspended" if mode == "Suspended" else "Ready",
+                min_generation=resource["metadata"]["generation"],
+            )
+            if self._read_lifecycle()[1] != mode:
+                raise SandboxError(
+                    f"Sandbox '{self.sandbox_id}' changed operating mode while waiting for {mode}"
+                )
+        finally:
+            self._lifecycle_lock.release()
+
     def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
         if self._pod_name is not None:
@@ -119,6 +200,13 @@ class Sandbox:
         pod_ips = status_data.get('podIPs', [])
         return select_pod_ip(pod_ips)
 
+    def get_service_fqdn(self) -> str | None:
+        """Return the controller-reported Service FQDN, when available."""
+        sandbox_object = self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        status_data = sandbox_object.get("status") or {}
+        fqdn = status_data.get("serviceFQDN")
+        return fqdn if isinstance(fqdn, str) and fqdn else None
+
     def status(self) -> tuple[str, str]:
         """
         Retrieves the current status of the Sandbox by inspecting its Kubernetes conditions.
@@ -142,6 +230,39 @@ class Sandbox:
 
         return "SandboxNotReady", "Unknown message"
 
+    @trace_span("health")
+    def health(self, timeout: int = 60) -> SandboxHealth:
+        """Query sandboxd's /v1/health endpoint. sandboxd runtime only.
+
+        The legacy python-runtime has no equivalent endpoint and raises
+        ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "health() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = self.connector.send_request(
+            "GET", "v1/health", timeout=timeout)
+        return SandboxHealth.from_sandboxd(response.json())
+
+    @trace_span("metadata")
+    def metadata(self, timeout: int = 60) -> SandboxMetadata:
+        """Query sandboxd's /v1/metadata endpoint. sandboxd runtime only.
+
+        Returns orchestrator-injected, non-sensitive runtime configuration
+        (e.g. sandbox id, workspace path, env). The legacy python-runtime
+        has no equivalent endpoint and raises ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "metadata() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = self.connector.send_request(
+            "GET", "v1/metadata", timeout=timeout)
+        return SandboxMetadata.from_sandboxd(response.json())
+
     @property
     def commands(self) -> CommandExecutor | None:
         return self._commands
@@ -149,6 +270,11 @@ class Sandbox:
     @property
     def files(self) -> Filesystem | None:
         return self._files
+
+    @property
+    def watcher(self) -> FileWatcher | None:
+        """Filesystem event streaming interface (sandboxd runtime only)."""
+        return self._watcher
 
     @property
     def is_active(self) -> bool:
@@ -173,22 +299,28 @@ class Sandbox:
         self._pod_name = None
         # Close client side connection
         self.connector.close()
+        # SandboxConnector.close() also resets live connections on errors and
+        # during snapshot suspend and resume, so it keeps the sandbox callbacks.
+        # close_connection() drops them here once this Sandbox closes for good.
+        # AsyncSandboxConnector.close() is final and drops them itself.
+        self.connector._release_sandbox_callbacks()
         
         # Don't allow anymore further executions.
         self._commands = None
         self._files = None
+        self._watcher = None
         
         # Cleanup Trace if it exists
         if self.tracing_manager:
             try:
                 self.tracing_manager.end_lifecycle_span()
             except Exception as e:
-                logging.error(f"Failed to end tracing span: {e}")
+                logger.error(f"Failed to end tracing span: {e}")
         
         self._is_closed = True
-        logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
+        logger.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
-    def terminate(self):
+    def terminate(self) -> None:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 
@@ -205,6 +337,13 @@ class Sandbox:
             return
 
         self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # The client stops tracking the handle here because its claim is gone. Call
+        # _on_terminated before clearing claim_name, because that name is the client's key.
+        # Drop the hook afterwards, so a kept handle does not keep the client's registry alive.
+        if self._on_terminated is not None:
+            self._on_terminated(self)
+            self._on_terminated = None
 
         # Clear only after success so a failed delete can be retried.
         self.claim_name = None

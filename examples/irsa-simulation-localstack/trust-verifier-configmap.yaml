@@ -1,0 +1,299 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sts-trust-verifier-script
+  namespace: irsa-sim-ns
+data:
+  verify_and_proxy.py: |
+    """Minimal STS-shaped proxy that actually verifies the WebIdentityToken's
+    signature, issuer, and audience before forwarding to LocalStack.
+
+    This closes the gap called out in the README: LocalStack's STS mock
+    accepts any WebIdentityToken without checking it, so on its own it only
+    proves the pod *discovers and uses* IRSA-style credentials, not that the
+    token would be trusted by a real relying party. This proxy performs the
+    same cryptographic check AWS IAM performs when an OIDC provider is
+    registered: fetch the issuer's JWKS, verify the JWT signature against it,
+    and check `aud`/`iss`/`exp`.
+
+    It does NOT validate a real AWS account's IAM OIDC provider registration
+    or role trust policy -- there is no real AWS account involved. It proves
+    the verification *mechanics* work against the cluster's real signing key,
+    nothing about a specific AWS account's configuration.
+
+    Only the AssumeRoleWithWebIdentity action is verified. Any other STS
+    action is passed straight through to LocalStack unauthenticated, matching
+    LocalStack's own local-only trust model -- this proxy only adds a check
+    for the one action this example's credential flow actually uses.
+
+    Uses http.server.ThreadingHTTPServer, which spawns one thread per
+    connection with no cap on the total number of threads. A per-connection
+    socket timeout (Handler.timeout below) bounds how long a single slow or
+    incomplete connection can hold a thread, but there is still no hard
+    concurrency ceiling. Fine for this single-sandbox kind-cluster demo; do
+    not copy this as-is into anything reachable by more than a handful of
+    trusted callers.
+
+    Both hops are TLS, not cleartext, and both are genuinely
+    certificate-verified: this server terminates HTTPS using a
+    cert-manager-issued certificate (trust-verifier-tls.yaml) that the
+    sandbox pod actually verifies (see AWS_CA_BUNDLE in sandbox.yaml), and it
+    in turn verifies LocalStack's own cert-manager-issued certificate
+    (localstack-tls.yaml, see LOCALSTACK_CA_FILE below) rather than
+    connecting with verify=False.
+    """
+    import json
+    import os
+    import ssl
+    import sys
+    import threading
+    import time
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import jwt
+    import requests
+    from jwt import PyJWKSet
+
+    # Never build the JWKS URL from a claim inside the token being verified --
+    # that would let a caller supplying an arbitrary token make this proxy
+    # fetch an attacker-controlled URL (SSRF). The JWKS location is always
+    # this fixed, in-cluster, well-known endpoint; the token's own `iss` claim
+    # is only ever *compared* against EXPECTED_ISSUER below, never dereferenced.
+    JWKS_URL = os.environ.get("JWKS_URL", "https://kubernetes.default.svc/openid/v1/jwks")
+    SA_CA_CERT = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    SA_TOKEN_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+    EXPECTED_ISSUER = os.environ["EXPECTED_ISSUER"]  # no default: force an explicit, reviewed value
+    EXPECTED_AUDIENCE = os.environ.get("EXPECTED_AUDIENCE", "sts.amazonaws.com")
+    LOCALSTACK_URL = os.environ.get("LOCALSTACK_URL", "https://localstack.irsa-sim-ns.svc.cluster.local:4566")
+    # localstack-tls.yaml issues LocalStack a certificate matching its real
+    # Service DNS name; this pod verifies against it genuinely, not verify=False.
+    LOCALSTACK_CA_FILE = os.environ.get("LOCALSTACK_CA_FILE", "/localstack-tls/ca.crt")
+
+    # cert-manager Certificate/trust-verifier-tls.yaml issues into this Secret,
+    # mounted read-only at this path by trust-verifier.yaml.
+    TLS_CERT_FILE = os.environ.get("TLS_CERT_FILE", "/tls/tls.crt")
+    TLS_KEY_FILE = os.environ.get("TLS_KEY_FILE", "/tls/tls.key")
+
+    # Kubernetes' own OIDC JWKS is always RS256-signed. Hardcoded rather than
+    # read from the token header (`jwt.get_unverified_header(token)["alg"]`)
+    # so the caller-controlled token can never choose its own algorithm --
+    # that's the alg-confusion class of attack, and this example exists to
+    # demonstrate the *correct* verification pattern, not merely one that
+    # happens to be safe because of the pinned library version.
+    EXPECTED_ALGORITHM = "RS256"
+
+    # ThreadingHTTPServer runs each request in its own thread, so reads/writes
+    # of this cache need _jwks_lock: without it, concurrent requests for the
+    # same unknown kid each observe the cache as stale and each call
+    # _fetch_jwks(), turning the 30s throttle below into a no-op (a
+    # thundering-herd correctness gap in the throttle itself, not in the
+    # verification result -- every caller still gets a correctly verified or
+    # rejected token either way).
+    _jwks_cache = {"keys_by_kid": {}, "fetched_at": 0.0}
+    _jwks_lock = threading.Lock()
+    _JWKS_MIN_REFETCH_INTERVAL_SECONDS = 30  # avoid hammering the API server if a bad kid is retried rapidly
+    # A *known* kid was, by definition, valid as of the last fetch -- but
+    # never re-checking it means a key removed from the cluster's JWKS
+    # (rotation, or a compromised key being revoked) stays trusted here
+    # indefinitely, until this process happens to restart. Force a refresh
+    # after this long even when every kid seen so far is still in cache, so
+    # a rotated-out key gets dropped (and any token still using it rejected)
+    # within a bounded window instead of never.
+    _JWKS_MAX_CACHE_AGE_SECONDS = 300
+
+
+    def _sa_bearer_token():
+        with open(SA_TOKEN_FILE) as f:
+            return f.read().strip()
+
+
+    def _fetch_jwks():
+        """(Re)fetch the cluster's own JWKS. Authenticated with this pod's own
+        ServiceAccount token: some clusters restrict the discovery endpoints to
+        `system:authenticated` rather than fully anonymous, so presenting our
+        own token (not the caller-supplied WebIdentityToken) works either way.
+        """
+        resp = requests.get(
+            JWKS_URL,
+            headers={"Authorization": f"Bearer {_sa_bearer_token()}"},
+            verify=SA_CA_CERT,
+            timeout=5,
+        )
+        resp.raise_for_status()
+        jwks = PyJWKSet.from_dict(resp.json())
+        _jwks_cache["keys_by_kid"] = {k.key_id: k for k in jwks.keys}
+        _jwks_cache["fetched_at"] = time.monotonic()
+
+
+    def _cache_needs_refresh(kid):
+        cache_age = time.monotonic() - _jwks_cache["fetched_at"]
+        return kid not in _jwks_cache["keys_by_kid"] or cache_age > _JWKS_MAX_CACHE_AGE_SECONDS
+
+    def _get_signing_key(kid):
+        if _cache_needs_refresh(kid):
+            # Hold the lock across the throttle check *and* the fetch: without
+            # it, N concurrent requests for the same unknown kid can all pass
+            # the "stale?" check before any of them updates fetched_at, each
+            # triggering its own JWKS fetch against the API server (the
+            # thundering-herd case the 30s throttle exists to prevent).
+            with _jwks_lock:
+                if _cache_needs_refresh(kid) and (
+                    time.monotonic() - _jwks_cache["fetched_at"] > _JWKS_MIN_REFETCH_INTERVAL_SECONDS
+                ):
+                    _fetch_jwks()
+        jwk = _jwks_cache["keys_by_kid"].get(kid)
+        if jwk is None:
+            raise KeyError(f"no JWKS key found for kid={kid!r}")
+        return jwk.key
+
+
+    def _verify_web_identity_token(token):
+        """Raises on any verification failure; returns decoded claims on success."""
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        if not kid:
+            raise ValueError("token header has no 'kid'")
+        signing_key = _get_signing_key(kid)
+        return jwt.decode(
+            token,
+            key=signing_key,
+            algorithms=[EXPECTED_ALGORITHM],
+            audience=EXPECTED_AUDIENCE,
+            issuer=EXPECTED_ISSUER,
+            options={"require": ["exp", "iat", "aud", "iss"]},
+        )
+
+
+    def _sts_error_xml(code, message, fault_type="Sender"):
+        return (
+            '<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">'
+            f"<Error><Type>{fault_type}</Type><Code>{code}</Code><Message>{message}</Message></Error>"
+            "<RequestId>local-trust-verifier</RequestId></ErrorResponse>"
+        ).encode()
+
+
+    class Handler(BaseHTTPRequestHandler):
+        # Bounds how long one connection can hold its thread: without this,
+        # a caller that opens a connection (TLS or not) and never finishes
+        # sending a request blocks that thread indefinitely, and enough of
+        # them exhausts ThreadingHTTPServer's uncapped thread-per-connection
+        # model. socketserver.BaseRequestHandler honors this by calling
+        # settimeout() on the accepted socket before handling it; a timeout
+        # triggers handle_timeout() (default: just closes the connection).
+        timeout = 30
+
+        def setup(self):
+            # __main__ wraps the listening socket with
+            # do_handshake_on_connect=False, so the TLS handshake is not
+            # performed inside accept() (see the comment there); it happens
+            # here instead, in this connection's own worker thread.
+            # super().setup() runs first and calls settimeout(self.timeout)
+            # on the connection before we touch it, so a stalled handshake
+            # (no ClientHello ever sent) is bounded by the same 30s timeout
+            # as a stalled HTTP request, not left to hang.
+            super().setup()
+            self.connection.do_handshake()
+
+        def log_message(self, fmt, *args):
+            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+        # Caller-controlled Content-Length must be validated before it's
+        # trusted to size a read() call -- an unbounded or malformed value
+        # would let any caller force a large in-memory allocation.
+        MAX_BODY_BYTES = 1 << 20  # 1 MiB; real AssumeRoleWithWebIdentity bodies are a few KB.
+
+        def do_POST(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                return self._respond(400, _sts_error_xml("InvalidIdentityToken", "invalid Content-Length"))
+            if length < 0 or length > self.MAX_BODY_BYTES:
+                return self._respond(400, _sts_error_xml("InvalidIdentityToken", "request body too large"))
+            body = self.rfile.read(length)
+            params = urllib.parse.parse_qs(body.decode())
+            action = params.get("Action", [None])[0]
+
+            if action == "AssumeRoleWithWebIdentity":
+                token = params.get("WebIdentityToken", [None])[0]
+                if not token:
+                    return self._respond(400, _sts_error_xml("InvalidIdentityToken", "missing WebIdentityToken"))
+                try:
+                    _verify_web_identity_token(token)
+                except Exception as e:
+                    # Full reason goes to server logs only -- echoing exception
+                    # text back to the caller in the response body is a minor
+                    # info-disclosure smell for something demonstrating a
+                    # security check, and str(e) isn't guaranteed XML-safe.
+                    print(f"REJECTED AssumeRoleWithWebIdentity: {e}", file=sys.stderr)
+                    return self._respond(400, _sts_error_xml("InvalidIdentityToken", "WebIdentityToken failed verification"))
+                print("VERIFIED AssumeRoleWithWebIdentity: signature/issuer/audience/expiry OK", file=sys.stderr)
+
+            # Verified (or not an action this proxy checks) -- forward untouched.
+            # verify=LOCALSTACK_CA_FILE, not verify=False: localstack-tls.yaml
+            # gives LocalStack a certificate matching its real Service DNS
+            # name (unlike LocalStack's own baked-in, publicly-known test
+            # cert), so this hop is genuinely certificate-verified, the same
+            # as the sandbox -> verifier hop below (__main__).
+            try:
+                upstream = requests.post(
+                    LOCALSTACK_URL,
+                    data=body,
+                    headers={"Content-Type": self.headers.get("Content-Type", "application/x-www-form-urlencoded")},
+                    timeout=10,
+                    verify=LOCALSTACK_CA_FILE,
+                    # The body being forwarded carries the now-verified
+                    # WebIdentityToken. requests follows POST redirects
+                    # (307/308 preserve the body) by default, so a redirecting
+                    # LocalStack response could otherwise cause the token to
+                    # be re-sent to a URL outside our TLS-verified endpoint.
+                    allow_redirects=False,
+                )
+            except requests.exceptions.RequestException as e:
+                # timeout=10 bounds the call itself, but a connection error,
+                # timeout, or bad TLS handshake still raises here -- without
+                # this, do_POST would exit with no _respond() call at all,
+                # leaving the caller hanging on a half-open connection
+                # instead of getting a clean error back.
+                print(f"LocalStack request failed: {e}", file=sys.stderr)
+                return self._respond(502, _sts_error_xml("InternalFailure", "upstream STS request failed", fault_type="Receiver"))
+            self._respond(upstream.status_code, upstream.content)
+
+        def _respond(self, status, body_bytes):
+            self.send_response(status)
+            self.send_header("Content-Type", "text/xml")
+            self.send_header("Content-Length", str(len(body_bytes)))
+            self.end_headers()
+            self.wfile.write(body_bytes)
+
+
+    if __name__ == "__main__":
+        _fetch_jwks()
+        server = ThreadingHTTPServer(("0.0.0.0", 4566), Handler)
+        # Terminates TLS here with the cert-manager-issued cert/key mounted
+        # from trust-verifier-tls.yaml's Secret -- this is the hop that
+        # carries the real WebIdentityToken and the resulting AWS
+        # credentials, so unlike the LocalStack hop above, callers (the
+        # sandbox pod, via AWS_CA_BUNDLE) are expected to actually verify
+        # this certificate, not skip verification.
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(certfile=TLS_CERT_FILE, keyfile=TLS_KEY_FILE)
+        # do_handshake_on_connect=False: ThreadingHTTPServer's accept loop is
+        # single-threaded -- a client that opens a raw TCP connection and
+        # never sends a TLS ClientHello would otherwise block *inside
+        # accept() itself* (the default performs the handshake synchronously
+        # as part of accepting), stalling every other connection before a
+        # worker thread even exists. Handler.timeout only bounds a
+        # connection's own thread once accept() has already returned, so it
+        # cannot protect the accept loop from this. With the handshake
+        # deferred, it happens lazily on first read/write inside the
+        # per-connection worker thread instead, where Handler.timeout does
+        # apply.
+        server.socket = ssl_context.wrap_socket(
+            server.socket,
+            server_side=True,
+            do_handshake_on_connect=False,
+        )
+        print(f"sts-trust-verifier listening on :4566 (TLS), issuer={EXPECTED_ISSUER!r} audience={EXPECTED_AUDIENCE!r}", file=sys.stderr)
+        server.serve_forever()

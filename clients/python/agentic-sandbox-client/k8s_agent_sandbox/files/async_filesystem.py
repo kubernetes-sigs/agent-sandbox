@@ -12,44 +12,138 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Async filesystem operations for legacy and sandboxd runtimes."""
+"""Asynchronous filesystem operations for sandbox runtimes."""
 
+import asyncio
+import io
 import logging
 import urllib.parse
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, Awaitable, BinaryIO, Protocol
+
+import httpx
 
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
-from k8s_agent_sandbox.exceptions import SandboxRequestError
-from k8s_agent_sandbox.files.filesystem import Filesystem, _sandboxd_files_endpoint
-from k8s_agent_sandbox.models import FileEntry
+from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxResponseTooLargeError
+from k8s_agent_sandbox.files.filesystem import (
+    Filesystem,
+    _check_download_headers,
+    _coerce_binary,
+    _download_limit,
+    _extract_endpoint,
+    _multipart_framing,
+    _read_binary_chunk,
+    _STREAM_CHUNK_SIZE,
+    _list_endpoint,
+    _mkdir_endpoint,
+    _require_stat_json,
+    _check_write_options,
+    _sandboxd_files_endpoint,
+    _sandboxd_read_endpoint,
+    _sandboxd_op_endpoint,
+    _sandboxd_write_request,
+    _stat_endpoint,
+    _stat_entry,
+    _transfer_endpoint,
+)
+from k8s_agent_sandbox.models import FileEntry, SandboxFileConfig
 from k8s_agent_sandbox.trace_manager import async_trace_span, trace
+
+logger = logging.getLogger(__name__)
+
+
+class AsyncBinaryWriter(Protocol):
+    """An asynchronous destination that accepts binary file content."""
+
+    def write(self, content: bytes) -> Awaitable[int]:
+        """Write content and return the number of accepted bytes."""
+        ...
+
+
+class _AsyncBufferWriter:
+    """Adapt an in-memory destination to the asynchronous writer protocol."""
+
+    def __init__(self, buffer: io.BytesIO) -> None:
+        self.buffer = buffer
+
+    async def write(self, content: bytes) -> int:
+        return self.buffer.write(content)
+
+
+async def _write_all(destination: AsyncBinaryWriter, content: bytes) -> int:
+    """Write all content, including to destinations that perform partial writes."""
+    written = 0
+    while written < len(content):
+        count = await destination.write(content[written:])
+        if count is None or count <= 0:
+            raise OSError("Download destination did not accept file content.")
+        if count > len(content) - written:
+            raise OSError("Download destination reported an invalid write count.")
+        written += count
+    return written
+
+
+async def _iter_multipart_body(
+    prefix: bytes,
+    content: BinaryIO,
+    suffix: bytes,
+) -> AsyncIterator[bytes]:
+    yield prefix
+    while chunk := await asyncio.to_thread(_read_binary_chunk, content):
+        yield chunk
+    yield suffix
+
+
+async def _iter_binary_chunks(content: BinaryIO) -> AsyncIterator[bytes]:
+    """Read a binary stream in bounded chunks without blocking the loop."""
+    while chunk := await asyncio.to_thread(_read_binary_chunk, content):
+        yield chunk
 
 
 class AsyncFilesystem:
     """Read and modify sandbox files without blocking the event loop."""
 
     def __init__(
-        self, connector: AsyncSandboxConnector, tracer: Any, trace_service_name: str
+        self, connector: AsyncSandboxConnector, tracer: Any, trace_service_name: str,
+        *, file_config: SandboxFileConfig | None = None,
     ) -> None:
         self.connector = connector
         self.tracer = tracer
         self.trace_service_name = trace_service_name
+        self._file_config = file_config or SandboxFileConfig()
 
     @async_trace_span("write")
     async def write(
         self,
-        path: str, content: bytes | str,
+        path: str,
+        content: bytes | str | BinaryIO,
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
-    ):
-        """Write bytes or UTF-8 text to a sandbox-relative path."""
+        append: bool = False,
+        create_only: bool = False,
+    ) -> None:
+        """Upload content to a sandbox-relative path.
+
+        Binary file objects are read in chunks from their current position and
+        sent once without retries. The caller must close the file object; its
+        position may advance if the upload fails.
+
+        On the sandboxd runtime, ``append=True`` adds to the end of the file
+        and ``create_only=True`` fails with a 412 ``SandboxRequestError`` if
+        the path exists. Neither is retried, and they cannot be combined
+        (``ValueError``). The legacy runtime raises
+        ``NotImplementedError``.
+        """
+        _check_write_options(self.connector, append, create_only)
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        else:
+            content = _coerce_binary(content)
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-            span.set_attribute("sandbox.file.size", len(content))
-
-        if isinstance(content, str):
-            content = content.encode("utf-8")
+            if isinstance(content, bytes):
+                span.set_attribute("sandbox.file.size", len(content))
 
         # Use the same hardened sanitizer as the sync twin — rejects
         # empty / bare-'.', embedded NUL and ASCII control characters,
@@ -58,21 +152,43 @@ class AsyncFilesystem:
         # returns the string unchanged, and the NUL truncates at the
         # runtime's C layer.
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         if self.connector.is_sandboxd():
+            endpoint, headers, retry_safe = _sandboxd_write_request(
+                path, append, create_only)
+            if isinstance(content, bytes):
+                body: bytes | AsyncIterator[bytes] = content
+            else:
+                body = _iter_binary_chunks(content)
+                retry_safe = False
             await self.connector.send_request(
                 "PUT",
-                _sandboxd_files_endpoint(path),
-                content=content,
-                headers={"Content-Type": "application/octet-stream"},
+                endpoint,
+                content=body,
+                headers=headers,
                 timeout=timeout,
+                _disable_retries=not retry_safe,
             )
-        else:
+        elif isinstance(content, bytes):
             files_payload = {"file": (path, content)}
             await self.connector.send_request(
                 "POST", "upload", files=files_payload, timeout=timeout
             )
-        logging.info(f"File '{path}' uploaded successfully.")
+        else:
+            prefix, suffix, content_type = _multipart_framing(path)
+            # This async iterator is one-shot. AsyncSandboxConnector must not
+            # add automatic POST retries, which would replay it as an empty body.
+            await self.connector.send_request(
+                "POST",
+                "upload",
+                content=_iter_multipart_body(prefix, content, suffix),
+                headers={"Content-Type": content_type},
+                timeout=timeout,
+                _disable_retries=True,
+            )
+        logger.info(f"File '{path}' uploaded successfully.")
 
     @async_trace_span("read")
     async def read(
@@ -81,15 +197,32 @@ class AsyncFilesystem:
         timeout: int = 60,
         allow_unsafe_paths: bool = False,
     ) -> bytes:
-        """Read a sandbox-relative file and return its raw bytes."""
+        """Read a sandbox-relative file and return its complete raw bytes.
+
+        A configured ``max_download_size`` is enforced while downloading;
+        exceeding it raises ``SandboxResponseTooLargeError`` without returning
+        partial content. Downloads remain unlimited when it is unset.
+
+        On the sandboxd runtime, a directory raises ``SandboxRequestError``
+        with status 409, and the root path ``/`` raises ``ValueError``.
+        """
+        if self._file_config.max_download_size is not None:
+            with io.BytesIO() as destination:
+                await self._read_to(
+                    path, _AsyncBufferWriter(destination), timeout, allow_unsafe_paths, None
+                )
+                return destination.getvalue()
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
 
         if not allow_unsafe_paths:
-            path = Filesystem._safe_upload_path(path)
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
         endpoint = (
-            _sandboxd_files_endpoint(path)
+            _sandboxd_read_endpoint(path)
             if self.connector.is_sandboxd()
             else f"download/{urllib.parse.quote(path, safe='')}"
         )
@@ -101,17 +234,114 @@ class AsyncFilesystem:
 
         return content
 
-    @async_trace_span("list")
-    async def list(self, path: str, timeout: int = 60) -> list[FileEntry]:
-        """List files and directories at a sandbox-relative path."""
+    @async_trace_span("read_to")
+    async def read_to(
+        self,
+        path: str,
+        destination: AsyncBinaryWriter,
+        timeout: int = 60,
+        allow_unsafe_paths: bool = False,
+        max_bytes: int | None = None,
+    ) -> int:
+        """Stream a sandbox file into a caller-owned asynchronous destination.
+
+        The destination is never closed. The smaller of ``max_bytes`` and the
+        configured ``max_download_size`` applies, ignoring unset limits.
+        At most that many bytes are written before an oversized download raises
+        ``SandboxResponseTooLargeError`` (a ``RuntimeError`` subclass). Data
+        written before an error or cancellation remains in the destination.
+        The returned value is the number of bytes written.
+
+        On the sandboxd runtime, a directory raises ``SandboxRequestError``
+        with status 409, and the root path ``/`` raises ``ValueError``.
+        """
+        return await self._read_to(path, destination, timeout, allow_unsafe_paths, max_bytes)
+
+    async def _read_to(
+        self, path: str, destination: AsyncBinaryWriter, timeout: int,
+        allow_unsafe_paths: bool, max_bytes: int | None,
+    ) -> int:
+        if destination is None or not callable(getattr(destination, "write", None)):
+            raise TypeError("Download destination must provide a write(bytes) method.")
+        max_bytes = _download_limit(self._file_config, max_bytes)
+
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
+
+        if not allow_unsafe_paths:
+            path = Filesystem._safe_upload_path(
+                path, preserve_absolute=self.connector.is_sandboxd()
+            )
+        endpoint = (
+            _sandboxd_read_endpoint(path)
+            if self.connector.is_sandboxd()
+            else f"download/{urllib.parse.quote(path, safe='')}"
+        )
+        response = await self.connector.send_request(
+            "GET", endpoint, timeout=timeout, stream=True
+        )
+        total = 0
+        try:
+            if not 200 <= response.status_code < 300:
+                raise SandboxRequestError(
+                    f"Unexpected status downloading sandbox file: {response.status_code}",
+                    status_code=response.status_code,
+                    response=response,
+                )
+            _check_download_headers(response.headers, max_bytes)
+
+            async for chunk in response.aiter_bytes(chunk_size=_STREAM_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                if max_bytes is not None:
+                    remaining = max_bytes - total
+                    if len(chunk) > remaining:
+                        if remaining > 0:
+                            total += await _write_all(destination, chunk[:remaining])
+                        raise SandboxResponseTooLargeError(
+                            f"File size exceeds limit of {max_bytes} bytes."
+                        )
+                total += await _write_all(destination, chunk)
+        except httpx.HTTPError:
+            transport_token = response.extensions.get("sandboxd_transport_token")
+            if transport_token is not None:
+                await self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
+            raise
+        finally:
+            await response.aclose()
+
+        if span.is_recording():
+            span.set_attribute("sandbox.file.size", total)
+        return total
+
+    @async_trace_span("list")
+    async def list(
+        self,
+        path: str,
+        timeout: int = 60,
+        recursive: bool = False,
+        max_depth: int | None = None,
+    ) -> list[FileEntry]:
+        """List files and directories at a sandbox-relative path.
+
+        With ``recursive=True`` the listing includes nested entries, and entry
+        names are paths relative to ``path``. ``max_depth`` limits how many
+        levels it descends, where 1 lists only the directory's own entries.
+        ``recursive=True`` needs the sandboxd runtime; the legacy python-runtime
+        raises NotImplementedError.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _list_endpoint(self.connector, path, recursive, max_depth)
         # sandboxd wraps directory entries in a DirectoryListing envelope;
         # the legacy runtime returns the entry list directly.
         if self.connector.is_sandboxd():
             response = await self.connector.send_request(
-                "GET", _sandboxd_files_endpoint(path), timeout=timeout
+                "GET", endpoint, timeout=timeout
             )
         else:
             encoded_path = urllib.parse.quote(path, safe="")
@@ -205,7 +435,31 @@ class AsyncFilesystem:
         exists = response_data.get("exists", False)
         if span.is_recording():
             span.set_attribute("sandbox.file.exists", exists)
-        return exists
+        return bool(exists)
+
+    @async_trace_span("stat")
+    async def stat(self, path: str, timeout: int = 60) -> FileEntry:
+        """Return the metadata of a sandboxd path. See ``Filesystem.stat``."""
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _stat_endpoint(self.connector, path)
+        response = await self.connector.send_request(
+            "GET", endpoint, timeout=timeout, stream=True
+        )
+        try:
+            _require_stat_json(response.headers)
+            await response.aread()
+            return _stat_entry(response)
+        except httpx.HTTPError:
+            transport_token = response.extensions.get("sandboxd_transport_token")
+            if transport_token is not None:
+                await self.connector.invalidate_sandboxd_transport(
+                    None, transport_token=transport_token
+                )
+            raise
+        finally:
+            await response.aclose()
 
     @async_trace_span("delete")
     async def delete(
@@ -219,15 +473,77 @@ class AsyncFilesystem:
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
-        if not self.connector.is_sandboxd():
-            raise NotImplementedError(
-                "delete() is only supported by the sandboxd runtime; the legacy "
-                "python-runtime has no delete endpoint"
-            )
-        if path == "":
-            raise ValueError("delete: path must not be empty")
-        endpoint = _sandboxd_files_endpoint(path)
-        if recursive:
-            endpoint += "?recursive=true"
+        endpoint = _sandboxd_op_endpoint(
+            self.connector, "delete", path,
+            query={"recursive": "true"} if recursive else None)
         await self.connector.send_request("DELETE", endpoint, timeout=timeout)
-        logging.info(f"Path '{path}' deleted successfully.")
+        logger.info(f"Path '{path}' deleted successfully.")
+
+    @async_trace_span("mkdir")
+    async def mkdir(
+        self, path: str, parents: bool = False, timeout: int = 60
+    ) -> None:
+        """Create a sandboxd directory, and its missing parents if ``parents``.
+
+        Succeeds if the directory already exists. The legacy runtime raises
+        ``NotImplementedError``.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _mkdir_endpoint(self.connector, path, parents)
+        await self.connector.send_request("PUT", endpoint, timeout=timeout)
+        logger.info(f"Directory '{path}' created successfully.")
+
+    @async_trace_span("move")
+    async def move(
+        self, source: str, destination: str, overwrite: bool = False, timeout: int = 60
+    ) -> None:
+        """Rename a sandboxd file or directory. See ``Filesystem.move``."""
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", source)
+        endpoint = _transfer_endpoint(
+            self.connector, "move", source, destination, overwrite)
+        await self.connector.send_request("POST", endpoint, timeout=timeout)
+        logger.info(f"Path '{source}' moved to '{destination}'.")
+
+    @async_trace_span("copy")
+    async def copy(
+        self, source: str, destination: str, overwrite: bool = False, timeout: int = 60
+    ) -> None:
+        """Copy a sandboxd file or directory. See ``Filesystem.move``."""
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", source)
+        endpoint = _transfer_endpoint(
+            self.connector, "copy", source, destination, overwrite)
+        await self.connector.send_request("POST", endpoint, timeout=timeout)
+        logger.info(f"Path '{source}' copied to '{destination}'.")
+
+    @async_trace_span("extract")
+    async def extract(
+        self, path: str, archive: bytes | BinaryIO, timeout: int = 60
+    ) -> None:
+        """Unpack a tar archive into a sandboxd directory.
+
+        See ``Filesystem.extract``.
+        """
+        span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attribute("sandbox.file.path", path)
+        endpoint = _extract_endpoint(self.connector, path)
+        archive = _coerce_binary(archive)
+        body: bytes | AsyncIterator[bytes]
+        if isinstance(archive, bytes):
+            body = archive
+        else:
+            body = _iter_binary_chunks(archive)
+        await self.connector.send_request(
+            "PUT", endpoint,
+            content=body,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=timeout,
+            _disable_retries=not isinstance(archive, bytes),
+        )
+        logger.info(f"Archive extracted into '{path}'.")

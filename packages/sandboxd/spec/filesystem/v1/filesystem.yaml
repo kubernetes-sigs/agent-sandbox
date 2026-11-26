@@ -26,8 +26,14 @@ info:
     from environment variables. See KEP-539.2 for the endpoint and wire-format differences.
     Security note: sandboxd listens on the pod network by default. Protect both runtime ports with
     pod isolation and NetworkPolicy, or bind to loopback for local-only access. Never expose the
-    runtime API directly to an untrusted public network.
+    runtime API directly to an untrusted public network. When sandboxd runs with --auth-token-sha256 or --auth-token-file,
+    every request except GET /v1/health must carry "Authorization: Bearer <token>"; otherwise it
+    is refused with 401 UNAUTHENTICATED.
   version: "v1"
+
+security:
+  - {}
+  - bearerAuth: []
 
 servers:
   - url: http://localhost:8080/v1
@@ -36,25 +42,27 @@ servers:
 paths:
   /files/{path}:
     parameters:
-      - name: path
-        in: path
-        required: true
-        schema:
-          type: string
-        description: >
-          Sandbox-relative path (e.g. main.py or src/main.py).
-          Nested paths may use literal '/' separators or percent-encoded '%2F'.
-          The supported SDKs encode the complete path value. The server decodes
-          the request path before resolving it against the sandbox root.
+      - $ref: "#/components/parameters/FilePath"
 
     get:
-      summary: Read a file or list a directory
+      summary: Read a file, list a directory, or get path metadata
       description: >
         If the path points to a file, returns raw file bytes (application/octet-stream).
         If the path points to a directory, returns a structured directory listing (application/json).
+        With stat=true, returns one FileEntry for the requested file or directory.
+        The name is the basename of the requested path ("/" for the sandbox root).
+        Symlinks within the sandbox root report metadata for their target.
+        Named pipes, devices, and other special files fail with 400.
+        Pass type to fail with 409 instead when the path is not of the expected kind.
+        Pass recursive=true to also list nested directories.
+      parameters:
+        - $ref: "#/components/parameters/ExpectedType"
+        - $ref: "#/components/parameters/Stat"
+        - $ref: "#/components/parameters/ListRecursive"
+        - $ref: "#/components/parameters/ListMaxDepth"
       responses:
         "200":
-          description: File contents or directory listing
+          description: File contents, directory listing, or metadata for the requested path
           content:
             application/octet-stream:
               schema:
@@ -62,43 +70,129 @@ paths:
                 format: binary
             application/json:
               schema:
-                $ref: "#/components/schemas/DirectoryListing"
+                oneOf:
+                  - $ref: "#/components/schemas/DirectoryListing"
+                  - $ref: "#/components/schemas/FileEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
     head:
       summary: Check whether a file or directory exists
       description: Returns the same status and metadata headers as GET without a response body.
+      parameters:
+        - $ref: "#/components/parameters/ExpectedType"
+        - $ref: "#/components/parameters/Stat"
+        - $ref: "#/components/parameters/ListRecursive"
+        - $ref: "#/components/parameters/ListMaxDepth"
       responses:
         "200":
           description: Path exists
+        "400":
+          description: >
+            The type, stat, recursive, or max_depth query is invalid, or a recursive listing
+            exceeds 10000 entries, or the path is a special file such as a named pipe
         "403":
           description: Path escapes sandbox root, or permission is denied during path lookup or file open
         "404":
           description: Path does not exist within the sandbox
+        "409":
+          description: Path exists but is not of the kind requested by the type query
         "500":
           description: Permission is denied while reading a directory, or another internal filesystem error
 
     put:
-      summary: Write or overwrite a file (Idempotent)
+      summary: Write or overwrite a file, or create a directory (Idempotent unless append=true)
       description: >
         Atomically writes request body to the given path using a temporary file and rename strategy.
-        Parent directories are created automatically. Supports both new file creation and overwriting.
+        File writes create missing parent directories automatically. Supports both new file creation and overwriting.
+        With append=true the body is added to the end of the file instead, which is not atomic
+        or idempotent: retrying an append adds the body again.
+        With type=directory the request creates an empty directory instead and ignores the body.
+        It succeeds when the directory already exists. Missing parents need parents=true.
+        With extract=tar the body is a tar archive, optionally gzip-compressed, that the request
+        unpacks into the directory at the path. Extraction is not atomic: after an error, the
+        entries written so far stay in place.
       parameters:
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [file, directory]
+            default: file
+          description: >
+            Kind of path to create. Use directory to create a directory, which cannot be combined
+            with append=true.
+        - name: parents
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >
+            Only with type=directory. If true, also creates missing parent directories. Otherwise a
+            missing parent fails with 404.
         - name: mode
           in: query
           required: false
           schema:
             type: string
             pattern: "^0[0-7]{3}$"
-            default: "0644"
-          description: Octal permission bits applied to the written file (e.g. "0755" or "0644").
+          description: >
+            Octal permission bits applied to the written file (e.g. "0755" or "0644").
+            Defaults to "0644" for files and "0755" for directories.
+            With append=true, applied only when the request creates the file.
+            With type=directory or extract=tar, the bits apply only to a directory the request creates.
+        - name: extract
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [tar]
+          description: >
+            Unpacks the body, a tar archive that may be gzip-compressed, into the directory at the
+            path and creates the directory, with missing parents, if it does not exist. Existing
+            files are replaced and existing directories are merged. Regular files, directories,
+            and symlinks are extracted with their permission bits, and other entry types such as
+            hard links and devices fail with 400. An entry path that leaves the directory fails
+            with 403, and an entry whose type conflicts with an existing path fails with 409.
+            A symlink target is written as given, so a link can point outside the directory.
+            Only later requests through this API are confined to the sandbox root.
+            More than 100000 entries or 1 GiB of file data fails with 413 before the entry that
+            crosses the cap is written.
+            Cannot be combined with append=true, type, or If-None-Match.
+        - name: append
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: >
+            If true, appends the body to the file, creating it if it does not exist.
+            Readers can see a partial append, and concurrent appends can interleave.
+            An existing target must be a regular file; special files fail with 400.
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+            enum: ["*"]
+          description: >
+            Set to "*" to create the file only if the path does not exist. If it exists, including
+            as a directory, the request fails with 412 and writes nothing. Other values are rejected
+            with 400, as is combining it with type=directory or extract=tar. With append=true the body is created,
+            not appended.
       requestBody:
-        required: true
+        required: false
+        description: File content, or the archive with extract=tar. Required unless type=directory, which ignores it.
         content:
           application/octet-stream:
             schema:
@@ -115,11 +209,25 @@ paths:
                   format: binary
       responses:
         "204":
-          description: File written successfully
+          description: File written, directory created, or archive extracted successfully
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "412":
+          description: If-None-Match is "*" and the path already exists
+        "413":
+          description: With extract=tar, the archive is over the entry or byte cap
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -147,8 +255,75 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /files/{path}:move:
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    post:
+      summary: Move or rename a file or directory
+      description: >
+        Renames the path to the destination query path, creating missing parent directories.
+        A move within one filesystem is atomic. Across filesystems it copies and then removes
+        the source, so both paths are briefly absent. The destination must not exist, except that overwrite=true
+        replaces an existing file with a file. A directory is never replaced and cannot move
+        into itself. The check for an existing destination is not atomic with the move.
+        A symlink in the final component of either path is not followed: the move applies
+        to the link itself. Symlinks in parent directories are followed within the sandbox root.
+      parameters:
+        - $ref: "#/components/parameters/Destination"
+        - $ref: "#/components/parameters/Overwrite"
+      responses:
+        "204":
+          description: Moved successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /files/{path}:copy:
+    parameters:
+      - $ref: "#/components/parameters/FilePath"
+    post:
+      summary: Copy a file or directory
+      description: >
+        Copies the path to the destination query path, creating missing parent directories.
+        A directory is copied recursively. A file keeps its permission bits, and a symlink
+        inside a copied directory is copied as a link. Each copy is published atomically, so
+        a failed copy leaves no partial destination. The destination must not exist, except
+        that overwrite=true replaces an existing file with a file. A directory is never
+        replaced and cannot be copied into itself. The check for an existing destination is
+        not atomic with the copy. A symlink in the final component of either path is not
+        followed: a copied symlink is recreated as a link. Symlinks in parent directories are
+        followed within the sandbox root.
+      parameters:
+        - $ref: "#/components/parameters/Destination"
+        - $ref: "#/components/parameters/Overwrite"
+      responses:
+        "204":
+          description: Copied successfully
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "507":
+          $ref: "#/components/responses/InsufficientStorage"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /health:
     get:
+      security: []
       summary: Sandbox readiness and heartbeat check
       description: >
         Used by orchestrators and Kubernetes liveness/readiness probes to verify sandboxd is healthy.
@@ -185,6 +360,77 @@ paths:
                 $ref: "#/components/schemas/MetadataResponse"
 
 components:
+  parameters:
+    FilePath:
+      name: path
+      in: path
+      required: true
+      schema:
+        type: string
+      description: >
+        Sandbox-relative path (e.g. main.py or src/main.py).
+        Nested paths may use literal '/' separators or percent-encoded '%2F'.
+        The supported SDKs encode the complete path value. The server decodes
+        the request path before resolving it against the sandbox root.
+
+    Destination:
+      name: destination
+      in: query
+      required: true
+      schema:
+        type: string
+      description: Sandbox-relative path to move or copy to, resolved like the path parameter.
+
+    Overwrite:
+      name: overwrite
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: If true, replaces an existing destination file with a file. Directories are never replaced.
+
+    ExpectedType:
+      name: type
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [file, directory]
+      description: >
+        Kind of path the client expects. If the path exists but is the other kind,
+        the request fails with 409 instead of returning the other representation.
+        Omit it to accept either.
+    Stat:
+      name: stat
+      in: query
+      schema:
+        type: boolean
+        default: false
+      description: Return metadata without opening the file or listing directory entries. Listing depth does not affect this response.
+    ListRecursive:
+      name: recursive
+      in: query
+      required: false
+      schema:
+        type: boolean
+        default: false
+      description: >
+        If true, a directory listing also includes the contents of nested directories.
+        Symlinks to directories are listed but not entered. A subdirectory that cannot
+        be read is listed without its contents. Ignored for files.
+    ListMaxDepth:
+      name: max_depth
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+      description: >
+        With recursive=true, the number of directory levels to list. 1 lists only the
+        direct children. Omit it for no depth limit. A listing of more than 10000
+        entries fails with 400. Ignored unless recursive=true.
+
   schemas:
     DirectoryListing:
       type: object
@@ -210,6 +456,9 @@ components:
       properties:
         name:
           type: string
+          description: >
+            Entry name. In a recursive listing, the path relative to the listed directory
+            with "/" separators, and a directory comes before its contents.
           example: "main.py"
         size:
           type: integer
@@ -222,6 +471,7 @@ components:
         modified_at:
           type: string
           format: date-time
+          description: UTC modification time including available sub-second precision.
         mode:
           type: string
           description: Octal permission bits
@@ -262,7 +512,23 @@ components:
           type: string
           example: "Path traversal outside sandbox root is forbidden."
 
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Required on every request except GET /v1/health when sandboxd runs with --auth-token-sha256 or --auth-token-file.
+
   responses:
+    Unauthorized:
+      description: Missing or invalid bearer token (only when sandboxd runs with --auth-token-sha256 or --auth-token-file)
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     BadRequest:
       description: Invalid request parameters or payload
       content:
@@ -282,7 +548,16 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Conflict:
-      description: Directory not empty when recursive=false
+      description: >
+        The path's current state conflicts with the request, for example a directory
+        that is not empty when recursive=false, a path that is not of the kind
+        requested by the type query, or a file at the path when type=directory
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InsufficientStorage:
+      description: The sandbox filesystem is full or its quota is exhausted (code RESOURCE_EXHAUSTED)
       content:
         application/json:
           schema:

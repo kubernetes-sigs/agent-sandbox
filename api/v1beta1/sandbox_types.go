@@ -44,13 +44,11 @@ func (c ConditionType) String() string { return string(c) }
 
 const (
 	// SandboxConditionSuspended reports progress of an administrative suspension.
-	// It is set while operatingMode is Suspended: Status is True once the backing Pod
-	// has been terminated (reason PodTerminated), and False while the Pod is still
-	// terminating (reason PodNotTerminated).
-	// Note: the controller does not currently remove this condition when the Sandbox is
-	// resumed, so a stale Suspended condition may linger after operatingMode returns to
-	// Running. Consumers should treat Ready as the authoritative signal and not infer the
-	// live operating state from the mere presence of this condition.
+	// While operatingMode is Suspended, Status is True once the backing Pod has been
+	// terminated (reason PodTerminated), and False while the Pod is still terminating
+	// (reason PodTerminating).
+	// The condition is never removed: once the Sandbox runs again it reports False with
+	// reason NotSuspended. Consumers should treat Ready as the authoritative signal.
 	SandboxConditionSuspended ConditionType = "Suspended"
 	// SandboxReasonSuspendedPodTerminated indicates the Suspended condition is True because the backing Pod has been terminated.
 	SandboxReasonSuspendedPodTerminated = "PodTerminated"
@@ -77,8 +75,8 @@ const (
 	// Service already exists even though one was not explicitly requested.
 	// In all other states Status is False with a reason describing why: the Sandbox is
 	// still provisioning (DependenciesNotReady), suspended (SandboxSuspended), its Pod
-	// has reached a terminal phase (PodSucceeded/PodFailed), it has expired
-	// (SandboxExpired), or the controller hit an error (ReconcilerError).
+	// is terminating (PodTerminating) or terminal (PodSucceeded/PodFailed), it has
+	// expired (SandboxExpired), or the controller hit an error (ReconcilerError).
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxReasonDependenciesReady is the Ready=True reason: the Pod (and Service, if
 	// requested) are provisioned and the Pod reports Ready with an assigned IP.
@@ -87,10 +85,23 @@ const (
 	// to be running but its underlying dependencies (Pod and/or Service) are not fully
 	// provisioned or not yet reporting Ready.
 	SandboxReasonDependenciesNotReady = "DependenciesNotReady"
+	// SandboxReasonReconcilerError is a Ready=False reason: reconciling a child
+	// resource failed with an error that is not covered by a more specific reason.
+	// The controller retries, so this is typically transient.
+	SandboxReasonReconcilerError = "ReconcilerError"
 	// SandboxReasonMultiplePods indicates the Sandbox cannot become ready because
 	// more than one Pod is controlled by its UID and the controller cannot choose
 	// a canonical stateful Pod safely.
 	SandboxReasonMultiplePods = "MultiplePods"
+	// SandboxReasonInvalidConfiguration is a Ready=False reason: reconciling a
+	// child resource failed with a permanent apiserver validation error that
+	// retrying cannot fix. The common trigger is a Sandbox name that yields a
+	// derived Service name exceeding Kubernetes' 63-character limit (Sandbox and
+	// Pod names may be up to 253 characters, but a Service name is a DNS-1035
+	// label). The controller reports the failure here and stops requeuing instead
+	// of hot-looping on a create that can never succeed; recreate the Sandbox with
+	// a shorter name to resolve it.
+	SandboxReasonInvalidConfiguration = "InvalidConfiguration"
 	// SandboxReasonSuspended is a Ready=False reason: the Sandbox has been administratively
 	// suspended (i.e., intentional action by the user to suspend the Sandbox).
 	SandboxReasonSuspended = "SandboxSuspended"
@@ -98,28 +109,50 @@ const (
 	// SandboxConditionPodScheduled mirrors the backing Pod's PodScheduled
 	// condition so consumers can see why a Sandbox is not scheduled (e.g.
 	// Unschedulable, SchedulingGated) without reading the Pod. The Pod
-	// condition's status, reason and message are copied through verbatim;
-	// the condition is absent while the Sandbox has no backing Pod.
+	// condition's status, reason and message are copied through verbatim,
+	// except when an unscheduled Pod is terminating (Status is False with
+	// reason PodTerminating). The condition is never removed: while the
+	// Sandbox has no backing Pod it reports False with reason PodAbsent, and
+	// once the Sandbox has expired, False with reason SandboxExpired.
 	SandboxConditionPodScheduled ConditionType = "PodScheduled"
 	// SandboxReasonPodScheduled indicates the backing Pod has been scheduled
 	// to a node. Used when the Pod's PodScheduled condition carries no reason
 	// of its own (the scheduler sets none on success).
 	SandboxReasonPodScheduled = "PodScheduled"
-	// SandboxReasonPodSchedulingUnknown indicates the backing Pod exists but
-	// has not reported a PodScheduled condition yet.
+	// SandboxReasonPodSchedulingUnknown indicates the scheduling state cannot be
+	// determined: the Pod has not reported PodScheduled yet, reports it without a
+	// reason (and not True), or could not be read.
 	SandboxReasonPodSchedulingUnknown = "PodSchedulingUnknown"
+	// SandboxReasonPodTerminating indicates the backing Pod has a deletion
+	// timestamp. Ready keeps it even after the Pod reaches Failed or Succeeded,
+	// and Finished stays unchanged rather than reporting that phase. With
+	// failedPodPolicy Recreate, the controller replaces a Failed Pod instead, so
+	// Ready is DependenciesNotReady and Finished stays absent unless it was
+	// already set.
+	SandboxReasonPodTerminating = "PodTerminating"
+	// SandboxReasonPodAbsent indicates the PodScheduled condition is False because
+	// the Sandbox has no backing Pod, for example before the Pod is created, while
+	// a failed Pod is replaced, or while the Sandbox is suspended. While the Sandbox
+	// is suspended, a Pod with its name that it does not own counts as absent.
+	SandboxReasonPodAbsent = "PodAbsent"
 
-	// SandboxConditionFinished reports that the backing Pod reached a terminal phase.
-	// It is set (Status True) only after the Pod has Succeeded or Failed, with the reason
-	// recording which; it is absent while the Pod is still running or does not exist.
+	// SandboxConditionFinished reports whether the backing Pod reached a terminal phase.
+	// It is absent until the Pod first has Succeeded or Failed, and then set (Status
+	// True) with the reason recording which. Once set, it is never removed. It keeps
+	// its last value while the Sandbox is suspended, while its Pod is terminating, and
+	// when a later Pod read fails. Otherwise it is False with reason NotFinished until
+	// a later Pod finishes.
 	SandboxConditionFinished ConditionType = "Finished"
 	// SandboxReasonPodSucceeded indicates the backing Pod completed successfully.
 	SandboxReasonPodSucceeded = "PodSucceeded"
 	// SandboxReasonPodFailed indicates the backing Pod completed unsuccessfully.
 	SandboxReasonPodFailed = "PodFailed"
+	// SandboxReasonNotFinished indicates the Finished condition is False because the
+	// Sandbox has no backing Pod or its Pod has not reached a terminal phase.
+	SandboxReasonNotFinished = "NotFinished"
 
-	// SandboxReasonExpired is a Ready=False reason: the Sandbox reached its shutdownTime
-	// and its underlying resources were torn down (see Lifecycle).
+	// SandboxReasonExpired is a Ready=False and PodScheduled=False reason: the Sandbox reached its shutdownTime.
+	// Teardown of its underlying resources may still be pending (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
@@ -150,6 +183,10 @@ const (
 	SandboxWarmPoolLabel = "agents.x-k8s.io/warm-pool-sandbox"
 	// SandboxTemplateRefHashLabel identifies which SandboxTemplate a Sandbox originated from.
 	SandboxTemplateRefHashLabel = "agents.x-k8s.io/sandbox-template-ref-hash"
+	// SandboxNameHashLabel is the tracking label the controller stamps on every
+	// Pod, Service and PVC it creates or adopts for a Sandbox. Its value is the
+	// hash of the Sandbox name.
+	SandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
 )
 
 type PodMetadata struct {
@@ -169,12 +206,9 @@ type PodMetadata struct {
 }
 
 type EmbeddedObjectMetadata struct {
-	// name must be unique within a namespace. Is required when creating resources, although
-	// some resources may allow a client to request the generation of an appropriate name
-	// automatically. Name is primarily intended for creation idempotence and configuration
-	// definition.
-	// Cannot be updated.
-	// More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names#names
+	// name is the pod volume name and the prefix of the PVC name, which is
+	// named after the template and the Sandbox, joined by a hyphen. It can be at most 63 characters, the pod volume name limit.
+	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	Name string `json:"name,omitempty"`
 
@@ -203,6 +237,7 @@ type PodTemplate struct {
 	ObjectMeta PodMetadata `json:"metadata"`
 }
 
+// +kubebuilder:validation:XValidation:rule="has(self.metadata) && has(self.metadata.name) && size(self.metadata.name) > 0",message="metadata.name must not be empty"
 type PersistentVolumeClaimTemplate struct {
 	// metadata is the PVC's metadata.
 	// +optional
@@ -235,6 +270,19 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
+// FailedPodPolicy controls behavior when the backing Pod reaches phase Failed.
+// +kubebuilder:validation:Enum=Retain;Recreate
+type FailedPodPolicy string
+
+const (
+	// FailedPodPolicyRetain leaves a Failed Pod in place and surfaces Finished=True.
+	// This is the default.
+	FailedPodPolicyRetain FailedPodPolicy = "Retain"
+	// FailedPodPolicyRecreate deletes the controller-owned Failed Pod so a new one
+	// is created. The Sandbox identity and any Sandbox-owned PVCs are retained.
+	FailedPodPolicyRecreate FailedPodPolicy = "Recreate"
+)
+
 // NOTE: When adding, removing, or renaming a field in SandboxBlueprint,
 // also update compareSandboxBlueprint() in extensions/controllers/sandboxwarmpool_controller.go
 // so the SandboxWarmPool staleness check accounts for it. A field left out of that comparison
@@ -247,13 +295,31 @@ type SandboxBlueprint struct {
 	// Note: When provisioned via a SandboxTemplate (such as by a SandboxClaim or SandboxWarmPool),
 	// if AutomountServiceAccountToken is not specified in the PodSpec, the controller defaults it
 	// to false to ensure a secure-by-default environment.
+	// Changes after creation:
+	//   - On a Sandbox, labels and annotations in podTemplate.metadata are propagated to the
+	//     existing Pod. Other changes do not affect a running Pod; they take effect when the
+	//     controller next creates the Pod, for example after the Pod is deleted or the
+	//     Sandbox is resumed.
+	//   - On a SandboxTemplate, pod spec changes do not update existing Sandboxes directly.
+	//     A SandboxWarmPool using Recreate deletes stale, unclaimed Sandboxes and creates
+	//     replacements from the updated template. OnReplenish leaves stale, unclaimed
+	//     Sandboxes in place. Claimed Sandboxes are never replaced.
 	// +required
 	PodTemplate PodTemplate `json:"podTemplate"`
 
 	// volumeClaimTemplates is a list of claims that the sandbox pod is allowed to reference.
 	// When creating a sandbox, PVCs will be created from these templates.
 	// Every claim in this list must have at least one matching access mode with a provisioner volume.
+	// Each PVC is named after the template and the Sandbox, joined by a hyphen, and is owned
+	// by the Sandbox. It is kept while the Sandbox is suspended or retained after expiry, so a
+	// resumed Pod reattaches it with its data. It is garbage collected when the Sandbox
+	// object is deleted.
+	// On a Sandbox this list is immutable after creation.
 	// NOTE: This list is atomic. Updates to this field will replace the entire list rather than merging with existing entries.
+	// Each entry must have a unique, non-empty metadata.name.
+	// At most 128 entries: the cap only bounds the CEL cost of the uniqueness rule.
+	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:XValidation:rule="self.all(a, !has(a.metadata) || !has(a.metadata.name) || self.exists_one(b, has(b.metadata) && has(b.metadata.name) && b.metadata.name == a.metadata.name))",message="volumeClaimTemplates names must be unique"
 	// +optional
 	// +listType=atomic
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
@@ -266,6 +332,20 @@ type SandboxBlueprint struct {
 	//nolint:kubeapilinter // Enum not used to avoid duplicating the Service API; field is not expected to extend (issue #746).
 	// +optional
 	Service *bool `json:"service,omitempty"`
+
+	// failedPodPolicy controls what happens when the backing Pod enters phase Failed.
+	// Retain (default): leave the Failed pod and surface Finished=True.
+	// Recreate: delete the controller-owned Failed pod so a new one is created;
+	// the Sandbox identity and any Sandbox-owned PVCs are retained.
+	// Combined with restartPolicy Never and a container that always exits non-zero,
+	// Recreate can recreate the Pod repeatedly; the controller applies Deployment-style
+	// in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash
+	// loop cannot hot-loop the API server. Backoff resets after the replacement Pod has
+	// been continuously observed Running for 10 minutes. Backoff state is not persisted
+	// in status.
+	// +kubebuilder:default=Retain
+	// +optional
+	FailedPodPolicy FailedPodPolicy `json:"failedPodPolicy,omitempty"`
 }
 
 // SandboxSpec defines the desired state of Sandbox.
@@ -288,7 +368,8 @@ type SandboxSpec struct {
 	// operatingMode specifies the desired operational state of the Sandbox:
 	//   - Running (default): the controller keeps a backing Pod running.
 	//   - Suspended: the controller terminates the backing Pod but retains the
-	//     Sandbox object and its volumes so it can later be resumed.
+	//     Sandbox object and its volumes so it can later be resumed. Resuming creates a new
+	//     Pod from the current podTemplate that reattaches the retained volumes.
 	// This field declares intent only. The observed readiness of the Sandbox is
 	// reported by the Ready condition, and the progress of a suspension by the
 	// Suspended condition; a Sandbox in Running mode is not Ready until its Pod is
@@ -379,6 +460,7 @@ type SandboxStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].reason"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:storageversion
+// +kubebuilder:validation:XValidation:rule="!has(self.spec.service) || !self.spec.service || size(self.metadata.name) <= 63",message="metadata.name must not exceed 63 characters when spec.service is true"
 // Sandbox is the Schema for the sandboxes API.
 type Sandbox struct {
 	metav1.TypeMeta `json:",inline"`

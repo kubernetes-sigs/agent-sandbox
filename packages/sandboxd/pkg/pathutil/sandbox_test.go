@@ -17,6 +17,7 @@ package pathutil
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,21 @@ func TestSanitizePathAbsolutePathConfined(t *testing.T) {
 	require.Equal(t, filepath.Join(resolvedRoot, "f.txt"), gotFull)
 }
 
+func TestSanitizePathAbsolutePathConfinedThroughRootSymlink(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	rootAlias := filepath.Join(base, "root-alias")
+	require.NoError(t, os.Mkdir(root, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(root, rootAlias))
+
+	got, err := SanitizePath(rootAlias, filepath.Join(rootAlias, "f.txt"))
+	require.NoError(t, err)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedRoot, "f.txt"), got)
+}
+
 func TestSanitizePathSiblingPrefixAbsolute(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "workspace")
@@ -129,5 +145,87 @@ func TestSanitizePathNonExistentWriteTarget(t *testing.T) {
 	require.NoError(t, err)
 	// Only the closest existing parent is resolved; the remaining
 	// components are preserved lexically.
+	require.Equal(t, filepath.Join(resolvedRoot, "sub", "dir", "new.txt"), got)
+}
+
+func TestSanitizePathFilesystemRoot(t *testing.T) {
+	dir := t.TempDir()
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(resolvedDir, "f.txt"), []byte("x"), 0o644))
+
+	// With "/" as the root, an absolute path is itself.
+	got, err := SanitizePath("/", filepath.Join(resolvedDir, "f.txt"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedDir, "f.txt"), got)
+
+	// So is a write target that does not exist yet.
+	got, err = SanitizePath("/", filepath.Join(resolvedDir, "new", "g.txt"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedDir, "new", "g.txt"), got)
+
+	// A relative path resolves against "/", and ".." cannot climb above it.
+	got, err = SanitizePath("/", strings.TrimPrefix(filepath.Join(resolvedDir, "f.txt"), "/"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedDir, "f.txt"), got)
+
+	got, err = SanitizePath("/", "../..")
+	require.NoError(t, err)
+	require.Equal(t, "/", got)
+}
+
+func TestSanitizeEntryPathKeepsFinalSymlink(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "dir"), 0o755))
+	require.NoError(t, os.MkdirAll(outside, 0o755))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "dir", "escape")))
+	require.NoError(t, os.Symlink("real", filepath.Join(root, "dir", "inside")))
+	require.NoError(t, os.Symlink("dir", filepath.Join(root, "alias")))
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+
+	// A final symlink is returned as is, even when it points outside the root.
+	for _, p := range []string{"dir/escape", "dir/inside", "/dir/escape", filepath.Join(root, "dir", "escape")} {
+		got, err := SanitizeEntryPath(root, p)
+		require.NoError(t, err, p)
+		require.Equal(t, filepath.Join(resolvedRoot, "dir", filepath.Base(p)), got, p)
+	}
+
+	// Symlinks in parent components are still resolved.
+	got, err := SanitizeEntryPath(root, "alias/escape")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(resolvedRoot, "dir", "escape"), got)
+
+	// So the entry beneath an escaping parent is rejected.
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "out")))
+	_, err = SanitizeEntryPath(root, "out/secret")
+	require.ErrorIs(t, err, ErrPathEscapes)
+	_, err = SanitizeEntryPath(root, "out/sub/new")
+	require.ErrorIs(t, err, ErrPathEscapes)
+}
+
+func TestSanitizeEntryPathRootAndTraversal(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "workspace")
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "workspace-evil"), 0o755))
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	require.NoError(t, err)
+
+	for _, p := range []string{"", ".", "/", "a/..", root} {
+		got, err := SanitizeEntryPath(root, p)
+		require.NoError(t, err, p)
+		require.Equal(t, resolvedRoot, got, p)
+	}
+	for _, p := range []string{"..", "../x", "a/../../x", "../workspace-evil/f.txt"} {
+		_, err := SanitizeEntryPath(root, p)
+		require.ErrorIs(t, err, ErrPathEscapes, p)
+	}
+
+	// A path that does not exist yet resolves like SanitizePath does.
+	got, err := SanitizeEntryPath(root, "sub/dir/new.txt")
+	require.NoError(t, err)
 	require.Equal(t, filepath.Join(resolvedRoot, "sub", "dir", "new.txt"), got)
 }

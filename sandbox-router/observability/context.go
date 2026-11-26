@@ -45,6 +45,15 @@ type Labels struct {
 	// for every browser-facing request. Empty when unset, same as
 	// SandboxNamespace before the "-" sentinel is applied.
 	SandboxID string
+	// GRPC distinguishes an RPC outcome from its HTTP transport status.
+	GRPC bool
+	// GRPCStatusCode carries the terminal gRPC status code as a decimal
+	// string ("0", "14"). The proxy sets it when the status never appears
+	// in a response header — a gRPC-Web response delivers it inside a body
+	// trailer frame instead — so access logs and spans can still report
+	// the RPC outcome. Empty when unset; consumers fall back to sniffing
+	// response headers.
+	GRPCStatusCode string
 }
 
 type labelsKey struct{}
@@ -94,6 +103,17 @@ func SandboxNamespaceFromContext(ctx context.Context) string {
 		return "-"
 	}
 	return l.SandboxNamespace
+}
+
+// RecordGRPCStatus stores the terminal gRPC status code (decimal string) on
+// the Labels attached to ctx, so the access log and tracing middleware can
+// report it even when the response headers never carry Grpc-Status — the
+// gRPC-Web case, where the status travels in a body trailer frame. A no-op
+// when no Labels are attached.
+func RecordGRPCStatus(ctx context.Context, status string) {
+	if l := LabelsFromContext(ctx); l != nil {
+		l.GRPCStatusCode = status
+	}
 }
 
 type loggerKey struct{}

@@ -15,17 +15,35 @@
 """Tests for async sandboxd tunnel and gRPC channel ownership."""
 
 import asyncio
+import json
+import os
 import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import prometheus_client
+from kubernetes_asyncio import client as async_client
+
 from k8s_agent_sandbox.async_connector import (
     AsyncSandboxConnector,
+    AsyncSandboxdInClusterStrategy,
     AsyncSandboxdPodTunnelStrategy,
+    MAX_RETRIES,
 )
-from k8s_agent_sandbox.exceptions import SandboxPortForwardError
-from k8s_agent_sandbox.models import SandboxdPodTunnelConnectionConfig
+from k8s_agent_sandbox.exceptions import (
+    SandboxNoServiceError,
+    SandboxNotReadyError,
+    SandboxPortForwardError,
+    SandboxRequestError,
+)
+from k8s_agent_sandbox.models import (
+    SandboxGatewayConnectionConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
+)
 
 
 class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
@@ -49,6 +67,57 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(connector.is_sandboxd())
         self.assertFalse(connector.should_inject_router_headers())
         await connector.close()
+
+    async def test_transfer_state_from(self):
+        old_connector = self._build()
+        old_connector._default_ssl_context = MagicMock()
+        connector = self._build()
+        try:
+            connector.transfer_state_from(old_connector)
+            self.assertIs(connector._default_ssl_context, old_connector._default_ssl_context)
+        finally:
+            await connector.close()
+            await old_connector.close()
+
+    async def test_disable_retries_for_non_replayable_request_body(self):
+        connector = self._build()
+        connector._resolve_base_url = AsyncMock(return_value="http://127.0.0.1:18080")
+        request = httpx.Request("PUT", "http://127.0.0.1:18080/v1/files/data")
+        connector.client.request = AsyncMock(
+            return_value=httpx.Response(503, request=request)
+        )
+
+        async def body():
+            yield b"payload"
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request(
+                    "PUT",
+                    "v1/files/data",
+                    content=body(),
+                    _disable_retries=True,
+                )
+            connector.client.request.assert_awaited_once()
+        finally:
+            await connector.close()
+
+    async def test_disable_retries_for_non_replayable_transport_failure(self):
+        connector = self._build()
+        connector._resolve_base_url = AsyncMock(return_value="http://127.0.0.1:18080")
+        request = httpx.Request("PUT", "http://127.0.0.1:18080/v1/files/data")
+        connector.client.request = AsyncMock(
+            side_effect=httpx.ConnectError("connection failed", request=request)
+        )
+
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request(
+                    "PUT", "v1/files/data", _disable_retries=True
+                )
+            connector.client.request.assert_awaited_once()
+        finally:
+            await connector.close()
 
     async def test_connect_exposes_rest_and_grpc_endpoints(self):
         connector = self._build()
@@ -76,7 +145,66 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         channel.close.assert_awaited_once()
         self.assertIsNone(connector._grpc_channel)
 
-    async def test_concurrent_grpc_channel_creates_one_channel(self):
+    async def test_close_reaps_resources_when_http_client_close_fails(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock()
+        channel = MagicMock()
+        channel.close = AsyncMock()
+        connector._grpc_channel = channel
+
+        with self.assertRaisesRegex(RuntimeError, "http close failed"):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        channel.close.assert_awaited_once()
+
+    async def test_close_reaps_tunnel_when_channel_close_fails_and_retries(self):
+        connector = self._build()
+        channel = MagicMock()
+        channel.close = AsyncMock(side_effect=[RuntimeError("channel close failed"), None])
+        connector._grpc_channel = channel
+        connector._sandboxd_strategy.close = AsyncMock(side_effect=[None, None])
+
+        with self.assertRaisesRegex(RuntimeError, "channel close failed"):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        self.assertIs(connector._grpc_channel, channel)
+
+        await connector.close()
+
+        self.assertIsNone(connector._grpc_channel)
+        self.assertEqual(connector._sandboxd_strategy.close.await_count, 2)
+
+    async def test_close_preserves_first_error_after_strategy_cleanup_fails(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock(
+            side_effect=RuntimeError("tunnel close failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "http close failed"):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        self.assertFalse(connector._close_complete)
+
+    async def test_close_prioritizes_cancellation_over_other_cleanup_errors(self):
+        connector = self._build()
+        connector.client.aclose = AsyncMock(side_effect=RuntimeError("http close failed"))
+        connector._sandboxd_strategy.close = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await connector.close()
+
+        connector._sandboxd_strategy.close.assert_awaited_once()
+        self.assertFalse(connector._close_complete)
+
+    @patch("k8s_agent_sandbox.async_connector.httpx.AsyncClient", wraps=httpx.AsyncClient)
+    async def test_concurrent_grpc_channel_creates_one_channel(self, http_client):
         connector = self._build()
         connector._sandboxd_strategy.connect = AsyncMock(
             return_value=("http://127.0.0.1:18080", "127.0.0.1:19090")
@@ -95,6 +223,7 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertIs(first, second)
         insecure_channel.assert_called_once_with("127.0.0.1:19090")
         await connector.close()
+        http_client.assert_not_called()
 
     async def test_missing_grpc_does_not_start_tunnel(self):
         connector = self._build()
@@ -268,6 +397,542 @@ class TestAsyncSandboxdConnector(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(strategy.port_forward_process)
         self.assertIsNone(strategy.base_url)
         self.assertIsNone(strategy.grpc_target)
+
+    async def test_tunnel_close_retains_process_for_retry_after_wait_failure(self):
+        process = MagicMock(returncode=None)
+        process.terminate = MagicMock()
+        process.wait = AsyncMock(side_effect=[RuntimeError("wait failed"), None])
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+        )
+        strategy.port_forward_process = process
+        strategy.base_url = "http://127.0.0.1:18080"
+        strategy.grpc_target = "127.0.0.1:19090"
+
+        with self.assertRaisesRegex(RuntimeError, "wait failed"):
+            await strategy.close()
+
+        self.assertIs(strategy.port_forward_process, process)
+        await strategy.close()
+        self.assertIsNone(strategy.port_forward_process)
+
+
+class TestAsyncSandboxdRouterTunnel(unittest.IsolatedAsyncioTestCase):
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock, return_value=True)
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_get_free_port", side_effect=[18080, 18081])
+    async def test_shared_tunnel_reconnect_and_cleanup(self, free_port, is_open, spawn):
+        processes = [MagicMock(returncode=None), MagicMock(returncode=None)]
+        for process in processes:
+            process.wait = AsyncMock()
+        spawn.side_effect = processes
+        get_pod_name = AsyncMock(side_effect=AssertionError("must target the router"))
+        connector = AsyncSandboxConnector(
+            "sandbox", "agents",
+            SandboxdRouterTunnelConnectionConfig(router_namespace="routers", rest_port=8181, grpc_port=9191),
+            SimpleNamespace(injected_api_client=None), get_pod_name=get_pod_name,
+        )
+        try:
+            self.assertTrue(connector.is_sandboxd())
+            self.assertTrue(connector.should_inject_router_headers())
+            results = await asyncio.gather(connector.connect(), connector.connect())
+            self.assertEqual(results, ["http://127.0.0.1:18080"] * 2)
+            first_channel = await connector.grpc_channel()
+            self.assertIs(await connector.grpc_channel(), first_channel)
+            spawn.assert_awaited_once_with(
+                "kubectl", "port-forward", "svc/sandbox-router-svc", "18080:8080", "-n", "routers",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            self.assertEqual(connector.grpc_target, "127.0.0.1:18080")
+            processes[0].returncode = 1
+            self.assertEqual(await connector.connect(), "http://127.0.0.1:18081")
+            self.assertIsNot(await connector.grpc_channel(), first_channel)
+            self.assertEqual(connector.grpc_target, "127.0.0.1:18081")
+            get_pod_name.assert_not_awaited()
+        finally:
+            await connector.close()
+        processes[1].terminate.assert_called_once()
+        self.assertIsNone(connector.grpc_target)
+        self.assertIsNone(connector._sandboxd_strategy.port_forward_process)
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    async def test_cancelled_router_tunnel_is_cleaned_up(self, is_open, spawn):
+        process = MagicMock(returncode=None)
+        process.wait = AsyncMock()
+        spawn.return_value = process
+        is_open.side_effect = asyncio.CancelledError()
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            "sandbox", "agents", SandboxdRouterTunnelConnectionConfig(),
+        )
+        with self.assertRaises(asyncio.CancelledError):
+            await strategy.connect()
+        process.terminate.assert_called_once()
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy.grpc_target)
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    async def test_router_start_failure_names_service_and_namespace(self, spawn):
+        spawn.side_effect = FileNotFoundError("kubectl not found")
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            "sandbox", "agents", SandboxdRouterTunnelConnectionConfig(router_namespace="routers"),
+        )
+        with self.assertRaisesRegex(SandboxPortForwardError, "routers/svc/sandbox-router-svc"):
+            await strategy.connect()
+
+
+class TestAsyncTunnelTargetsInjectedApiClient(unittest.IsolatedAsyncioTestCase):
+    """kubectl must reach the cluster an injected ApiClient targets, not the ambient one."""
+
+    def _api_client(self):
+        cfg = async_client.Configuration()
+        cfg.host = "https://cluster-b:6443"
+        cfg.api_key = {"authorization": "secret"}
+        cfg.api_key_prefix = {"authorization": "Bearer"}
+        return async_client.ApiClient(configuration=cfg)
+
+    def _strategy(self, api_client):
+        return AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=AsyncMock(return_value="sandbox-1"),
+            api_client=api_client,
+        )
+
+    def _recording_subprocess(self, calls):
+        async def create_subprocess(*cmd, **kwargs):
+            # kubectl reads the kubeconfig at startup, so capture it here.
+            path = cmd[cmd.index("--kubeconfig") + 1] if "--kubeconfig" in cmd else None
+            content = None
+            if path:
+                with open(path) as f:
+                    content = json.load(f)
+            calls.append((cmd, path, content))
+            process = MagicMock(returncode=None)
+            process.terminate = MagicMock()
+            process.wait = AsyncMock()
+            return process
+
+        return create_subprocess
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    async def test_pod_tunnel_uses_injected_cluster(self, is_port_open, create_subprocess):
+        is_port_open.return_value = True
+        calls = []
+        create_subprocess.side_effect = self._recording_subprocess(calls)
+        api_client = self._api_client()
+        strategy = self._strategy(api_client)
+
+        await strategy.connect()
+
+        cmd, path, content = calls[0]
+        self.assertEqual(cmd[:3], ("kubectl", "port-forward", "pod/sandbox-1"))
+        self.assertEqual(content["clusters"][0]["cluster"]["server"], "https://cluster-b:6443")
+        self.assertEqual(content["users"][0]["user"]["token"], "secret")
+        self.assertFalse(os.path.exists(path), "kubeconfig must not outlive the connect")
+        await strategy.close()
+        await api_client.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    async def test_pod_tunnel_without_api_client_adds_no_flags(
+        self, is_port_open, create_subprocess
+    ):
+        is_port_open.return_value = True
+        calls = []
+        create_subprocess.side_effect = self._recording_subprocess(calls)
+        strategy = self._strategy(None)
+
+        await strategy.connect()
+
+        self.assertNotIn("--kubeconfig", calls[0][0])
+        await strategy.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    async def test_pod_tunnel_removes_kubeconfig_when_start_fails(self, create_subprocess):
+        paths = []
+
+        async def fail(*cmd, **kwargs):
+            paths.append(cmd[cmd.index("--kubeconfig") + 1])
+            raise FileNotFoundError("kubectl not found")
+
+        create_subprocess.side_effect = fail
+        api_client = self._api_client()
+        strategy = self._strategy(api_client)
+
+        with self.assertRaises(SandboxPortForwardError):
+            await strategy.connect()
+
+        self.assertFalse(os.path.exists(paths[0]))
+        await api_client.close()
+
+    async def test_connector_passes_the_helpers_injected_client_to_the_tunnel(self):
+        injected = MagicMock(name="ApiClient")
+        connector = AsyncSandboxConnector(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            connection_config=SandboxdPodTunnelConnectionConfig(),
+            k8s_helper=MagicMock(injected_api_client=injected),
+            get_pod_name=AsyncMock(return_value="sandbox-1"),
+        )
+
+        self.assertIs(connector._sandboxd_strategy._api_client, injected)
+        await connector.close()
+
+
+class TestAsyncSandboxdInClusterConnector(unittest.IsolatedAsyncioTestCase):
+    def _build(self, mode="in-cluster-service", pod_ip=None, service_fqdn=None,
+               rest_port=8080, grpc_port=9090):
+        pod_ip = pod_ip or AsyncMock(return_value="10.0.0.1")
+        service_fqdn = service_fqdn or AsyncMock(
+            return_value="sandbox.agents.svc.example.internal"
+        )
+        connector = AsyncSandboxConnector(
+            sandbox_id="sandbox",
+            namespace="agents",
+            connection_config=SandboxdInClusterConnectionConfig(
+                mode=mode, rest_port=rest_port, grpc_port=grpc_port
+            ),
+            k8s_helper=MagicMock(),
+            get_pod_ip=pod_ip,
+            get_service_fqdn=service_fqdn,
+        )
+        return connector, pod_ip, service_fqdn
+
+    async def test_service_mode_uses_reported_fqdn_and_caches_it(self):
+        connector, pod_ip, service = self._build(
+            rest_port=18080, grpc_port=19090
+        )
+        self.assertIsInstance(connector._sandboxd_strategy, AsyncSandboxdInClusterStrategy)
+        self.assertTrue(connector.is_sandboxd())
+        self.assertFalse(connector.should_inject_router_headers())
+        try:
+            self.assertEqual(
+                await connector.connect(),
+                "http://sandbox.agents.svc.example.internal:18080",
+            )
+            self.assertEqual(
+                connector.grpc_target,
+                "sandbox.agents.svc.example.internal:19090",
+            )
+            await connector.connect()
+            service.assert_awaited_once()
+            pod_ip.assert_not_awaited()
+        finally:
+            await connector.close()
+
+    async def test_service_mode_missing_fqdn_never_falls_back(self):
+        connector, pod_ip, _ = self._build(
+            service_fqdn=AsyncMock(return_value=None)
+        )
+        try:
+            with self.assertRaisesRegex(SandboxNoServiceError, "spec.service"):
+                await connector.connect()
+            pod_ip.assert_not_awaited()
+        finally:
+            await connector.close()
+
+    async def test_pod_mode_refreshes_ip_and_brackets_ipv6(self):
+        pod_ip = AsyncMock(side_effect=["10.0.0.1", "2001:db8::5"])
+        connector, _, service = self._build(
+            mode="in-cluster-pod-ip", pod_ip=pod_ip, rest_port=18080, grpc_port=19090
+        )
+        try:
+            self.assertEqual(await connector.connect(), "http://10.0.0.1:18080")
+            self.assertEqual(await connector.connect(), "http://[2001:db8::5]:18080")
+            self.assertEqual(connector.grpc_target, "[2001:db8::5]:19090")
+            service.assert_not_awaited()
+            self.assertEqual(pod_ip.await_count, 2)
+        finally:
+            await connector.close()
+
+    async def test_pod_mode_missing_ip_and_status_error_fail_closed(self):
+        pod_ip = AsyncMock(
+            side_effect=["10.0.0.1", PermissionError("status denied"), None]
+        )
+        connector, _, service = self._build(mode="in-cluster-pod-ip", pod_ip=pod_ip)
+        try:
+            await connector.connect()
+            with self.assertRaisesRegex(PermissionError, "status denied"):
+                await connector.connect()
+            self.assertIsNone(connector.grpc_target)
+            with self.assertRaises(SandboxNotReadyError):
+                await connector.connect()
+            service.assert_not_awaited()
+        finally:
+            await connector.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    async def test_rest_request_has_no_router_headers_or_subprocess(self, subprocess_exec):
+        connector, _, _ = self._build(mode="in-cluster-pod-ip")
+        response = httpx.Response(
+            200, request=httpx.Request("GET", "http://10.0.0.1:8080/v1/files/a.txt")
+        )
+        connector.client.request = AsyncMock(return_value=response)
+        try:
+            await connector.send_request("GET", "v1/files/a.txt")
+            args, kwargs = connector.client.request.call_args
+            self.assertEqual(args[1], "http://10.0.0.1:8080/v1/files/a.txt")
+            self.assertFalse(any(key.startswith("X-Sandbox-") for key in kwargs["headers"]))
+            subprocess_exec.assert_not_awaited()
+        finally:
+            await connector.close()
+
+    async def test_grpc_channel_reuse_replacement_and_close(self):
+        pod_ip = AsyncMock(side_effect=["10.0.0.1", "10.0.0.1", "10.0.0.2"])
+        connector, _, _ = self._build(mode="in-cluster-pod-ip", pod_ip=pod_ip)
+        first, second = MagicMock(), MagicMock()
+        first.close = AsyncMock()
+        second.close = AsyncMock()
+        dial = MagicMock(side_effect=[first, second])
+        fake_grpc = SimpleNamespace(aio=SimpleNamespace(insecure_channel=dial))
+        with patch.dict(sys.modules, {"grpc": fake_grpc}):
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), first)
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), first)
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), second)
+        self.assertEqual(dial.call_count, 2)
+        dial.assert_any_call("10.0.0.1:9090")
+        dial.assert_any_call("10.0.0.2:9090")
+        first.close.assert_awaited_once()
+        await connector.close()
+        second.close.assert_awaited_once()
+
+    async def test_service_transport_failure_refreshes_fqdn_next_time(self):
+        service = AsyncMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        request = httpx.Request("GET", "http://old.agents.svc:8080/v1/files/a.txt")
+        response = httpx.Response(200, request=request)
+        connector.client.request = AsyncMock(
+            side_effect=[
+                httpx.ConnectError("dns failed", request=request)
+                for _ in range(MAX_RETRIES + 1)
+            ] + [response]
+        )
+        try:
+            with patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep",
+                new_callable=AsyncMock,
+            ):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "v1/files/a.txt")
+            await connector.send_request("GET", "v1/files/a.txt")
+            self.assertEqual(service.await_count, 2)
+            args, _ = connector.client.request.call_args
+            self.assertIn("new.agents.svc", args[1])
+        finally:
+            await connector.close()
+
+    async def test_service_transport_failure_discards_existing_grpc_channel(self):
+        service = AsyncMock(return_value="stable.agents.svc")
+        connector, _, _ = self._build(service_fqdn=service)
+        first, second = MagicMock(), MagicMock()
+        first.close = AsyncMock()
+        second.close = AsyncMock()
+        dial = MagicMock(side_effect=[first, second])
+        request = httpx.Request("GET", "http://stable.agents.svc:8080/v1/files/a.txt")
+        connector.client.request = AsyncMock(
+            side_effect=httpx.ConnectError("connection failed", request=request)
+        )
+        fake_grpc = SimpleNamespace(aio=SimpleNamespace(insecure_channel=dial))
+        try:
+            with patch.dict(sys.modules, {"grpc": fake_grpc}):
+                await connector.connect()
+                self.assertIs(await connector.grpc_channel(), first)
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "v1/files/a.txt")
+                first.close.assert_awaited_once()
+                self.assertIsNone(connector._grpc_channel)
+                await connector.connect()
+                self.assertIs(await connector.grpc_channel(), second)
+            self.assertEqual(service.await_count, 2)
+            self.assertEqual(dial.call_count, 2)
+        finally:
+            await connector.close()
+
+    async def test_pod_transport_failure_discards_existing_grpc_channel(self):
+        connector, _, _ = self._build(mode="in-cluster-pod-ip")
+        channel = MagicMock()
+        channel.close = AsyncMock()
+        request = httpx.Request("GET", "http://10.0.0.1:8080/v1/files/a.txt")
+        connector.client.request = AsyncMock(
+            side_effect=httpx.ConnectError("connection failed", request=request)
+        )
+        fake_grpc = SimpleNamespace(
+            aio=SimpleNamespace(insecure_channel=MagicMock(return_value=channel))
+        )
+        try:
+            with patch.dict(sys.modules, {"grpc": fake_grpc}):
+                await connector.connect()
+                self.assertIs(await connector.grpc_channel(), channel)
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("GET", "v1/files/a.txt")
+            channel.close.assert_awaited_once()
+            self.assertIsNone(connector._grpc_channel)
+        finally:
+            await connector.close()
+
+    async def test_service_http_5xx_keeps_fqdn_cache(self):
+        connector, _, service = self._build()
+        request = httpx.Request("POST", "http://sandbox.agents.svc:8080/v1/files/a.txt")
+        connector.client.request = AsyncMock(
+            return_value=httpx.Response(500, request=request)
+        )
+        try:
+            with self.assertRaises(SandboxRequestError):
+                await connector.send_request("POST", "v1/files/a.txt")
+            await connector.connect()
+            service.assert_awaited_once()
+        finally:
+            await connector.close()
+
+    async def test_grpc_unavailable_discards_channel_and_service_cache(self):
+        service = AsyncMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        channel = MagicMock()
+        channel.close = AsyncMock()
+        fake_grpc = SimpleNamespace(
+            aio=SimpleNamespace(insecure_channel=MagicMock(return_value=channel))
+        )
+        with patch.dict(sys.modules, {"grpc": fake_grpc}):
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), channel)
+        await connector.invalidate_sandboxd_transport(channel)
+        channel.close.assert_awaited_once()
+        self.assertEqual(await connector.connect(), "http://new.agents.svc:8080")
+        await connector.close()
+
+    async def test_late_stream_failure_does_not_discard_replacement(self):
+        service = AsyncMock(side_effect=["old.agents.svc", "new.agents.svc"])
+        connector, _, _ = self._build(service_fqdn=service)
+        first, second = MagicMock(), MagicMock()
+        first.close = AsyncMock()
+        second.close = AsyncMock()
+        response = httpx.Response(
+            200, request=httpx.Request("GET", "http://old.agents.svc:8080/v1/files/a.txt")
+        )
+        connector.client.send = AsyncMock(return_value=response)
+        fake_grpc = SimpleNamespace(aio=SimpleNamespace(
+            insecure_channel=MagicMock(side_effect=[first, second])
+        ))
+        with patch.dict(sys.modules, {"grpc": fake_grpc}):
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), first)
+            await connector.send_request("GET", "v1/files/a.txt", stream=True)
+            old_token = response.extensions["sandboxd_transport_token"]
+            await connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            await connector.connect()
+            self.assertIs(await connector.grpc_channel(), second)
+            await connector.invalidate_sandboxd_transport(None, transport_token=old_token)
+            self.assertIs(await connector.grpc_channel(), second)
+            self.assertEqual(await connector.connect(), "http://new.agents.svc:8080")
+        first.close.assert_awaited_once()
+        second.close.assert_not_awaited()
+        self.assertEqual(service.await_count, 2)
+        await connector.close()
+
+    def test_atexit_path_clears_direct_state_without_subprocess(self):
+        connector, _, _ = self._build()
+        strategy = connector._sandboxd_strategy
+        self.assertIsInstance(strategy, AsyncSandboxdInClusterStrategy)
+        strategy._service_fqdn = "sandbox.agents.svc"
+        connector.grpc_target = "sandbox.agents.svc:9090"
+        connector._close_for_atexit()
+        self.assertTrue(connector._closed)
+        self.assertIsNone(connector.grpc_target)
+        self.assertIsNone(strategy._service_fqdn)
+
+
+class TestAsyncDiscoveryLatencyMetric(unittest.IsolatedAsyncioTestCase):
+    """The async connector reports the same discovery latency metric as the sync one."""
+
+    def _count(self, mode, status):
+        return prometheus_client.REGISTRY.get_sample_value(
+            "sandbox_client_discovery_latency_ms_count",
+            labels={"mode": mode, "status": status},
+        ) or 0.0
+
+    def _gateway_connector(self, wait_for_gateway_ip):
+        helper = MagicMock()
+        helper.wait_for_gateway_ip = wait_for_gateway_ip
+        return AsyncSandboxConnector(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            connection_config=SandboxGatewayConnectionConfig(
+                gateway_name="gw", gateway_namespace="default"
+            ),
+            k8s_helper=helper,
+        )
+
+    async def test_gateway_success_is_recorded_once(self):
+        connector = self._gateway_connector(AsyncMock(return_value="1.2.3.4"))
+        before = self._count("gateway", "success")
+        await connector._resolve_base_url()
+        # The second call reuses the cached URL, so it does not discover again.
+        await connector._resolve_base_url()
+        self.assertEqual(self._count("gateway", "success"), before + 1)
+
+    async def test_gateway_failure_is_recorded(self):
+        connector = self._gateway_connector(AsyncMock(side_effect=TimeoutError("no ip")))
+        before = self._count("gateway", "failure")
+        with self.assertRaises(TimeoutError):
+            await connector._resolve_base_url()
+        self.assertEqual(self._count("gateway", "failure"), before + 1)
+
+    async def test_gateway_cancellation_is_recorded_as_failure(self):
+        connector = self._gateway_connector(AsyncMock(side_effect=asyncio.CancelledError()))
+        before = self._count("gateway", "failure")
+        with self.assertRaises(asyncio.CancelledError):
+            await connector._resolve_base_url()
+        self.assertEqual(self._count("gateway", "failure"), before + 1)
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_is_port_open", new_callable=AsyncMock)
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_get_free_port")
+    async def test_pod_tunnel_success_is_recorded(
+        self, get_free_port, is_port_open, create_subprocess
+    ):
+        process = MagicMock(returncode=None)
+        process.terminate = MagicMock()
+        process.wait = AsyncMock()
+        create_subprocess.return_value = process
+        get_free_port.side_effect = [18080, 19090]
+        is_port_open.return_value = True
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(rest_port=8080, grpc_port=9090),
+            get_pod_name=AsyncMock(return_value="sandbox-1"),
+        )
+        before = self._count("sandboxd_pod_tunnel", "success")
+        await strategy.connect()
+        # Reusing the live tunnel is not a new discovery.
+        await strategy.connect()
+        self.assertEqual(self._count("sandboxd_pod_tunnel", "success"), before + 1)
+        await strategy.close()
+
+    @patch("k8s_agent_sandbox.async_connector.asyncio.create_subprocess_exec")
+    @patch.object(AsyncSandboxdPodTunnelStrategy, "_get_free_port", return_value=18080)
+    async def test_router_tunnel_failure_is_recorded_as_port_forward(
+        self, get_free_port, create_subprocess
+    ):
+        create_subprocess.side_effect = OSError("kubectl missing")
+        strategy = AsyncSandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdRouterTunnelConnectionConfig(),
+            get_pod_name=None,
+        )
+        before = self._count("port_forward", "failure")
+        with self.assertRaises(SandboxPortForwardError):
+            await strategy.connect()
+        self.assertEqual(self._count("port_forward", "failure"), before + 1)
 
 
 if __name__ == "__main__":

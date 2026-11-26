@@ -92,7 +92,7 @@ func postAdoptionFixture() (*sandboxv1beta1.Sandbox, *corev1.Pod) {
 			Name:      wbSandbox,
 			Namespace: wbNamespace,
 			Labels: map[string]string{
-				sandboxLabel:                        hash,
+				sandboxv1beta1.SandboxNameHashLabel: hash,
 				sandboxv1beta1.SandboxWarmPoolLabel: NameHash("wb-pool"),
 			},
 			Annotations: map[string]string{

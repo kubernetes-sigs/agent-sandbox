@@ -225,8 +225,9 @@ curl -v -H "X-Sandbox-ID: sandbox-example" \
 3.  **Access via Browser (UI):**
     To load the VSCode interface, your browser must send the routing headers.
     
-    1.  Install a header-modifying extension (e.g., **ModHeader** for Chrome/Edge/Firefox).
-    2.  Configure the extension to send:
+    1.  Install a browser extension that can set request headers on HTTP and
+        WebSocket upgrade requests. It sees your traffic, so pick one you trust.
+    2.  Configure the extension to send, only to the Gateway IP:
         * `X-Sandbox-ID`: `sandbox-example`
         * `X-Sandbox-Port`: `13337`
     3.  Navigate to **`http://<GATEWAY_IP>`** (replace with the IP from step 1).
@@ -249,6 +250,19 @@ curl -v -H "X-Sandbox-ID: sandbox-example" \
         -H "X-Sandbox-Port: 13337" \
         http://localhost:8080
 ```
+
+#### Option C: Desktop VS Code (Optional)
+
+The sandbox does not run `sshd`, so Remote-SSH does not apply. To use the
+desktop VS Code instead of `code-server`, attach it to the pod with `kubectl`:
+
+1. Install `kubectl` and the VS Code Dev Containers extension.
+2. Run **Dev Containers: Attach to Running Kubernetes Container...** from the
+   Command Palette and pick the `devcontainer-main` container in
+   `sandbox-example`.
+3. Open the `/workspaces` folder.
+
+See [Attach to a container in a Kubernetes cluster](https://code.visualstudio.com/docs/devcontainers/attach-container#_attach-to-a-container-in-a-kubernetes-cluster).
 
 #### Getting VSCode password
 

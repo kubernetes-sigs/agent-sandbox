@@ -1,6 +1,6 @@
 # Sandbox Router (Go)
 
-A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP traffic out to thousands of ephemeral agent sandbox pods in a Kubernetes cluster.
+A Go reimplementation of the Python [`sandbox-router`](../clients/python/agentic-sandbox-client/sandbox-router/README.md) — a small reverse proxy that fans HTTP, native gRPC, and browser gRPC-Web traffic out to ephemeral agent sandbox pods in a Kubernetes cluster.
 
 It preserves the original `X-Sandbox-*` header contract (so existing clients and `Gateway` / `HTTPRoute` resources keep working) and adds the controls needed for enterprise deployments: TLS, mTLS, Prometheus metrics, OpenTelemetry tracing, hot-reloading certs, dial retries, structured logs, and graceful shutdown.
 
@@ -26,10 +26,14 @@ The router **never** creates or looks up Sandbox resources. If the target sandbo
 
 ## Request contract
 
+The table below describes HTTP requests. Native gRPC and gRPC-Web require an
+explicit `X-Sandbox-Port`; see [Native gRPC](#native-grpc) and
+[gRPC-Web](#grpc-web-browser-clients).
+
 | Header | Required | Default | Notes |
 |---|---|---|---|
-| `X-Sandbox-ID` | yes | — | Sandbox pod name. With `--cache-enabled=true`, combined with the namespace to look up the live PodIP in the cache's name index; otherwise (or on miss) used as the host component of the DNS form. |
-| `X-Sandbox-UID` | no | — | Sandbox CR UID. When `--cache-enabled=true` and the Pod-IP cache has an entry for this UID, the router dials the cached live PodIP and bypasses DNS — the KEP-NNNN fast path. Cache miss falls through to the name index, then the DNS form. |
+| `X-Sandbox-ID` | yes | — | Sandbox name. With `--cache-enabled=true`, combined with the namespace to look up the live PodIP in the cache's name index; otherwise (or on miss) used as the host component of the DNS form. |
+| `X-Sandbox-UID` | no | — | Sandbox CR UID. With `--cache-enabled=true` it names the requested incarnation, but the current owner of an indexed namespace/name wins over it, so a stale UID cannot reach a replacement. On its own it only selects a warm-pool member that no SandboxClaim has adopted yet. Scoped-token v2 does not need it. |
 | `X-Sandbox-Namespace` | no | `default` | Must be ASCII letters / digits / hyphens, with at least one alphanumeric. |
 | `X-Sandbox-Port` | no | `8888` | Numeric. |
 | `X-Sandbox-Pod-IP` | no | — | When set, bypasses both cache and DNS and dials this IP directly. |
@@ -37,9 +41,8 @@ The router **never** creates or looks up Sandbox resources. If the target sandbo
 Resolution priority (first match wins):
 
 1. `X-Sandbox-Pod-IP` — explicit caller override, used by SDKs that already know the Pod IP.
-2. Cache lookup by `X-Sandbox-UID` — KEP-NNNN's secure fast path. Only attempted when `--cache-enabled=true` and the UID header is present.
-3. Cache lookup by `X-Sandbox-Namespace`/`X-Sandbox-ID` — the sandbox name is the Pod name, so the cache's name index resolves the same live Pod IP without a UID. Like step 2, only attempted when `--cache-enabled=true`; deployments running with the cache disabled fall straight through to step 4. This is what keeps warm-pool sandboxes (which have no per-sandbox Service, so step 4 is guaranteed NXDOMAIN) routable for SDK traffic that carries no UID or Pod IP. Warm-pool Pods that no SandboxClaim has adopted yet are excluded from the name index — they remain reachable only by UID, preserving the UID-as-capability property so callers cannot reach an unclaimed pool Pod by guessing pool-generated names.
-4. DNS form — compatibility fallback used without an informer cache or after cache misses; matches the Python router's behavior.
+2. One canonical cache lookup over `X-Sandbox-Namespace`/`X-Sandbox-ID` and `X-Sandbox-UID` — KEP-NNNN's secure fast path, only attempted when `--cache-enabled=true`; deployments running with the cache disabled fall straight through to step 3. When the namespace/name is indexed, its current owner wins, including over a stale `X-Sandbox-UID`. The name index is what keeps warm-pool sandboxes (which have no per-sandbox Service, so step 3 is guaranteed NXDOMAIN) routable for SDK traffic that carries no UID or Pod IP. Warm-pool Pods that no SandboxClaim has adopted yet are excluded from the name index — they remain reachable only by an exact UID whose namespace and name also match, preserving the UID-as-capability property so callers cannot reach an unclaimed pool Pod by guessing pool-generated names.
+3. DNS form — compatibility fallback used without an informer cache or after a cache miss; matches the Python router's behavior. Scoped-token v2 rejects a request that reaches this step, because DNS yields no canonical Sandbox UID.
 
 The router constructs the upstream URL as:
 - DNS form: `http://<ID>.<Namespace>.svc.<cluster-domain>:<port>/<path>?<query>`
@@ -66,7 +69,7 @@ The router validates the routing headers before constructing the upstream URL, m
 
 ### Error responses
 
-Errors are JSON with a single `detail` field — same shape as the Python router:
+HTTP errors are JSON with a single `detail` field — same shape as the Python router:
 
 | Cause | Status | Body |
 |---|---|---|
@@ -83,7 +86,142 @@ When the target sandbox can't be dialed (DNS doesn't resolve, or the pod isn't l
 
 Defaults: 3 retries (4 attempts total), 200 ms → 400 ms → 800 ms backoff. Tunable via `--upstream-max-retries`, `--upstream-retry-initial-delay`, `--upstream-retry-max-delay`. Set retries to `0` to disable.
 
-The retry budget never exceeds `--proxy-timeout`; the per-request context cuts it short.
+The HTTP retry budget never exceeds `--proxy-timeout`; the per-request context cuts
+it short. Native gRPC and gRPC-Web do not use this retry wrapper.
+
+## Native gRPC
+
+The same proxy listener accepts HTTP/1 and HTTP/2 prior-knowledge (h2c) on 8080;
+the optional TLS listener accepts HTTP/1 and TLS HTTP/2. Native gRPC is identified
+by HTTP/2 POST with `application/grpc` or `application/grpc+<codec>`. Binary
+gRPC-Web requests are transcoded to native gRPC — see
+[gRPC-Web](#grpc-web-browser-clients). The router uses h2c to the backend and does not register or decode
+any business service. Unary and all three streaming forms are forwarded with
+immediate flush, preserving metadata, compression, headers, and terminal trailers.
+
+Send `x-sandbox-id` and **explicit** `x-sandbox-port` (9090 for default sandboxd)
+on every RPC; namespace defaults to `default`. Existing UID, Pod-IP, cache and
+authorizer restrictions apply unchanged. A ClientConn does not pin a target:
+follow-up stdin/signal/resize RPCs must send the same routing metadata. The native
+`/Service/Method` path bypasses browser path-prefix routing. Router-consumed
+Authorization/session credentials are stripped before forwarding.
+
+`--grpc-proxy-timeout=0s` (default) adds no router total-duration cap. A positive
+value caps the RPC; a negative value is invalid. The effective deadline is the
+earliest of caller/context deadline and that cap, starting before routing/authz.
+Only the remaining budget goes upstream. Legacy HTTP proxy/response-header
+timeouts do not truncate gRPC; dialing remains bounded. The flag also works as
+the same YAML key, with CLI precedence and no new environment variable.
+`--max-request-body-bytes` limits cumulative uploaded RPC bytes, not message size.
+
+Router errors use native codes: invalid input → `InvalidArgument`, missing auth →
+`Unauthenticated`, denied target → `PermissionDenied`, unreachable backend →
+`Unavailable`, deadline → `DeadlineExceeded`, cancellation → `Canceled`, body cap
+→ `ResourceExhausted`, and internal failure → `Internal`. Backend status/message/
+details pass through. A command's nonzero exit code is still a successful RPC's
+business result. Broken streams are aborted, never patched with JSON or fake OK.
+
+There is no router business-level gRPC replay/retry. Transport recovery proven
+unprocessed may still occur; neither cancellation nor this policy guarantees
+rollback or exactly-once execution. Configure client/Gateway retries accordingly.
+On shutdown, readiness drops, existing RPCs may finish within `--shutdown-timeout`,
+then remaining request contexts/connections are canceled and pools are closed.
+
+Access logs add `grpc_status`; traces add `grpc.status_code`. Missing/invalid final
+status is `unknown`. Existing HTTP metrics retain their meaning: HTTP 200 does not
+imply gRPC success. Payloads and consumed credentials are not logged.
+
+See the [runnable generated Go client and isolated TLS Gateway example](../examples/sandbox-router-grpc/README.md)
+for deployment, scoped-token auth, CA/server-name verification, long calls,
+NetworkPolicy boundaries, and explicit test/cleanup commands. No public SDK's
+connection modes are changed by this feature. Internal h2c is a trusted-network
+hop, not end-to-end encryption.
+
+## gRPC-Web (browser clients)
+
+Browser JavaScript cannot speak native gRPC — `fetch` cannot read HTTP trailers
+and browsers do not offer h2c prior knowledge. The router therefore transcodes
+binary gRPC-Web (`Content-Type: application/grpc-web[+proto]`) to native gRPC on
+the upstream hop, so a browser can call sandboxd's :9090 services directly
+through the router with a standard gRPC-Web client library (grpc-web,
+Connect-Web). Transcoding is always on; there is no master switch. Plain HTTP
+and native gRPC traffic is unaffected.
+
+The capability boundary follows the gRPC-Web protocol itself:
+
+- **Unary and server-streaming RPCs only.** gRPC-Web cannot express
+  client-streaming or bidi calls. This covers the entire sandboxd surface:
+  `Execute`, `WriteStdin`, `SendSignal`, and `ResizeTTY` are unary, and `Start`
+  and `WatchDir` are server-streaming (stdin and signals travel as separate
+  unary RPCs by design).
+- **Binary variant only.** `application/grpc-web-text` (base64) and
+  `application/grpc-web+json` are rejected with an `InvalidArgument` status
+  frame. Modern browsers send binary bodies through `fetch` without issue.
+
+How it works: message frames are byte-identical between the two protocols and
+pass through untouched (including gzip-compressed frames under
+`grpc-encoding`). The router rewrites the outbound `Content-Type` and converts
+the response's terminal HTTP trailers — which a browser could never read — into
+the gRPC-Web trailer frame (`0x80`) appended to the body. Inbound requests may
+arrive over HTTP/1.1 or HTTP/2; the upstream hop is h2c either way.
+
+Routing, deadlines, and errors behave exactly as for native gRPC: send
+`x-sandbox-id` and an explicit `x-sandbox-port` (9090 for sandboxd) on every
+call — `fetch` sets headers freely, so path-based routing is not needed — and
+`grpc-timeout` plus `--grpc-proxy-timeout` bound the RPC the same way. Router
+errors arrive as HTTP 200 with a trailers-only status frame, using the same
+code table as native gRPC. If the upstream stream breaks after messages have
+flowed, the router appends a synthesized `Unavailable` frame so the browser
+client gets an outcome instead of hanging; once a stream has started, a
+router-side failure aborts the body without a frame, same as the native path.
+Access logs and spans report `grpc_status` for gRPC-Web calls even though the
+status never appears in a response header.
+
+### CORS
+
+A cross-origin `fetch` triggers a CORS preflight, and a preflight carries no
+`X-Sandbox-*` values — the browser only lists the header *names* — so the
+router answers `OPTIONS` itself, before any routing or authorization:
+
+- Same-origin requests are always allowed. Cross-origin requests need the
+  origin in `--grpc-web-allowed-origins` (comma-separated
+  `scheme://host[:port]`). The default is empty: cross-origin browser callers
+  get no CORS headers and the browser blocks the response, while non-browser
+  clients are never affected.
+- Only preflights from an explicitly allowlisted origin are intercepted;
+  every other `OPTIONS` request — including same-origin ones, which browsers
+  never actually preflight — is proxied exactly as before this feature
+  existed, so sandboxes that answer their own CORS keep working with the
+  default empty allowlist.
+- The `Access-Control-Allow-Headers` answer is the intersection of the
+  requested headers with a closed set (content-type, grpc-timeout, the
+  X-Sandbox-* routing headers, authorization, x-user-agent, traceparent). This
+  is what keeps CORS scoped to gRPC-Web: a plain-REST preflight asking for
+  anything else cannot get a usable answer, and real (non-preflight) responses
+  only carry CORS headers when the request itself was gRPC-Web.
+- Responses echo the exact origin with `Access-Control-Allow-Credentials:
+  true` (never `*`), so cookie-authenticated deployments
+  (`--authz-cookie-name`) can work from the browser too. Sending and reading
+  are separate conditions: the browser attaches the cookie only when the
+  caller opts into credentials mode — `fetch(url, { credentials: 'include'
+  })`, or the gRPC-Web client library's equivalent (the official `grpc-web`
+  client's `withCredentials`) — and it lets a cross-origin caller read the
+  response only when the origin is listed in `--grpc-web-allowed-origins`.
+  Same-origin calls attach a path-matching cookie with the default
+  credentials mode. When the credential came from a cookie, the separate
+  cookie origin guard still checks `Origin` against
+  `--authz-cookie-allowed-origins` (see [Browser-session
+  credentials](#browser-session-credentials)). One caveat: the bootstrapped
+  cookie is `Path`-scoped to `<path-routing-prefix>/<namespace>/<id>/<port>/`
+  while a gRPC-Web call posts to `/package.Service/Method`, so the browser
+  does not attach it there — cookie auth for gRPC-Web needs a cookie whose
+  `Path` matches the gRPC-Web endpoint, or the caller can send the
+  `Authorization` header instead, which `fetch` sets freely.
+
+Remember that every sandbox behind the router shares one origin (see the
+shared-origin caveat under [Browser-session credentials](#browser-session-credentials)):
+gRPC-Web CORS makes browser calls possible, it does not isolate sandboxes from
+each other in the same browser profile.
 
 ## WebSockets and other protocol upgrades
 
@@ -119,6 +257,19 @@ curl -i --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
 # -> 101 Switching Protocols, no X-Sandbox-* header sent anywhere in this request
 ```
 
+#### Keeping redirects and cookies under the prefix
+
+An app that has no base-path setting does not know it was addressed as `<prefix>/<namespace>/<id>/<port>/`. Its redirects and cookies would then send the browser out of that prefix, to a path that is not this sandbox. For path-routed requests, the router therefore rewrites:
+
+- an upstream `Location` that points at the sandbox or at the router's own host, to a path under the prefix (`/login` becomes `<prefix>/<namespace>/<id>/<port>/login`). This happens only in the default strip mode;
+- every `Path` attribute of an upstream `Set-Cookie`, so the browser attaches the cookie only to requests for this sandbox. This happens in both modes. A `__Host-` cookie is left alone, because it must keep `Path=/` to be accepted.
+
+Only `Location` and `Set-Cookie` are touched, and only for path-routed requests. Header-routed requests and gRPC responses pass through unchanged, and response bodies are never buffered. This is collision avoidance, not isolation: sandboxes still share one origin, so the prefix does not stop one sandbox's script from reading another's cookie.
+
+This is on by default, which changes the responses of existing path-routed deployments. Set `--path-routing-rewrite-responses=false` to forward them unmodified.
+
+If the sandbox serves under its own base path (for example JupyterLab started with `--ServerApp.base_url`), set `--path-routing-preserve-prefix` instead. The router then forwards the full `<prefix>/<namespace>/<id>/<port>/` path, and it does not rewrite `Location`, because the app already emits prefixed redirects and a second rewrite would double the prefix. `Set-Cookie` paths are still rescoped under the prefix. Authorization still sees the stripped path in both modes, so existing policies do not change. The examples in `examples/jupyterlab-base-path` show this mode.
+
 ## Flags
 
 Run `sandbox-router --help` for the full list. The most relevant:
@@ -128,6 +279,7 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--http-bind-address` | `:8080` | Plain-HTTP proxy listener. Empty disables. |
 | `--https-bind-address` | `""` | TLS proxy listener. Empty disables. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--metrics-bind-address` | `:9090` | Prometheus `/metrics`. |
+| `--metrics-secure-serving` | `false` | Serve `/metrics` over TLS using the same certificate as the HTTPS proxy listener. Requires `--tls-cert-file` and `--tls-key-file`. |
 | `--health-probe-bind-address` | `:8081` | `/healthz` and `/readyz`. |
 | `--tls-cert-file` / `--tls-key-file` | — | PEM-encoded server cert and key. Hot-reloaded on file change (via fsnotify on the parent directory, so atomic Secret rotation just works). |
 | `--tls-client-ca-file` | — | CA bundle for verifying client certs when mTLS is on. |
@@ -135,11 +287,15 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--tls-cipher-suites` | `""` (Go defaults) | Comma-separated Go cipher-suite names. Honors `TLS_CIPHER_SUITES`. Ignored when min version is TLS 1.3. |
 | `--mtls-mode` | `off` | `off` / `optional` / `required`. |
 | `--cluster-domain` | `cluster.local` | Honors `CLUSTER_DOMAIN` env var (Python parity). |
-| `--proxy-timeout` | `180s` | Per-request upstream timeout. Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
+| `--proxy-timeout` | `180s` | HTTP per-request upstream timeout (not gRPC). Honors `PROXY_TIMEOUT_SECONDS` (numeric seconds). |
+| `--grpc-proxy-timeout` | `0s` | Native gRPC total-duration cap; zero means no router cap. CLI/YAML only. |
 | `--upstream-max-retries` | `3` | Dial retries. `0` disables. |
 | `--max-request-body-bytes` | `0` (unlimited) | Optional cap on inbound body size. |
 | `--allow-loopback-pod-ip` | `false` | Permit loopback addresses in `X-Sandbox-Pod-IP`. Default-off rejects the router's own loopback as an SSRF target. Enable only when the sandbox runs as a sidecar in the router's Pod, or for integration tests against a localhost backend. Link-local / multicast / unspecified stay rejected regardless. |
 | `--path-routing-prefix` | `""` (disabled) | Optional path prefix (`<prefix>/<namespace>/<id>/<port>/...`) for callers that cannot set `X-Sandbox-*` headers — see [Browser-facing traffic](#browser-facing-traffic-path-based-routing). Falls through to header-based routing for any path that doesn't match. |
+| `--path-routing-preserve-prefix` | `false` | Forward path-routed requests with the full `<prefix>/<namespace>/<id>/<port>/` path, for a sandbox that serves under its own base path. Requires `--path-routing-prefix`. See [Keeping redirects and cookies under the prefix](#keeping-redirects-and-cookies-under-the-prefix). |
+| `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Set-Cookie Path is rewritten in both modes; Location only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
+| `--grpc-web-allowed-origins` | `""` (same-origin only) | Comma-separated `scheme://host[:port]` allowlist of browser origins permitted to call the router with gRPC-Web. Gates only gRPC-Web CORS — see [gRPC-Web](#grpc-web-browser-clients). Transcoding itself is always on. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |
@@ -153,9 +309,9 @@ Run `sandbox-router --help` for the full list. The most relevant:
 
 When `--cache-enabled=true`, the router runs an in-process Kubernetes informer that watches sandbox-owned Pods cluster-wide (or scoped to `--cache-namespace`) and maintains a UID → live PodIP map plus a namespace/name secondary index over the same entries. The informer filters server-side on the `agents.x-k8s.io/sandbox-name-hash` label that the controller stamps on every sandbox Pod, so memory and API traffic scale with the number of sandboxes — not the size of the cluster.
 
-For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → cache lookup by `X-Sandbox-UID` → cache lookup by `X-Sandbox-Namespace`/`X-Sandbox-ID` (the name index) → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. The name-index step matters most for warm-pool sandboxes: they have no per-sandbox Service, so for traffic that carries only the ID header the DNS form can never resolve and the name index is the only working path. Cache misses fall through to DNS — the router never refuses to route a request just because the cache is cold or out of sync.
+For every inbound request, the proxy resolves the upstream in this order: explicit `X-Sandbox-Pod-IP` header → one canonical cache lookup over `X-Sandbox-UID` and `X-Sandbox-Namespace`/`X-Sandbox-ID` (the name index) → DNS form. Cache hits skip the DNS resolution hop entirely, which is the property the KEP requires for high-throughput tenants. The name-index step matters most for warm-pool sandboxes: they have no per-sandbox Service, so for traffic that carries only the ID header the DNS form can never resolve and the name index is the only working path. Cache misses fall through to DNS, but a scoped-token v2 request that misses is rejected, because a miss cannot produce the canonical Sandbox UID its claims bind.
 
-**Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails because the host is unreachable (timeout, no route — the Pod was rescheduled and the cache hasn't caught up), the cache entry is evicted immediately — by UID when the UID path resolved it, by namespace/name when the name index did — so the next request for the same sandbox falls through to DNS instead of retrying the same stale IP. A connection *refusal* does not evict: it proves a live host (typically a caller-selected port the Pod isn't listening on), and evicting on it would strand warm-pool traffic on the DNS path until the next resync. Name-keyed evictions are additionally conditional on the entry still holding the IP that failed, so a recreated Pod cached mid-dial is never evicted by a late failure against its predecessor's IP. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
+**Active invalidation.** When the proxy dials an IP that came from the cache and the dial fails because the host is unreachable (timeout, no route — the Pod was rescheduled and the cache hasn't caught up), the cache entry that supplied the IP is evicted immediately, by its Sandbox UID whichever index resolved it, so the next request for the same sandbox falls through to DNS instead of retrying the same stale IP. A connection *refusal* does not evict: it proves a live host (typically a caller-selected port the Pod isn't listening on), and evicting on it would strand warm-pool traffic on the DNS path until the next resync. The eviction is additionally conditional on the entry still carrying the Pod UID and IP that failed, so a recreated Pod cached mid-dial is never evicted by a late failure against its predecessor, even when it reuses the address. This is the resilience guarantee called out in the KEP. The `sandbox_router_cache_invalidations_total` counter tracks how often this fires.
 
 **Cache content.** Only Pods that pass `PodReady=True` and have a non-empty `Status.PodIP` are stored. Pods that flip out of Ready are removed automatically by the informer event handler so traffic doesn't get steered at a degraded Pod. Unclaimed warm-pool Pods are stored but not name-indexed (see resolution priority above); adoption by a SandboxClaim removes the `agents.x-k8s.io/warm-pool-sandbox` label and the resulting Pod update makes the entry name-routable.
 
@@ -167,7 +323,7 @@ For every inbound request, the proxy resolves the upstream in this order: explic
 
 ## Authorization
 
-The router runs every request through an `authz.Authorizer` after header parsing and before resolving the upstream. The default is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded. Two other built-in authorizers — TokenReview and scoped-token, both described below — are selectable via `--authz-mode`.
+The router resolves the upstream after header parsing, then runs every request through an `authz.Authorizer` before proxying it, so authorization sees the Sandbox UID the cache selected. The default is `authz.AllowAll`, which preserves the Python router's no-auth contract: anything that reaches the router with a valid `X-Sandbox-ID` is forwarded. Two other built-in authorizers — TokenReview and scoped-token, both described below — are selectable via `--authz-mode`.
 
 The `Authorizer` interface is intentionally simple:
 
@@ -195,7 +351,7 @@ Flags:
 | `--authz-tokenreview-require-token` | `false` | When false, tokenless requests pass (transitional). When true, missing token → 401. |
 | `--authz-tokenreview-audiences` | `""` | Comma-separated audience filter — required for projected ServiceAccount tokens minted with `--audience`. |
 
-RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants exactly this and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac.yaml` example wires it.
+RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication.k8s.io`. The `system:auth-delegator` ClusterRole grants this, plus `create` on `subjectaccessreviews.authorization.k8s.io`, and is the standard pattern (kubelet, metrics-server, kube-state-metrics all use it). The `deploy/rbac-tokenreview.yaml` example wires it. The core kustomization leaves that binding out, so apply it alongside the core install: `kubectl apply -f sandbox-router/deploy/rbac-tokenreview.yaml`.
 
 **Scope of v1.** TokenReview only **authenticates** the caller — it verifies the token belongs to a known principal in the cluster. It does **not** check whether that principal is allowed to access the specific sandbox they named in `X-Sandbox-ID`. Tightening to per-sandbox authorization needs an agreed identity contract on the Sandbox CR (owner label, annotation, or a SubjectAccessReview-style policy) and is tracked as follow-up after KEP-NNNN lands.
 
@@ -203,9 +359,11 @@ RBAC: the router's ServiceAccount needs `create` on `tokenreviews.authentication
 
 Set `--authz-mode=scoped-token` to authorize requests without giving callers a cluster-verifiable K8s credential. The original `v1.<payload>.<signature>` format uses HMAC-SHA256 and binds `(namespace, name, exp)`. It remains the default when only `--authz-scoped-token-secret-file` is set, so existing deployments keep the same behavior.
 
-Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
+Scoped-token v2 uses Ed25519 and binds the full `AuthorizationTarget` plus expiry, or only the Sandbox for a sandbox-scoped token. Its wire format is `v2.<kid>.<payload>.<signature>`. The signature covers the key ID as well as the payload, so changing `kid` cannot select another verification key. Key IDs may contain ASCII letters, digits, hyphens, and underscores. A key file may contain multiple public keys during reader-first rotation. Private signing keys never belong in the router.
 
-V2 requires `X-Sandbox-UID` and `--cache-enabled`. It rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. The current cache still falls back from a missing UID entry to namespace and name. The v2 contract therefore does not yet prove same-name replacement fencing; that requires cache resolution to return the canonical UID it actually selected and to reject a stale UID instead of falling back.
+The router reads the verification key file once during startup. It does not reload projected file updates. Use a versioned ConfigMap name in the Pod template so each reader-first key-set change rolls the Deployment, and wait for every router replica to accept the overlapping set before issuers use a new `kid`. The [`examples/scoped-token-v2`](examples/scoped-token-v2/) overlay carries the upstream patch and rotation sequence. Helm values, content-hash annotations, and rollout policy belong to the downstream deployment.
+
+V2 requires `--cache-enabled` and rejects `X-Sandbox-Pod-IP`, because a raw address is not part of the signed target. Before authorization, the router resolves the UID and namespace/name indexes together and places the cache-selected Sandbox UID in the canonical target. The current name owner wins over a stale requested UID, so a token from a replaced Sandbox cannot follow the name to its replacement. An unclaimed warm-pool member remains reachable only through its exact UID until adoption adds the name index. When v1 and v2 verification are both configured, legacy namespace/name routing remains available to v1 only during the configured overlap window. V1-only deployments retain their existing behavior.
 
 This is the primitive an agent-facing example needs to reproduce the credential-boundary story of `examples/containarium-ssh-sandbox` (agent holds one narrow, single-purpose credential, never a cluster token) using only pieces native to this project — no third-party SSH gateway, no vendor runtime image. `MintScopedToken` is exported so a Sandbox controller (or a test/example harness standing in for one) can mint a token at Sandbox-creation time and hand it to the agent; the router itself never mints, only verifies.
 
@@ -224,7 +382,9 @@ The v2 key file contains unpadded base64url public keys:
 {"keys":[{"kid":"2026-08","publicKey":"<base64url-ed25519-public-key>"}]}
 ```
 
-A v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+An exact v2 token authorizes the bound Sandbox UID, method, port, and path until expiry. Header-routed requests forward that path byte-for-byte, escaping included, the same way a path-routed request forwards everything after `<port>`. An encoded separator inside one segment (a filename containing `/`, sent as `%2F`) stays escaped on the hop, and the token binds that escaped form. Mint the token for the path the client sends: a token for `/x/y` does not authorize a request sent as `/x%2Fy`. Query parameters and request bodies are not signed, and tokens are reusable during that interval. For an endpoint that accepts commands in its query or body, a token holder may change those commands while keeping the signed target unchanged. Enforce command-level policy or one-time execution in the upstream service when required.
+
+`authz.MintScopedTokenV2Sandbox` mints a sandbox-scoped token instead. It authorizes every port, method, and path of the bound Sandbox UID until expiry, including sidecar ports, so keep its TTL short. Use it for clients that send one token on every call, such as the Python SDK's router mode. Routers without sandbox-scope support reject these tokens with 403, so upgrade every router replica before issuers mint them.
 
 The router reloads keys on restart. `authz.MintScopedTokenV2` is available to controller-side issuers, but the router never mints tokens itself.
 
@@ -290,6 +450,10 @@ The HTTPS listener is opt-in (set `--https-bind-address`). Cert and key are read
 
 `tls.Config.MinVersion` defaults to TLS 1.2 and is configurable via `--tls-min-version` (or the `TLS_MIN_VERSION` env var). Cipher suites can be set via `--tls-cipher-suites` (or `TLS_CIPHER_SUITES`); when omitted, Go defaults apply. ALPN advertises `h2` and `http/1.1`. A downstream operator can inject the cluster TLS profile via these flags or env vars.
 
+### Metrics endpoint TLS
+
+Set `--metrics-secure-serving` to serve the `/metrics` endpoint over TLS using the same certificate as the HTTPS proxy listener. The metrics TLS config shares the `--tls-min-version` and `--tls-cipher-suites` settings but does not enable mTLS (Prometheus scraping does not present client certs). Requires `--tls-cert-file` and `--tls-key-file`; `--https-bind-address` is not required — the metrics endpoint can be the only TLS listener.
+
 ## Metrics
 
 All metrics live under a private Prometheus registry (no controller-runtime metrics bleed-through) and serve on `--metrics-bind-address`. Per-sandbox `sandbox_id` labels are **intentionally absent** — a cluster can have 10k+ sandboxes, and exposing one series per sandbox would blow up Prometheus storage. Use traces for per-sandbox debugging.
@@ -301,12 +465,16 @@ All metrics live under a private Prometheus registry (no controller-runtime metr
 | `sandbox_router_requests_total` | counter | `method`, `code`, `sandbox_namespace` |
 | `sandbox_router_request_duration_seconds` | histogram | `method`, `code`, `sandbox_namespace` |
 | `sandbox_router_inflight_requests` | gauge | — |
-| `sandbox_router_upstream_errors_total` | counter | `sandbox_namespace`, `reason` (`dial` / `timeout` / `tls` / `eof` / `other`) |
+| `sandbox_router_upstream_errors_total` | counter | `sandbox_namespace`, `reason` (`dial` / `timeout` / `tls` / `eof` / `client_canceled` / `other`) |
 | `sandbox_router_upstream_retries_total` | counter | `sandbox_namespace` |
 | `sandbox_router_cache_invalidations_total` | counter | `sandbox_namespace` (KEP-NNNN active invalidation: bumped when the proxy evicts a cached IP after a dial failure) |
 | `sandbox_router_authz_decisions_total` | counter | `sandbox_namespace`, `decision` (`allow` / `deny`) |
 | `sandbox_router_cert_reloads_total` | counter | `outcome` (`success` / `failure`) |
 | `sandbox_router_build_info` | gauge (const labels) | `git_version`, `git_commit`, `build_date`, `go_version`, `compiler`, `platform` |
+
+These request, duration and inflight metrics also cover native gRPC and
+gRPC-Web traffic; HTTP 200 does not imply a successful RPC. Upstream byte-volume counters are not
+currently exported for either HTTP or native gRPC.
 
 ## Tracing
 
@@ -344,7 +512,9 @@ tls-key-file: "/tls/tls.key"
 tls-client-ca-file: "/tls/ca.crt"
 tls-min-version: "VersionTLS12"
 tls-cipher-suites: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+metrics-secure-serving: true
 mtls-mode: "required"
+grpc-web-allowed-origins: "https://app.example.com,https://admin.example.com:8443"
 cluster-domain: "cluster.local"
 proxy-timeout: "180s"
 upstream-max-retries: 3
@@ -359,7 +529,15 @@ enable-otel-metrics: true
 Example K8s manifests live in [`deploy/`](deploy/) — Deployment, Service, PodDisruptionBudget, NetworkPolicy, plus a README that walks through what to tighten before production.
 
 ```sh
-kubectl apply -f sandbox-router/deploy/
+kubectl apply -k sandbox-router/deploy/
+```
+
+A Helm chart that renders the same resources lives in [`helm/`](helm/), with TLS, TokenReview RBAC and a namespace-scoped cache behind values:
+
+```sh
+helm install sandbox-router sandbox-router/helm/ \
+  --namespace agent-sandbox-system --create-namespace \
+  --set image.tag=<version>
 ```
 
 ## Scaling guidance
@@ -421,4 +599,5 @@ What's new beyond the Python router:
 - Configurable dial-retry with backoff
 - Graceful shutdown (readiness flip, parallel drain, bounded timeout)
 - Strict request-body size limit (`--max-request-body-bytes`)
+- Native gRPC proxying and gRPC-Web transcoding for browser clients
 - Built as a multi-arch distroless static image

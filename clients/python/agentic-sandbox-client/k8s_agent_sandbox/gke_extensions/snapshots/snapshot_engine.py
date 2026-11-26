@@ -12,11 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
 import logging
 import uuid
 import time
-from typing import Literal
+from typing import Any, Literal
 from collections.abc import Callable
 from datetime import datetime, timezone
 from kubernetes.client import ApiException
@@ -92,7 +91,7 @@ class SnapshotFilter(BaseModel):
 
     @field_validator("created_after", "created_before", mode="before")
     @classmethod
-    def validate_datetime(cls, v):
+    def validate_datetime(cls, v: Any) -> Any:
         return normalize_datetime(v)
 
 
@@ -273,7 +272,7 @@ class SnapshotEngine:
             )
 
     def list(
-        self, filter_by: SnapshotFilter | dict | None = None
+        self, filter_by: SnapshotFilter | dict[str, Any] | None = None
     ) -> ListSnapshotResult:
         """
         Checks for existing snapshots associated with the sandbox.

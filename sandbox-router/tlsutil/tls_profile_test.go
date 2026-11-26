@@ -117,3 +117,72 @@ func TestBuildServerTLS_TLSProfile(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildMetricsTLS(t *testing.T) {
+	reloader := newReloaderForTest(t)
+
+	t.Run("default MinVersion is TLS 1.2", func(t *testing.T) {
+		cfg := &config.Config{}
+		tc, err := BuildMetricsTLS(cfg, reloader)
+		if err != nil {
+			t.Fatalf("BuildMetricsTLS: %v", err)
+		}
+		if tc.MinVersion != tls.VersionTLS12 {
+			t.Errorf("MinVersion: got %d, want %d", tc.MinVersion, tls.VersionTLS12)
+		}
+	})
+
+	t.Run("no mTLS fields set", func(t *testing.T) {
+		cfg := &config.Config{MTLSMode: config.MTLSRequired}
+		tc, err := BuildMetricsTLS(cfg, reloader)
+		if err != nil {
+			t.Fatalf("BuildMetricsTLS: %v", err)
+		}
+		if tc.ClientAuth != tls.NoClientCert {
+			t.Errorf("ClientAuth: got %d, want NoClientCert (%d)", tc.ClientAuth, tls.NoClientCert)
+		}
+		if tc.ClientCAs != nil {
+			t.Errorf("ClientCAs should be nil for metrics TLS")
+		}
+	})
+
+	t.Run("cipher suites applied", func(t *testing.T) {
+		cfg := &config.Config{
+			TLSCipherSuites: []string{
+				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+				"TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+			},
+		}
+		tc, err := BuildMetricsTLS(cfg, reloader)
+		if err != nil {
+			t.Fatalf("BuildMetricsTLS: %v", err)
+		}
+		if len(tc.CipherSuites) != 2 {
+			t.Fatalf("CipherSuites: got %d entries, want 2", len(tc.CipherSuites))
+		}
+	})
+
+	t.Run("cipher suites ignored for TLS 1.3", func(t *testing.T) {
+		cfg := &config.Config{
+			TLSMinVersion: "VersionTLS13",
+			TLSCipherSuites: []string{
+				"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+			},
+		}
+		tc, err := BuildMetricsTLS(cfg, reloader)
+		if err != nil {
+			t.Fatalf("BuildMetricsTLS: %v", err)
+		}
+		if len(tc.CipherSuites) != 0 {
+			t.Errorf("CipherSuites should be empty for TLS 1.3, got %d", len(tc.CipherSuites))
+		}
+	})
+
+	t.Run("nil reloader rejected", func(t *testing.T) {
+		cfg := &config.Config{}
+		_, err := BuildMetricsTLS(cfg, nil)
+		if err == nil {
+			t.Fatalf("expected error for nil reloader")
+		}
+	})
+}

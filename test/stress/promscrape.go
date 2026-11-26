@@ -47,7 +47,7 @@ import (
 // same pattern).
 type metricSample struct {
 	TS       time.Time       `json:"ts"`
-	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet | cilium-agent | etcd-main | etcd-events | node
+	Source   string          `json:"source"`   // kube-apiserver | kube-controller-manager | kube-scheduler | agent-sandbox-controller | kubelet | containerd | cilium-agent | etcd-main | etcd-events | node
 	Instance string          `json:"instance"` // pod or node name
 	Metric   string          `json:"metric"`   // family name (+ _bucket/_sum/_count for histograms and summaries)
 	Labels   json.RawMessage `json:"labels,omitempty"`
@@ -118,9 +118,10 @@ func (s *promScraper) Close() error {
 // (direct for the apiserver itself, pod/node proxy for everything else),
 // so no direct network path to nodes or the control plane is needed.
 type promSource struct {
-	source   string
-	instance string
-	path     string
+	source       string
+	instance     string
+	path         string
+	metricPrefix string // Empty accepts all metric families.
 }
 
 // resolveSources discovers the current scrape targets. Re-resolved on every
@@ -194,6 +195,16 @@ func (s *promScraper) resolveSources(ctx context.Context) []promSource {
 				instance: pod.Spec.NodeName,
 				path:     fmt.Sprintf("/api/v1/namespaces/kube-system/pods/http:%s:9100/proxy/metrics", pod.Name),
 			})
+			// The host-network pod also provides a proxy to containerd's listener.
+			// Keep CRI metrics, avoiding per-container resource data and gRPC metrics.
+			if pod.Spec.HostNetwork {
+				sources = append(sources, promSource{
+					source:       "containerd",
+					instance:     pod.Spec.NodeName,
+					path:         fmt.Sprintf("/api/v1/namespaces/kube-system/pods/http:%s:1338/proxy/v1/metrics", pod.Name),
+					metricPrefix: "containerd_cri_",
+				})
+			}
 		}
 	}
 
@@ -255,6 +266,9 @@ func (s *promScraper) scrapeOne(ctx context.Context, src promSource) error {
 		return nil
 	}
 	for name, family := range families {
+		if !strings.HasPrefix(name, src.metricPrefix) {
+			continue
+		}
 		for _, m := range family.Metric {
 			if err := s.encodeMetricLocked(ts, src, name, family.GetType(), m); err != nil {
 				return err

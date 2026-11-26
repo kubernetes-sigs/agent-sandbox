@@ -26,19 +26,24 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
@@ -296,6 +301,223 @@ func TestReconcilePool_TerminatingCountsAgainstTarget(t *testing.T) {
 	require.Equal(t, 1, lc.createCount(), "replacement is created once the terminating sandbox is gone")
 }
 
+// TestReconcilePool_OrphanTerminatingCountsAgainstTarget verifies that an
+// orphan that is already terminating still blocks replacement creation. It
+// occupies capacity, but must not enter the owned active set.
+func TestReconcilePool_OrphanTerminatingCountsAgainstTarget(t *testing.T) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(1)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			UID:       "warmpool-uid",
+		},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+		},
+	}
+	orphan := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-terminating")
+	orphan.UID = "uid-terminating"
+	orphan.Finalizers = []string{"test.agents.x-k8s.io/drain"}
+	now := metav1.Now()
+	orphan.DeletionTimestamp = &now
+
+	scheme := newTestScheme()
+	fakeClient := newFakeClient(scheme, template, warmPool, orphan)
+	r := &SandboxWarmPoolReconciler{
+		Client:       fakeClient,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+	}
+	poolKey := types.NamespacedName{Namespace: poolNamespace, Name: poolName}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: poolKey})
+	require.NoError(t, err)
+	require.True(t, r.exp().SatisfiedExpectations(poolKey))
+
+	var sandboxes sandboxv1beta1.SandboxList
+	require.NoError(t, r.List(context.Background(), &sandboxes, client.InNamespace(poolNamespace)))
+	require.Len(t, sandboxes.Items, 1, "terminating orphan must remain counted against the replica target")
+
+	var updated extensionsv1beta1.SandboxWarmPool
+	require.NoError(t, r.Get(context.Background(), poolKey, &updated))
+	require.Zero(t, updated.Status.Replicas, "terminating orphan must not count as an active owned replica")
+	require.Zero(t, updated.Status.ReadyReplicas)
+}
+
+// nextEvent returns the next event recorded by recorder, or "" if none is pending.
+func nextEvent(recorder *events.FakeRecorder) string {
+	select {
+	case e := <-recorder.Events:
+		return e
+	default:
+		return ""
+	}
+}
+
+// TestReconcilePool_FailedMemberMutationKeepsPopulation covers the accounting
+// boundary between observing a pool member and successfully mutating it. A
+// failed Update or Delete does not remove the Sandbox from the cluster or free
+// its capacity, so it must remain in the population used by the create gate.
+// Only owned members may enter active status or deletion paths.
+func TestReconcilePool_FailedMemberMutationKeepsPopulation(t *testing.T) {
+	const (
+		poolName  = "test-pool"
+		namespace = "default"
+	)
+	replicas := int32(1)
+	template := createTemplate(namespace)
+	scheme := newTestScheme()
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	operationErr := errors.New("injected sandbox mutation failure")
+
+	newWarmPool := func(staleDelete bool) *extensionsv1beta1.SandboxWarmPool {
+		warmPool := &extensionsv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      poolName,
+				Namespace: namespace,
+				UID:       "warmpool-uid",
+			},
+			Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+				Replicas:    &replicas,
+				TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			},
+		}
+		if staleDelete {
+			warmPool.Spec.UpdateStrategy = &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{
+				Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType,
+			}
+		}
+		return warmPool
+	}
+	newSandbox := func(controlledByPool, staleDelete bool) *sandboxv1beta1.Sandbox {
+		sb := createPoolSandbox(poolName, namespace, poolNameHash, template, "-existing")
+		sb.UID = "sandbox-uid"
+		sb.Status.Conditions = []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionTrue,
+		}}
+		if controlledByPool {
+			sb.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+				Name:       poolName,
+				UID:        "warmpool-uid",
+				Controller: new(true),
+			}}
+		}
+		if staleDelete {
+			sb.Labels[sandboxTemplateRefHash] = "stale-template-hash"
+		}
+		return sb
+	}
+
+	testCases := []struct {
+		name               string
+		controlledByPool   bool
+		staleDelete        bool
+		wantStatusReplicas int32
+		wantReadyReplicas  int32
+		failureDoc         string
+	}{
+		{
+			name:               "launch type label update fails",
+			controlledByPool:   true,
+			wantStatusReplicas: 1,
+			wantReadyReplicas:  1,
+			failureDoc:         "controlled pool members must survive a failed launch type normalization update",
+		},
+		{
+			name:             "orphan adoption update fails",
+			controlledByPool: false,
+			failureDoc:       "orphaned pool members must remain part of the population when adoption fails",
+		},
+		{
+			name:               "controlled stale member delete fails",
+			controlledByPool:   true,
+			staleDelete:        true,
+			wantStatusReplicas: 1,
+			wantReadyReplicas:  1,
+			failureDoc:         "controlled stale pool members must remain part of the population when cleanup fails",
+		},
+		{
+			name:             "orphan stale member delete fails",
+			controlledByPool: false,
+			staleDelete:      true,
+			failureDoc:       "orphan stale pool members must remain capacity-only when cleanup fails",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			warmPool := newWarmPool(tc.staleDelete)
+			existing := newSandbox(tc.controlledByPool, tc.staleDelete)
+			poolKey := types.NamespacedName{Namespace: namespace, Name: poolName}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithStatusSubresource(&extensionsv1beta1.SandboxWarmPool{}).
+				WithIndex(&sandboxv1beta1.Sandbox{}, sandboxWarmPoolLabelIndex, sandboxWarmPoolLabelIndexer).
+				WithIndex(&extensionsv1beta1.SandboxWarmPool{}, extensionsv1beta1.TemplateRefField, sandboxTemplateRefNameIndexer).
+				WithRuntimeObjects(warmPool, template, existing).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						if !tc.staleDelete {
+							if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+								return operationErr
+							}
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						if tc.staleDelete {
+							if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+								return operationErr
+							}
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				}).
+				Build()
+
+			r := &SandboxWarmPoolReconciler{
+				Client:       fakeClient,
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			}
+
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: poolKey})
+			require.ErrorIs(t, err, operationErr)
+			require.True(t, r.exp().SatisfiedExpectations(poolKey),
+				"failed mutations must not leave a deletion expectation for an orphan")
+
+			var sandboxes sandboxv1beta1.SandboxList
+			require.NoError(t, r.List(ctx, &sandboxes, client.InNamespace(namespace)))
+			poolMembers := 0
+			for i := range sandboxes.Items {
+				if sandboxes.Items[i].Labels[warmPoolSandboxLabel] == poolNameHash {
+					poolMembers++
+				}
+			}
+			require.Equal(t, int(replicas), poolMembers, tc.failureDoc)
+
+			var updated extensionsv1beta1.SandboxWarmPool
+			require.NoError(t, r.Get(ctx, poolKey, &updated))
+			require.Equal(t, tc.wantStatusReplicas, updated.Status.Replicas,
+				"only owned active members may count in status.replicas")
+			require.Equal(t, tc.wantReadyReplicas, updated.Status.ReadyReplicas,
+				"only owned active members may count in status.readyReplicas")
+		})
+	}
+}
+
 // TestReconcilePool_UnschedulableStuckGC: a non-Ready sandbox past the
 // readiness grace period whose backing pod is unschedulable must be HELD, not
 // deleted — deleting it would just create an equally unschedulable
@@ -341,26 +563,25 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		return sb
 	}
 
-	podWithScheduled := func(name string, status corev1.ConditionStatus, reason string) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: poolNamespace},
-			Status: corev1.PodStatus{
-				Conditions: []corev1.PodCondition{{
-					Type:   corev1.PodScheduled,
-					Status: status,
-					Reason: reason,
-				}},
-			},
-		}
+	// withPodScheduled appends the mirrored PodScheduled condition the sandbox
+	// controller copies off the backing Pod. The pool now reads this instead of
+	// fetching the Pod, so the signal belongs on the Sandbox.
+	withPodScheduled := func(sb *sandboxv1beta1.Sandbox, status metav1.ConditionStatus, reason string) *sandboxv1beta1.Sandbox {
+		sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             status,
+			Reason:             reason,
+			LastTransitionTime: metav1.Now(),
+		})
+		return sb
 	}
 
 	t.Run("unschedulable sandbox is held, not replaced", func(t *testing.T) {
 		warmPool := newPool()
-		sb := agedSandbox("-unsched")
-		pod := podWithScheduled(sb.Name, corev1.ConditionFalse, corev1.PodReasonUnschedulable)
+		sb := withPodScheduled(agedSandbox("-unsched"), metav1.ConditionFalse, corev1.PodReasonUnschedulable)
 
 		recorder := events.NewFakeRecorder(16)
-		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb, pod))
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
 		r := SandboxWarmPoolReconciler{
 			Client:       lc,
 			Scheme:       newTestScheme(),
@@ -398,12 +619,21 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		default:
 		}
 
-		// Capacity frees up: the pod schedules and the sandbox goes Ready.
-		// The hold clears and a WarmPoolProgressing event is emitted.
-		got.Status.Conditions = []metav1.Condition{{
-			Type:   string(sandboxv1beta1.SandboxConditionReady),
-			Status: metav1.ConditionTrue,
-		}}
+		// Capacity frees up: the pod schedules and the sandbox goes Ready. The
+		// mirrored PodScheduled flips to True in the same pass, so the hold
+		// clears and a WarmPoolProgressing event is emitted.
+		got.Status.Conditions = []metav1.Condition{
+			{
+				Type:   string(sandboxv1beta1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionTrue,
+				Reason:             sandboxv1beta1.SandboxReasonPodScheduled,
+				LastTransitionTime: metav1.Now(),
+			},
+		}
 		// Plain Update: the fake client only registers a status subresource
 		// for SandboxWarmPool, so sandbox status is part of the main object.
 		require.NoError(t, r.Update(ctx, got))
@@ -422,11 +652,12 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 
 	t.Run("genuinely stuck sandbox (pod scheduled) is still replaced", func(t *testing.T) {
 		warmPool := newPool()
-		sb := agedSandbox("-stuck")
 		// The pod scheduled fine; the sandbox is stuck for some other reason.
-		pod := podWithScheduled(sb.Name, corev1.ConditionTrue, "")
+		sb := withPodScheduled(agedSandbox("-stuck"), metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled)
+		// Scheduled after creation, but longer ago than the grace period.
+		sb.Status.Conditions[len(sb.Status.Conditions)-1].LastTransitionTime = metav1.NewTime(time.Now().Add(-8 * time.Minute))
 
-		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb, pod))
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
 		r := SandboxWarmPoolReconciler{
 			Client:       lc,
 			Scheme:       newTestScheme(),
@@ -451,7 +682,7 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 
 	t.Run("stuck sandbox with missing pod is still replaced", func(t *testing.T) {
 		warmPool := newPool()
-		sb := agedSandbox("-nopod")
+		sb := withPodScheduled(agedSandbox("-nopod"), metav1.ConditionFalse, sandboxv1beta1.SandboxReasonPodAbsent)
 
 		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
 		r := SandboxWarmPoolReconciler{
@@ -466,6 +697,270 @@ func TestReconcilePool_UnschedulableStuckGC(t *testing.T) {
 		err = r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{})
 		require.True(t, client.IgnoreNotFound(err) == nil && err != nil, "sandbox without a pod should be deleted")
 	})
+
+	t.Run("held sandbox gets a fresh grace once scheduled", func(t *testing.T) {
+		warmPool := newPool()
+		// Created well past the grace period, scheduled just now, not Ready yet.
+		sb := withPodScheduled(agedSandbox("-held"), metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled)
+
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		}
+		ctx := context.Background()
+
+		requeueAfter, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}),
+			"a just-scheduled sandbox must not be deleted as stuck")
+		require.Positive(t, requeueAfter, "the post-grace evaluation must be self-scheduled")
+	})
+
+	t.Run("scheduling-gated sandbox is held, not replaced", func(t *testing.T) {
+		warmPool := newPool()
+		sb := withPodScheduled(agedSandbox("-gated"), metav1.ConditionFalse, corev1.PodReasonSchedulingGated)
+
+		recorder := events.NewFakeRecorder(16)
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		requeueAfter, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{}),
+			"a gated sandbox must not be deleted as stuck")
+		require.Equal(t, 0, lc.createCount(), "no replacement may be created for a gated sandbox")
+		require.Equal(t, DefaultUnschedulableRecheckInterval, requeueAfter)
+		require.Equal(t, replicas, warmPool.Status.Replicas)
+		_, message := notProgressingSignal(0, 1, replicas, DefaultWarmPoolReadinessGracePeriod)
+		require.Equal(t, corev1.EventTypeWarning+" "+reasonWarmPoolNotProgressing+" "+message, nextEvent(recorder))
+	})
+
+	// Once its gate is removed, a Pod may still find no capacity. Unlike
+	// client-go, FakeRecorder does not fold same-action events, so check the
+	// action.
+	t.Run("a change of hold cause is reported again", func(t *testing.T) {
+		warmPool := newPool()
+		sb := withPodScheduled(agedSandbox("-switch"), metav1.ConditionFalse, corev1.PodReasonSchedulingGated)
+		key := types.NamespacedName{Namespace: poolNamespace, Name: sb.Name}
+
+		recorder := events.NewFakeRecorder(16)
+		recorder.Verbose = true
+		lc := newLaggingClient(newFakeClient(newTestScheme(), template, warmPool, sb))
+		r := SandboxWarmPoolReconciler{
+			Client:       lc,
+			Scheme:       newTestScheme(),
+			MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			Recorder:     recorder,
+		}
+		ctx := context.Background()
+
+		_, err := r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Contains(t, nextEvent(recorder), corev1.EventTypeWarning+" "+reasonWarmPoolNotProgressing+" HoldingSchedulingGated ")
+
+		got := &sandboxv1beta1.Sandbox{}
+		require.NoError(t, r.Get(ctx, key, got))
+		for i := range got.Status.Conditions {
+			if got.Status.Conditions[i].Type == string(sandboxv1beta1.SandboxConditionPodScheduled) {
+				got.Status.Conditions[i].Reason = corev1.PodReasonUnschedulable
+			}
+		}
+		require.NoError(t, r.Update(ctx, got))
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Contains(t, nextEvent(recorder), corev1.EventTypeWarning+" "+reasonWarmPoolNotProgressing+" HoldingUnschedulable ")
+
+		_, err = r.reconcilePool(ctx, warmPool)
+		require.NoError(t, err)
+		require.Empty(t, nextEvent(recorder), "no duplicate event while the cause is unchanged")
+	})
+
+	// A terminating sandbox keeps its last mirrored PodScheduled condition until
+	// the sandbox controller observes the Pod's absence, so a stale Unschedulable
+	// must not hold a pool slot on an object that is already going away.
+	t.Run("terminating sandbox with a stale unschedulable condition is not held", func(t *testing.T) {
+		sb := withPodScheduled(agedSandbox("-terminating"), metav1.ConditionFalse, corev1.PodReasonUnschedulable)
+		now := metav1.Now()
+		sb.DeletionTimestamp = &now
+		sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
+
+		require.False(t, isSandboxPodUnschedulable(sb),
+			"a terminating sandbox must not be treated as unschedulable-and-held")
+	})
+}
+
+// TestSandboxPodHoldPredicates pins the decision table of the mirrored-condition
+// reads directly, independent of reconcilePool. PodScheduled=False with reason
+// Unschedulable or SchedulingGated is a hold signal, and each reason belongs to
+// exactly one predicate so a held member is counted once. False with reason
+// PodAbsent and an Unknown status are the shapes the mirror uses for "Pod absent"
+// and "Pod state unknown", so both fall through to the stuck-sandbox path, as do
+// any other False reason and a missing condition.
+func TestSandboxPodHoldPredicates(t *testing.T) {
+	deleting := metav1.Now()
+
+	cond := func(status metav1.ConditionStatus, reason string) []metav1.Condition {
+		return []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             status,
+			Reason:             reason,
+			LastTransitionTime: metav1.Now(),
+		}}
+	}
+
+	tests := []struct {
+		name              string
+		conditions        []metav1.Condition
+		deleting          bool
+		wantUnschedulable bool
+		wantGated         bool
+	}{
+		{
+			name:       "no PodScheduled condition (sandbox controller predates the mirror)",
+			conditions: nil,
+		},
+		{
+			name:       "False/PodAbsent (Pod confirmed absent)",
+			conditions: cond(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonPodAbsent),
+		},
+		{
+			name:       "other conditions but no PodScheduled",
+			conditions: []metav1.Condition{{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "NotReady", LastTransitionTime: metav1.Now()}},
+		},
+		{
+			name:       "Unknown (transient Pod lookup failure)",
+			conditions: cond(metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonPodSchedulingUnknown),
+		},
+		{
+			name:       "True/PodScheduled (scheduled fine; stuck for another reason)",
+			conditions: cond(metav1.ConditionTrue, sandboxv1beta1.SandboxReasonPodScheduled),
+		},
+		{
+			name:       "False/PodTerminating (backing Pod is terminating)",
+			conditions: cond(metav1.ConditionFalse, sandboxv1beta1.SandboxReasonPodTerminating),
+		},
+		{
+			name:              "False/Unschedulable (waiting on capacity)",
+			conditions:        cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			wantUnschedulable: true,
+		},
+		{
+			name:       "False/SchedulingGated (waiting on its gate owner)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulingGated),
+			wantGated:  true,
+		},
+		{
+			name:       "False/SchedulerError (any other reason)",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonSchedulerError),
+		},
+		{
+			name:       "deleting sandbox with a stale False/Unschedulable",
+			conditions: cond(metav1.ConditionFalse, corev1.PodReasonUnschedulable),
+			deleting:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default"},
+				Status:     sandboxv1beta1.SandboxStatus{Conditions: tc.conditions},
+			}
+			if tc.deleting {
+				sb.DeletionTimestamp = &deleting
+				sb.Finalizers = []string{"agents.x-k8s.io/test-hold"}
+			}
+			require.Equal(t, tc.wantUnschedulable, isSandboxPodUnschedulable(sb), "isSandboxPodUnschedulable")
+			require.Equal(t, tc.wantGated, isSandboxPodSchedulingGated(sb), "isSandboxPodSchedulingGated")
+		})
+	}
+}
+
+// TestReadinessGraceStart pins when a pool member's readiness grace period
+// starts: at creation, or when its Pod was scheduled if that is later.
+func TestReadinessGraceStart(t *testing.T) {
+	created := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	scheduled := created.Add(7 * time.Minute)
+	podScheduled := func(status metav1.ConditionStatus, at time.Time) []metav1.Condition {
+		return []metav1.Condition{{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             status,
+			Reason:             "Test",
+			LastTransitionTime: metav1.NewTime(at),
+		}}
+	}
+
+	tests := []struct {
+		name       string
+		conditions []metav1.Condition
+		want       time.Time
+	}{
+		{name: "no PodScheduled condition", conditions: nil, want: created},
+		{name: "scheduled after creation", conditions: podScheduled(metav1.ConditionTrue, scheduled), want: scheduled},
+		{name: "scheduled transition before creation", conditions: podScheduled(metav1.ConditionTrue, created.Add(-time.Minute)), want: created},
+		{name: "scheduling state unknown after creation", conditions: podScheduled(metav1.ConditionUnknown, scheduled), want: scheduled},
+		{name: "not scheduled", conditions: podScheduled(metav1.ConditionFalse, scheduled), want: created},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sb := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(created)},
+				Status:     sandboxv1beta1.SandboxStatus{Conditions: tc.conditions},
+			}
+			got := readinessGraceStart(sb)
+			require.True(t, tc.want.Equal(got), "got %v, want %v", got, tc.want)
+		})
+	}
+}
+
+// TestNotProgressingSignal pins the not-progressing cause and message for each
+// kind of hold.
+func TestNotProgressingSignal(t *testing.T) {
+	tests := []struct {
+		name          string
+		unschedulable int32
+		gated         int32
+		wantCause     string
+		wantMessage   string
+	}{
+		{name: "nothing held"},
+		{
+			name:          "unschedulable only",
+			unschedulable: 2,
+			wantCause:     "HoldingUnschedulable",
+			wantMessage:   "2/4 sandboxes are unschedulable past the 5m0s readiness grace period; holding them instead of replacing (replacements would be equally unschedulable)",
+		},
+		{
+			name:        "gated only",
+			gated:       3,
+			wantCause:   "HoldingSchedulingGated",
+			wantMessage: "3/4 sandboxes are waiting on scheduling gates (SchedulingGated) past the 5m0s readiness grace period; holding them until the controller that owns the gates removes them (replacements would be gated again)",
+		},
+		{
+			name:          "unschedulable and gated",
+			unschedulable: 1,
+			gated:         2,
+			wantCause:     "HoldingUnschedulableAndSchedulingGated",
+			wantMessage:   "3/4 sandboxes are not scheduled past the 5m0s readiness grace period (1 unschedulable, 2 waiting on scheduling gates); holding them instead of replacing (replacements would be blocked the same way)",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cause, message := notProgressingSignal(tc.unschedulable, tc.gated, 4, 5*time.Minute)
+			require.Equal(t, tc.wantCause, cause)
+			require.Equal(t, tc.wantMessage, message)
+		})
+	}
 }
 
 // phantomListClient wraps the fake client to model the opposite staleness of
@@ -749,21 +1244,19 @@ func TestReconcilePool_QuietClusterSelfScheduledGraceEvaluation(t *testing.T) {
 		UID:        warmPool.UID,
 		Controller: &controller,
 	}}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: poolNamespace},
-		Status: corev1.PodStatus{
-			Conditions: []corev1.PodCondition{{
-				Type:   corev1.PodScheduled,
-				Status: corev1.ConditionFalse,
-				Reason: corev1.PodReasonUnschedulable,
-			}},
-		},
-	}
+	// The pool reads the PodScheduled condition the sandbox controller mirrors
+	// onto Sandbox.status, so the unschedulable signal belongs on the Sandbox.
+	sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+		Status:             metav1.ConditionFalse,
+		Reason:             corev1.PodReasonUnschedulable,
+		LastTransitionTime: metav1.Now(),
+	})
 
 	current := base
 	recorder := events.NewFakeRecorder(16)
 	scheme := newTestScheme()
-	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb, pod))
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb))
 	r := SandboxWarmPoolReconciler{
 		Client:       lc,
 		Scheme:       scheme,
@@ -859,21 +1352,19 @@ func TestReconcilePool_ConfigurableGraceAndRecheck(t *testing.T) {
 		UID:        warmPool.UID,
 		Controller: &controller,
 	}}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: sb.Name, Namespace: poolNamespace},
-		Status: corev1.PodStatus{
-			Conditions: []corev1.PodCondition{{
-				Type:   corev1.PodScheduled,
-				Status: corev1.ConditionFalse,
-				Reason: corev1.PodReasonUnschedulable,
-			}},
-		},
-	}
+	// The pool reads the PodScheduled condition the sandbox controller mirrors
+	// onto Sandbox.status, so the unschedulable signal belongs on the Sandbox.
+	sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+		Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+		Status:             metav1.ConditionFalse,
+		Reason:             corev1.PodReasonUnschedulable,
+		LastTransitionTime: metav1.Now(),
+	})
 
 	current := base
 	recorder := events.NewFakeRecorder(16)
 	scheme := newTestScheme()
-	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb, pod))
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb))
 	r := SandboxWarmPoolReconciler{
 		Client:                       lc,
 		Scheme:                       scheme,
@@ -922,6 +1413,175 @@ func TestReconcilePool_ConfigurableGraceAndRecheck(t *testing.T) {
 	}
 }
 
+// newGraceTestPool builds a one-replica pool whose single sandbox is non-Ready
+// and was created age before base, so tests can place it on either side of a
+// grace period. unschedulable adds the PodScheduled=False/Unschedulable signal
+// the sandbox controller mirrors onto Sandbox.status.
+func newGraceTestPool(base time.Time, age time.Duration, graceSeconds *int32, unschedulable bool) (*extensionsv1beta1.SandboxWarmPool, *sandboxv1beta1.Sandbox, *extensionsv1beta1.SandboxTemplate) {
+	const poolName = "test-pool"
+	const poolNamespace = "default"
+	replicas := int32(1)
+	template := createTemplate(poolNamespace)
+	poolNameHash := sandboxcontrollers.NameHash(poolName)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: poolNamespace, UID: "warmpool-uid-1293"},
+		Spec: extensionsv1beta1.SandboxWarmPoolSpec{
+			Replicas:                    &replicas,
+			TemplateRef:                 extensionsv1beta1.SandboxTemplateRef{Name: template.Name},
+			ReadinessGracePeriodSeconds: graceSeconds,
+		},
+	}
+	controller := true
+	sb := createPoolSandbox(poolName, poolNamespace, poolNameHash, template, "-grace")
+	sb.UID = "uid-grace"
+	sb.CreationTimestamp = metav1.Time{Time: base.Add(-age)}
+	sb.Status.Conditions = []metav1.Condition{{
+		Type:   string(sandboxv1beta1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+	}}
+	if unschedulable {
+		sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+			Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+			Status:             metav1.ConditionFalse,
+			Reason:             corev1.PodReasonUnschedulable,
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+	sb.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: extensionsv1beta1.GroupVersion.String(),
+		Kind:       "SandboxWarmPool",
+		Name:       poolName,
+		UID:        warmPool.UID,
+		Controller: &controller,
+	}}
+	return warmPool, sb, template
+}
+
+// TestReconcilePool_PerPoolReadinessGracePeriod: spec.readinessGracePeriodSeconds
+// wins over the controller-level value in both directions (#1293), and leaves
+// the controller-level unschedulable recheck interval alone.
+func TestReconcilePool_PerPoolReadinessGracePeriod(t *testing.T) {
+	zeroGraceJitter(t)
+	const controllerGrace = 5 * time.Minute
+	const controllerRecheck = 45 * time.Second
+
+	tests := []struct {
+		name          string
+		age           time.Duration
+		poolGraceSecs *int32
+		unschedulable bool
+		wantDeleted   bool
+		wantRequeue   time.Duration
+	}{
+		{
+			name:          "longer pool grace keeps a sandbox the controller value would replace",
+			age:           6 * time.Minute,
+			poolGraceSecs: new(int32(600)),
+			wantRequeue:   10*time.Minute - 6*time.Minute + graceRequeueSlack,
+		},
+		{
+			name:          "shorter pool grace replaces a sandbox the controller value would keep",
+			age:           90 * time.Second,
+			poolGraceSecs: new(int32(60)),
+			wantDeleted:   true,
+		},
+		{
+			name:        "unset pool grace uses the controller value",
+			age:         90 * time.Second,
+			wantRequeue: controllerGrace - 90*time.Second + graceRequeueSlack,
+		},
+		{
+			name:          "unschedulable past the pool grace is held and rechecked at the controller interval",
+			age:           90 * time.Second,
+			poolGraceSecs: new(int32(60)),
+			unschedulable: true,
+			wantRequeue:   controllerRecheck,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := time.Now().Truncate(time.Second)
+			warmPool, sb, template := newGraceTestPool(base, tc.age, tc.poolGraceSecs, tc.unschedulable)
+			scheme := newTestScheme()
+			recorder := events.NewFakeRecorder(16)
+			r := SandboxWarmPoolReconciler{
+				Client:                       newLaggingClient(newFakeClient(scheme, template, warmPool, sb)),
+				Scheme:                       scheme,
+				MaxBatchSize:                 sandboxCreateDeleteMaxBatchSize,
+				Recorder:                     recorder,
+				ReadinessGracePeriod:         controllerGrace,
+				UnschedulableRecheckInterval: controllerRecheck,
+				now:                          func() time.Time { return base },
+			}
+			ctx := context.Background()
+
+			requeueAfter, err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			getErr := r.Get(ctx, types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}, &sandboxv1beta1.Sandbox{})
+			if tc.wantDeleted {
+				require.True(t, k8serrors.IsNotFound(getErr), "sandbox past the pool grace must be deleted, got: %v", getErr)
+				return
+			}
+			require.NoError(t, getErr, "sandbox must be kept")
+			require.Equal(t, tc.wantRequeue, requeueAfter)
+
+			if tc.unschedulable {
+				// The hold event quotes the grace period it used, so it proves the
+				// message reads the pool value and not the controller-level one.
+				select {
+				case e := <-recorder.Events:
+					require.Contains(t, e, reasonWarmPoolNotProgressing)
+					require.Contains(t, e, "past the 1m0s readiness grace period")
+					require.NotContains(t, e, controllerGrace.String())
+				default:
+					t.Fatal("expected a WarmPoolNotProgressing event for the held sandbox")
+				}
+			}
+		})
+	}
+}
+
+// TestReconcilePool_ReadinessGracePeriodEditDoesNotChurn: editing
+// spec.readinessGracePeriodSeconds must not mark sandboxes stale (staleness is
+// derived from the template only), and shortening it takes effect on the very
+// next reconcile for a sandbox that is already past the new value.
+func TestReconcilePool_ReadinessGracePeriodEditDoesNotChurn(t *testing.T) {
+	zeroGraceJitter(t)
+	base := time.Now().Truncate(time.Second)
+	warmPool, sb, template := newGraceTestPool(base, 4*time.Minute, nil, false)
+	scheme := newTestScheme()
+	lc := newLaggingClient(newFakeClient(scheme, template, warmPool, sb))
+	r := SandboxWarmPoolReconciler{
+		Client:       lc,
+		Scheme:       scheme,
+		MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+		Recorder:     events.NewFakeRecorder(16),
+		now:          func() time.Time { return base },
+	}
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: sb.Namespace, Name: sb.Name}
+
+	// 4m old, inside the 5m default: kept.
+	_, err := r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key, &sandboxv1beta1.Sandbox{}))
+
+	// Lengthening the grace changes nothing: no delete, no create.
+	warmPool.Spec.ReadinessGracePeriodSeconds = new(int32(1800))
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key, &sandboxv1beta1.Sandbox{}), "editing the field must not replace a healthy-in-grace sandbox")
+	require.Equal(t, 0, lc.createCount())
+
+	// Shortening it below the sandbox's age takes effect immediately.
+	warmPool.Spec.ReadinessGracePeriodSeconds = new(int32(120))
+	_, err = r.reconcilePool(ctx, warmPool)
+	require.NoError(t, err)
+	require.True(t, k8serrors.IsNotFound(r.Get(ctx, key, &sandboxv1beta1.Sandbox{})),
+		"a sandbox older than the new, shorter grace must be replaced on the next reconcile")
+}
+
 // TestWarmPoolDefaults pins the exported defaults behind the
 // --sandbox-warm-pool-readiness-grace-period and
 // --sandbox-warm-pool-unschedulable-recheck-interval flags. These are the
@@ -941,7 +1601,7 @@ func TestWarmPoolDefaults(t *testing.T) {
 	// rejects explicit non-positive flag values, so a zero field can only come
 	// from a programmatically constructed reconciler (or a test).
 	var r SandboxWarmPoolReconciler
-	require.Equal(t, DefaultWarmPoolReadinessGracePeriod, r.readinessGracePeriod(),
+	require.Equal(t, DefaultWarmPoolReadinessGracePeriod, r.readinessGracePeriod(nil),
 		"zero ReadinessGracePeriod must fall back to the default")
 	require.Equal(t, DefaultUnschedulableRecheckInterval, r.unschedulableRecheckInterval(),
 		"zero UnschedulableRecheckInterval must fall back to the default")

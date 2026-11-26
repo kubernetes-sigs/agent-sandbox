@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -36,10 +37,21 @@ PLACEMENTS = ("round-robin", "least-loaded", "capacity-weighted", "image-affinit
 
 
 class ResourceSpec(BaseModel):
-  """Per-sandbox container resource requests."""
+  """Runtime container resources: requests, and optional limits (unset = none)."""
 
   cpu: str = "250m"
   memory: str = "512Mi"
+  cpu_limit: str | None = None
+  memory_limit: str | None = None
+
+  @field_validator("cpu", "memory", "cpu_limit", "memory_limit")
+  @classmethod
+  def _quantity_nonempty(cls, v: str | None) -> str | None:
+    # An empty string is neither "unset" nor a quantity: rendering would drop
+    # the limit the caller meant to set, or send "" as a request.
+    if v is not None and not v.strip():
+      raise ValueError("resource quantities must be non-empty (use None for no limit)")
+    return v
 
 
 class TemplateSpec(BaseModel):
@@ -63,12 +75,56 @@ class TemplateSpec(BaseModel):
   colocate_replicas: bool = False
   # Escape hatch: extra keys merged into the pod spec (e.g. tolerations).
   extra_pod_spec: dict = Field(default_factory=dict)
+  # SandboxTemplate `spec.networkPolicyManagement`. None leaves the field out, so
+  # the controller applies its default: Managed, one NetworkPolicy per template
+  # selecting on the template-ref-hash pod label. "Unmanaged" asks the controller
+  # to create none, for fleets that put ONE namespace-wide policy on the shared
+  # `app=agent-sandbox-rl` pod label instead: with a template per task image,
+  # created and deleted as pools are warmed and retired, per-template policies add
+  # a policy create and delete per template, and keep a per-template label
+  # identity-relevant on GKE Dataplane V2 (Cilium). The SDK also patches the mode
+  # onto a pre-existing template it owns.
+  # See examples/agent-sandbox-rl-network-policy.
+  network_policy_management: str | None = None
+  # Pod hardening, stated explicitly in the rendered spec: no ServiceAccount
+  # token (the controller already defaults automount to false on the pods it
+  # creates) and no shared PID namespace (the Kubernetes default; a grading
+  # sidecar must neither see nor be seen by the agent's processes). Set either
+  # to True for a workload that needs them.
+  automount_service_account_token: bool = False
+  share_process_namespace: bool = False
+  # Extra keys merged into the SandboxTemplate `spec` next to `podTemplate` and
+  # `networkPolicyManagement`, for template fields this model has no knob for.
+  # `podTemplate` and `networkPolicyManagement` are rejected here: they have
+  # knobs (extra_pod_spec, network_policy_management) that the SDK's own logic
+  # reads. Keys the SandboxTemplate CRD does not know are pruned by the API
+  # server, silently.
+  extra_template_spec: dict = Field(default_factory=dict)
 
   @field_validator("image_pull_policy")
   @classmethod
   def _valid_pull_policy(cls, v: str) -> str:
     if v not in ("Always", "IfNotPresent", "Never"):
       raise ValueError("image_pull_policy must be Always|IfNotPresent|Never")
+    return v
+
+  @field_validator("network_policy_management")
+  @classmethod
+  def _valid_network_policy_management(cls, v: str | None) -> str | None:
+    if v is not None and v not in ("Managed", "Unmanaged"):
+      raise ValueError("network_policy_management must be Managed|Unmanaged")
+    return v
+
+  @field_validator("extra_template_spec")
+  @classmethod
+  def _extra_template_spec_not_pod_template(cls, v: dict) -> dict:
+    if "podTemplate" in v:
+      raise ValueError("extra_template_spec must not carry podTemplate; "
+                       "use extra_pod_spec for pod-spec keys")
+    if "networkPolicyManagement" in v:
+      raise ValueError("extra_template_spec must not carry networkPolicyManagement; "
+                       "use network_policy_management (preflight and the template "
+                       "patch read that field)")
     return v
 
 
@@ -94,6 +150,11 @@ class ClusterConfig(BaseModel):
   image_pull_secret: str | None = None
   weight: float = 1.0                        # for CapacityWeighted placement
   max_replicas: int | None = None           # optional hard capacity hint
+  # GKE Pod Snapshots: build the SDK's PodSnapshot-capable client for this
+  # cluster so its handles gain snapshot()/suspend()/resume()/restore().
+  # Needs a GKE cluster with Pod Snapshots enabled, a gVisor runtime class,
+  # and a PodSnapshotStorageConfig + PodSnapshotPolicy (README → Snapshots).
+  snapshots: bool = False
 
   @field_validator("weight")
   @classmethod
@@ -107,6 +168,47 @@ class ClusterConfig(BaseModel):
   def _name_nonempty(cls, v: str) -> str:
     if not v:
       raise ValueError("cluster name must be non-empty")
+    return v
+
+
+class FailFastPolicy(BaseModel):
+  """When to give up on a claimed sandbox whose pod is not coming up.
+
+  `SandboxFleet.acquire` runs a watchdog next to the SDK's claim wait (see
+  `failfast.py`). Reasons that never clear on their own (``InvalidImageName``, a
+  ``Failed`` pod, an OOM-killed container) fail at once. The graced classes are
+  opt-in: with ``grace_s`` set, reasons that can be transient
+  (``ImagePullBackOff``, ``CreateContainerConfigError``, ``CrashLoopBackOff``,
+  ...) fail once they have persisted that long; with ``unschedulable_grace_s``
+  set, an ``Unschedulable`` pod fails after that long. Unset (the default) leaves
+  them to ``claim_timeout``: a GPU or node-auto-provisioning scale-up often
+  outlasts a few minutes of ``Unschedulable``, and failing a pull during registry
+  throttling makes the caller retry on a new pod whose pull starts at once
+  (kubelet's pull backoff is per pod), adding load while the registry is already
+  throttling. ``enabled=False`` restores the plain wait, bounded only by
+  ``claim_timeout`` / ``ready_timeout``.
+  """
+
+  enabled: bool = True
+  # Warm adoptions are Ready within a second or two; do not poll pods for those.
+  initial_delay_s: float = 10.0
+  poll_s: float = 5.0
+  # None = this class of reason is left to claim_timeout (see the docstring).
+  grace_s: float | None = None
+  unschedulable_grace_s: float | None = None
+
+  @field_validator("initial_delay_s", "grace_s", "unschedulable_grace_s")
+  @classmethod
+  def _non_negative(cls, v: float | None) -> float | None:
+    if v is not None and v < 0:
+      raise ValueError("must be >= 0")
+    return v
+
+  @field_validator("poll_s")
+  @classmethod
+  def _poll_positive(cls, v: float) -> float:
+    if v <= 0:
+      raise ValueError("poll_s must be > 0")
     return v
 
 
@@ -124,6 +226,22 @@ class FleetConfig(BaseModel):
   warm_per_task: bool = False
   window_size: int | None = None            # sliding: None = auto from max_concurrent
   ready_timeout: int = 900
+  # Seconds `acquire()` waits for ONE claim to become Ready. None = ready_timeout,
+  # which also bounds whole-pool fills and is sized for those (15 minutes); a
+  # single claim that is not Ready after a few minutes is stuck, and an RL step
+  # cannot absorb the difference. Pair with `fail_fast` for the cases that can be
+  # recognised before the timeout.
+  claim_timeout: int | None = None
+  fail_fast: FailFastPolicy = Field(default_factory=FailFastPolicy)
+  # Pre-pull (setup(prepull=True) / fleet.prepull()): images per DaemonSet pod,
+  # how many DaemonSets pull at once per node, whether each is deleted once its
+  # nodes are ready, and whether to drop the page cache afterwards (privileged
+  # one-shot DaemonSet; for runs that must start cold). The sandbox template's
+  # tolerations are applied to the pre-pull pods automatically.
+  prepull_images_per_pod: int = 25
+  prepull_max_parallel: int = 4
+  prepull_delete_when_done: bool = False
+  prepull_drop_caches: bool = False
   # Stage the warm fill in waves of <= this many sandbox creates in flight,
   # waiting for each wave to reach Ready before the next. Bounds the controller's
   # concurrent create burst (Σ pools×replicas). On controllers <= v0.5.3 this
@@ -167,6 +285,24 @@ class FleetConfig(BaseModel):
   # template, so any naming scheme works) and raises `PoolNotFoundError` for an
   # image nothing serves, rather than quietly building a size-1 pool for it.
   adopt_existing: bool = False
+  # How concurrent runs are kept apart (constants.RUN_ISOLATION_MODES). "none"
+  # (default, historical): stable per-image names in `clusters[].namespace` —
+  # fine when nothing else runs there. "names": several runs share the namespace
+  # and the run id is baked into every template/pool name, so runs on the same
+  # image never share, resize, or delete each other's pools. "namespace": each run
+  # gets `<namespace>-<run id>`, created on first use (labelled with this run's
+  # labels + `run_namespace_labels`) and deleted at teardown if this fleet created
+  # it. Anything a fresh namespace needs beyond labels (a Kueue LocalQueue, quotas,
+  # a pull secret) is the caller's job — do it in `run_namespace_setup(cluster,
+  # namespace)`, which must tolerate a re-run: a namespace kept after a failed
+  # rollback delete gets the hook again until it succeeds once. Teardown only
+  # ever sweeps this run's resources, in every mode.
+  run_isolation: str = "none"
+  # Run id shared by a job's processes (None: random per fleet). Setting it changes
+  # teardown and the circuit breaker; see "Concurrent runs on one cluster" in the README.
+  run_id: str | None = None
+  run_namespace_labels: dict[str, str] = Field(default_factory=dict)
+  run_namespace_setup: Callable[..., Any] | None = None
   labels: dict[str, str] = Field(default_factory=lambda: dict(constants.DEFAULT_LABELS))
   observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
   # Disk-aware window sizing (all optional; when avg_image_gb is None it's a no-op
@@ -180,12 +316,24 @@ class FleetConfig(BaseModel):
   # None => conservative single-node bound (safe when the pool size is unknown).
   cluster_nodes: int | None = None
 
-  @field_validator("max_concurrent", "max_warmpool_size")
+  @field_validator("max_concurrent", "max_warmpool_size", "prepull_images_per_pod",
+                   "prepull_max_parallel")
   @classmethod
   def _positive(cls, v: int) -> int:
     if v < 1:
       raise ValueError("must be >= 1")
     return v
+
+  @field_validator("claim_timeout")
+  @classmethod
+  def _claim_timeout_positive(cls, v: int | None) -> int | None:
+    if v is not None and v < 1:
+      raise ValueError("claim_timeout must be >= 1 or None")
+    return v
+
+  def effective_claim_timeout(self) -> int:
+    """Per-claim readiness bound: ``claim_timeout`` if set, else ``ready_timeout``."""
+    return self.claim_timeout if self.claim_timeout is not None else self.ready_timeout
 
   @field_validator("avg_image_gb", "node_ephemeral_gb")
   @classmethod
@@ -208,6 +356,24 @@ class FleetConfig(BaseModel):
       raise ValueError("must be >= 1 or None")
     return v
 
+  @field_validator("run_isolation")
+  @classmethod
+  def _known_isolation(cls, v: str) -> str:
+    if v not in constants.RUN_ISOLATION_MODES:
+      raise ValueError(f"unknown run_isolation '{v}'; choose from "
+                       f"{list(constants.RUN_ISOLATION_MODES)}")
+    return v
+
+  @field_validator("run_id")
+  @classmethod
+  def _valid_run_id(cls, v: str | None) -> str | None:
+    # Goes into label values and, per run_isolation, object and namespace names.
+    if v is not None and not _DNS1123_LABEL.match(v):
+      raise ValueError(
+          f"run_id {v!r} must be a DNS-1123 label (lowercase alphanumerics and "
+          "'-', starting and ending with an alphanumeric, 63 chars max)")
+    return v
+
   @field_validator("template_name_prefix")
   @classmethod
   def _valid_prefix(cls, v: str) -> str:
@@ -215,8 +381,9 @@ class FleetConfig(BaseModel):
     # prefix: a permissive prefix regex still allows names that aren't valid
     # DNS-1123 subdomains (e.g. consecutive dots "r2e..img-", or a segment
     # ending in '-' before a dot), which fail with a 422 only at create time.
-    # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in.
-    sample = f"{v}{'0' * 12}"
+    # The 12-char md5 suffix is hex, so "0"*12 is a representative stand-in; the
+    # run id a `{run_id}` placeholder expands to is also 12 hex chars.
+    sample = f"{v}{'0' * 12}".replace(constants.RUN_ID_PLACEHOLDER, _SAMPLE_RUN_ID)
     if len(sample) > 253 or not _DNS1123.match(sample):
       raise ValueError(
           "template_name_prefix must yield a DNS-1123 subdomain when combined "
@@ -224,20 +391,37 @@ class FleetConfig(BaseModel):
     return v
 
   @model_validator(mode="after")
+  def _isolation_vs_adoption(self) -> "FleetConfig":
+    # A fresh per-run namespace has nothing in it to adopt: plan() would create the
+    # namespace and then raise PoolNotFoundError for every image. Say so up front.
+    if self.adopt_existing and self.run_isolation == "namespace":
+      raise ValueError(
+          "adopt_existing=True cannot be combined with run_isolation='namespace': "
+          "a per-run namespace holds no pools to adopt. Adopt from the shared "
+          "namespace (run_isolation='none' or 'names') instead.")
+    return self
+
+  @model_validator(mode="after")
   def _valid_pool_name_format(self) -> "FleetConfig":
     # Validated here rather than as a field_validator because the rendered name
     # depends on template_name_prefix too.
+    # Distinct stand-ins for the image hash and the run id: rendering both to the
+    # same string would let a format with no per-image part (`pool-{run_id}`)
+    # pass the uniqueness check below and map every image onto one pool.
     sample_hash = "0" * 12
-    sample_template = f"{self.template_name_prefix}{sample_hash}"
+    sample_template = (f"{self.template_name_prefix}{sample_hash}"
+                       .replace(constants.RUN_ID_PLACEHOLDER, _SAMPLE_RUN_ID))
     try:
-      sample = self.pool_name_format.format(template=sample_template,
-                                            image_hash=sample_hash)
+      sample = (self.pool_name_format
+                .replace(constants.RUN_ID_PLACEHOLDER, _SAMPLE_RUN_ID)
+                .format(template=sample_template, image_hash=sample_hash))
     except (KeyError, IndexError, ValueError) as e:
       # ValueError too: an unmatched brace ("pool-{template") raises it from
       # str.format, and it should get this actionable message, not escape raw.
       raise ValueError(
-          "pool_name_format may only reference {template} and {image_hash} "
-          f"(use {{{{ }}}} for a literal brace); got {self.pool_name_format!r}") from e
+          "pool_name_format may only reference {template}, {image_hash} and "
+          f"{{run_id}} (use {{{{ }}}} for a literal brace); got "
+          f"{self.pool_name_format!r}") from e
     if sample_hash not in sample:
       # Not pedantry: a format with no per-image part maps EVERY image onto one
       # pool name, so the second image silently upserts the first one's pool and
@@ -278,3 +462,72 @@ class FleetConfig(BaseModel):
     h = self.image_hash(image)
     return self.pool_name_format.format(
         template=self.template_name(image), image_hash=h)
+
+  def apply_run_isolation(self, run_id: str) -> None:
+    """Resolve the run-dependent parts of this config for ``run_id``. Called once
+    by `SandboxFleet.__init__` on its private copy, before the registry is built.
+
+    ``{run_id}`` placeholders in `template_name_prefix` / `pool_name_format` are
+    substituted in every mode. ``"names"`` additionally makes BOTH names unique to
+    this run, independently: the template prefix gets the run id unless it already
+    carries the placeholder, and the pool format gets it unless it carries the
+    placeholder or `{template}` (which inherits the prefix's run id). Either name
+    left shared would be reachable by the provisioning path — `ensure_template`
+    reuses an existing template and `create_warmpool(reconcile=True)` resizes an
+    existing pool. ``"namespace"`` rewrites each cluster's namespace to
+    `run_namespace()`."""
+    ph = constants.RUN_ID_PLACEHOLDER
+    if self.run_isolation == "names":
+      if ph not in self.template_name_prefix:
+        self.template_name_prefix = f"{self.template_name_prefix}{ph}-"
+      if ph not in self.pool_name_format and "{template}" not in self.pool_name_format:
+        self.pool_name_format = f"{self.pool_name_format}-{ph}"
+    self.template_name_prefix = self.template_name_prefix.replace(ph, run_id)
+    self.pool_name_format = self.pool_name_format.replace(ph, run_id)
+    self._check_resolved_names()
+    if self.run_isolation == "namespace":
+      for c in self.clusters:
+        c.namespace = run_namespace(c.namespace, run_id)
+
+  def _check_resolved_names(self) -> None:
+    """Re-validate the rendered template and pool names once the run id is in.
+
+    The field validators saw the placeholder form; ``"names"`` mode may have added
+    13 characters to each name since, and a prefix that was valid at the 253-char
+    limit no longer is. Better a ValueError here than a 422 on the first create."""
+    sample_hash = "0" * 12
+    template = f"{self.template_name_prefix}{sample_hash}"
+    pool = self.pool_name_format.format(template=template, image_hash=sample_hash)
+    for kind, name in (("template", template), ("pool", pool)):
+      if len(name) > 253 or not _DNS1123.match(name):
+        raise ValueError(
+            f"resolved {kind} name {name!r} ({len(name)} chars) is not a valid "
+            "DNS-1123 subdomain after the run id was added; shorten "
+            "template_name_prefix / pool_name_format")
+    # Also the `sandbox=<template>` pod label value, so at most 63 or every pod fails.
+    if len(template) > 63:
+      raise ValueError(
+          f"resolved template name {template!r} is {len(template)} chars; it is "
+          "used as a pod label value, so it must be at most 63. Shorten "
+          "template_name_prefix or run_id")
+
+
+_DNS1123_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+# Stand-in for a run id when validating name formats (12 hex chars, like the real
+# thing, and deliberately different from the "0"*12 image-hash stand-in).
+_SAMPLE_RUN_ID = "f" * 12
+
+
+def run_namespace(base: str, run_id: str) -> str:
+  """The per-run namespace for ``run_isolation="namespace"``: ``<base>-<run_id>``.
+
+  Namespace names are DNS-1123 *labels* (63 chars, lowercase alphanumerics and
+  '-'), stricter than the subdomain rule object names follow, so validate here
+  rather than discover it as a 422 at create time."""
+  ns = f"{base}-{run_id}"
+  if not _DNS1123_LABEL.match(ns):
+    raise ValueError(
+        f"run namespace {ns!r} is not a valid DNS-1123 label (lowercase "
+        f"alphanumerics and '-', 63 chars max); shorten the base namespace "
+        f"{base!r} or use run_isolation='names'")
+  return ns

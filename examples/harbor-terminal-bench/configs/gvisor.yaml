@@ -1,0 +1,11 @@
+# Layer on top of sample.yaml or tb2.yaml (configs are additive, later wins):
+#
+#   harbor run -c configs/tb2.yaml -c configs/gvisor.yaml -m <model>
+#
+# Runs the sandboxes under the gVisor RuntimeClass on a GKE Sandbox node pool,
+# which admits pods only through that class and taints its nodes.
+environment:
+  kwargs:
+    runtime_class: gvisor
+    node_selector: sandbox.gke.io/runtime=gvisor
+    tolerations: '[{"key": "sandbox.gke.io/runtime", "operator": "Equal", "value": "gvisor", "effect": "NoSchedule"}]'

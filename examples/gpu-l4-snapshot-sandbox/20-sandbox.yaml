@@ -1,0 +1,46 @@
+# Substitute ${DEMO_IMAGE} before applying (envsubst).
+#
+# GKE matches a restore to a snapshot by a hash of the pod spec. If you edit
+# this spec (image, resources, env, and so on) between the snapshot and the
+# resume, the new pod cold-starts silently.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-l4-snapshot-sa
+  namespace: default
+---
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: gpu-l4-sandbox
+  namespace: default
+spec:
+  podTemplate:
+    metadata:
+      labels:
+        # Matched by the PodSnapshotPolicy selector.
+        gpu-snapshot-demo: l4
+    spec:
+      # Pod Snapshots require GKE Sandbox (gVisor).
+      runtimeClassName: gvisor
+      # The KSA whose Workload Identity principal can access the bucket.
+      serviceAccountName: gpu-l4-snapshot-sa
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      containers:
+        - name: probe
+          image: ${DEMO_IMAGE}
+          ports:
+            - containerPort: 8888
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8888
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              memory: 8Gi
+              nvidia.com/gpu: 1

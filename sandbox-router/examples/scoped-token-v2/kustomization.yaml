@@ -1,0 +1,9 @@
+# Composes the scoped-token v2 activation patch onto the core install, so
+# the first router Pods already require scoped tokens instead of starting
+# allow-all.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../deploy
+patches:
+- path: deployment-patch.yaml

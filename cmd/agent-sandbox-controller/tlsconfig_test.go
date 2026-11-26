@@ -53,6 +53,20 @@ func TestBuildMetricsTLSOpts(t *testing.T) {
 		})
 	}
 
+	t.Run("alpnOpt_adds_http11_fallback", func(t *testing.T) {
+		cfg := &tls.Config{}
+		alpnOpt(cfg)
+		wantProtos := []string{"h2", "http/1.1"}
+		if len(cfg.NextProtos) != len(wantProtos) {
+			t.Fatalf("NextProtos = %v, want %v", cfg.NextProtos, wantProtos)
+		}
+		for i, p := range wantProtos {
+			if cfg.NextProtos[i] != p {
+				t.Errorf("NextProtos[%d] = %q, want %q", i, cfg.NextProtos[i], p)
+			}
+		}
+	})
+
 	t.Run("applies_minversion", func(t *testing.T) {
 		opts, err := buildMetricsTLSOpts("VersionTLS13", "")
 		if err != nil {

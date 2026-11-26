@@ -102,7 +102,7 @@ async def list_files(
                 name=entry.name,
                 size=entry.size,
                 type=entry.type,
-                mod_time=entry.mod_time,
+                mod_time=entry.modified.timestamp(),
             )
             for entry in entries[:max_entries]
         ],

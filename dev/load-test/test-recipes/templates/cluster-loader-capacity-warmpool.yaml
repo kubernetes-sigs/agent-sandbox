@@ -1,0 +1,14 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: {{.Name}}
+  labels:
+    benchmark-run: "{{.RunID}}"
+spec:
+  replicas: {{.Replicas}}
+  sandboxTemplateRef:
+    # CL2 names the first replica <basename>-0. Keep this in sync with the
+    # capacity-template basename in warmpool-capacity-cliff-test.yaml.
+    name: capacity-template-0
+  updateStrategy:
+    type: Recreate

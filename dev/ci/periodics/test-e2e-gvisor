@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Periodic gVisor e2e test job: creates a KIND cluster with gVisor installed,
+# deploys the controller, and runs only the runtime-class-aware tests with
+# SANDBOX_RUNTIME_CLASS=gvisor.
+#
+# Runs a focused subset (TestRuntimeClass*) rather than the full test
+# suite. The runc regression signal is already covered by the test-e2e
+# presubmit; this job adds the gVisor timing dimension. Benchmarks are
+# omitted since TestRuntimeClassStartupComparison already covers cold
+# start and warm claim latency; benchstat trending is deferred to the
+# kata-on-kOps periodic (Phase 2) where scale makes it meaningful.
+#
+# The gVisor install is interposed between cluster creation and image push
+# so the containerd restart does not disrupt loaded images or running pods.
+
+import os
+import subprocess
+import sys
+
+_repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from dev.ci.shared.runner import TestRunner
+
+
+class GVisorE2ETestRunner(TestRunner):
+    def __init__(self):
+        super().__init__(
+            "e2e-test-gvisor",
+            "runs e2e tests with gVisor runtime on a KIND cluster",
+        )
+
+    def setup_cluster(self, args):
+        image_tag = os.environ["IMAGE_TAG"]
+
+        result = self.run_with_retry([
+            f"{self.repo_root}/dev/tools/create-kind-cluster",
+            self.name, "--recreate",
+            "--kubeconfig", f"{self.repo_root}/bin/KUBECONFIG",
+        ])
+        if result.returncode != 0:
+            return result
+
+        result = self.run_with_retry([
+            f"{self.repo_root}/dev/ci/shared/install-gvisor-kind",
+            "--cluster-name", self.name,
+        ])
+        if result.returncode != 0:
+            return result
+
+        result = self.run_with_retry([
+            f"{self.repo_root}/dev/tools/push-images",
+            "--kind-cluster-name", self.name,
+            "--image-prefix", args.image_prefix,
+            "--image-tag", image_tag,
+            "--images",
+            "agent-sandbox-controller",
+        ])
+        if result.returncode != 0:
+            return result
+
+        if not getattr(args, "skip_initial_deploy", False):
+            result = self.run_with_retry([
+                f"{self.repo_root}/dev/tools/deploy-to-kube",
+                "--image-prefix", args.image_prefix,
+                "--image-tag", image_tag,
+                "--extensions",
+            ])
+            if result.returncode != 0:
+                return result
+
+        result = self.run_with_retry([
+            f"{self.repo_root}/dev/tools/deploy-cloud-provider",
+        ])
+        return result
+
+    def run_tests(self, args):
+        env = os.environ.copy()
+        env["SANDBOX_RUNTIME_CLASS"] = "gvisor"
+        env.setdefault("SANDBOX_POOL_SIZES", "20")
+        env["KUBECONFIG"] = os.environ.get(
+            "KUBECONFIG", os.path.join(self.repo_root, "bin", "KUBECONFIG"),
+        )
+
+        artifact_dir = os.environ.get("ARTIFACTS", os.path.join(self.repo_root, "bin"))
+        os.makedirs(artifact_dir, exist_ok=True)
+
+        cmd = [
+            "go", "tool", f"-modfile={self.repo_root}/dev/tools/go.mod",
+            "gotestsum",
+            f"--junitfile={artifact_dir}/junit_e2e-gvisor.xml",
+            "--",
+            "./test/e2e/extensions/...",
+            "-run", "RuntimeClass",
+            "-v",
+            "--parallel=1",
+        ]
+        print(f"Running: {' '.join(cmd)}")
+        return subprocess.run(cmd, env=env, cwd=self.repo_root)
+
+
+if __name__ == "__main__":
+    runner = GVisorE2ETestRunner()
+    runner.main()

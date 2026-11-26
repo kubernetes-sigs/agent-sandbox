@@ -219,17 +219,7 @@ func TestScopedTokenV2_RejectsSignedTokenWithoutSandboxUID(t *testing.T) {
 		Path:        "/exec/run",
 		Exp:         time.Now().Add(time.Minute).Unix(),
 	}
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
-	}
-	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
-	token := strings.Join([]string{
-		scopedTokenV2Version,
-		"current",
-		encodedPayload,
-		base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, scopedTokenV2SigningInput("current", encodedPayload))),
-	}, ".")
+	token := signScopedTokenV2Claims(t, privateKey, "current", claims)
 	authorizer, err := NewScopedTokenAuthorizer(ScopedTokenOptions{
 		VerificationKeys: map[string]ed25519.PublicKey{"current": publicKey},
 	})
@@ -240,6 +230,115 @@ func TestScopedTokenV2_RejectsSignedTokenWithoutSandboxUID(t *testing.T) {
 	target.SandboxUID = ""
 	if err := authorizer.Authorize(context.Background(), reqWithBearer(token), target); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("expected empty-UID token to be unauthenticated, got %v", err)
+	}
+}
+
+func TestScopedTokenV2_SandboxScopeAuthorizesEveryTarget(t *testing.T) {
+	publicKey, privateKey := newScopedTokenV2Key(t)
+	bound := scopedTokenV2Target()
+	token, err := MintScopedTokenV2Sandbox(privateKey, "current", bound.Namespace, bound.SandboxName, bound.SandboxUID, time.Minute)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	authorizer, err := NewScopedTokenAuthorizer(ScopedTokenOptions{
+		VerificationKeys: map[string]ed25519.PublicKey{"current": publicKey},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*AuthorizationTarget)
+		podIP  bool
+		want   error
+	}{
+		{name: "REST PUT", mutate: func(t *AuthorizationTarget) { t.Port, t.Method, t.Path = 8080, "PUT", "/v1/files/a/b" }},
+		{name: "gRPC Execute", mutate: func(t *AuthorizationTarget) {
+			t.Port, t.Method, t.Path = 9090, "POST", "/process.v1.ProcessService/Execute"
+		}},
+		{name: "other Sandbox UID", mutate: func(t *AuthorizationTarget) { t.SandboxUID = "replacement-uid" }, want: ErrForbidden},
+		{name: "Pod IP header", mutate: func(*AuthorizationTarget) {}, podIP: true, want: ErrForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := bound
+			test.mutate(&target)
+			request := reqWithBearer(token)
+			request.Method = target.Method
+			if test.podIP {
+				request.Header.Set("X-Sandbox-Pod-Ip", "10.0.0.1")
+			}
+			err := authorizer.Authorize(context.Background(), request, target)
+			if test.want == nil && err != nil {
+				t.Fatalf("expected authorization, got %v", err)
+			}
+			if test.want != nil && !errors.Is(err, test.want) {
+				t.Fatalf("expected %v, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestScopedTokenV2_RejectsMalformedScope(t *testing.T) {
+	publicKey, privateKey := newScopedTokenV2Key(t)
+	authorizer, err := NewScopedTokenAuthorizer(ScopedTokenOptions{
+		VerificationKeys: map[string]ed25519.PublicKey{"current": publicKey},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	target := scopedTokenV2Target()
+
+	tests := []struct {
+		name   string
+		mutate func(*scopedTokenV2Claims)
+	}{
+		{"unknown scope", func(c *scopedTokenV2Claims) { c.Scope = "prefix" }},
+		{"sandbox scope with port", func(c *scopedTokenV2Claims) { c.Port = target.Port }},
+		{"sandbox scope with method", func(c *scopedTokenV2Claims) { c.Method = target.Method }},
+		{"sandbox scope with path", func(c *scopedTokenV2Claims) { c.Path = target.Path }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			claims := scopedTokenV2Claims{
+				Namespace:   target.Namespace,
+				SandboxName: target.SandboxName,
+				SandboxUID:  target.SandboxUID,
+				Scope:       scopedTokenV2ScopeSandbox,
+				Exp:         time.Now().Add(time.Minute).Unix(),
+			}
+			test.mutate(&claims)
+			token := signScopedTokenV2Claims(t, privateKey, "current", claims)
+			if err := authorizer.Authorize(context.Background(), reqWithBearer(token), target); !errors.Is(err, ErrUnauthenticated) {
+				t.Fatalf("expected ErrUnauthenticated, got %v", err)
+			}
+		})
+	}
+}
+
+func TestMintScopedTokenV2Sandbox_RequiresFields(t *testing.T) {
+	_, privateKey := newScopedTokenV2Key(t)
+	tests := []struct {
+		name       string
+		privateKey ed25519.PrivateKey
+		namespace  string
+		sandbox    string
+		uid        string
+		ttl        time.Duration
+	}{
+		{"empty namespace", privateKey, "", "box-a", "uid-a", time.Minute},
+		{"empty name", privateKey, "team-a", "", "uid-a", time.Minute},
+		{"empty UID", privateKey, "team-a", "box-a", "", time.Minute},
+		{"short ttl", privateKey, "team-a", "box-a", "uid-a", time.Second - 1},
+		{"bad key", privateKey[:10], "team-a", "box-a", "uid-a", time.Minute},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := MintScopedTokenV2Sandbox(test.privateKey, "current", test.namespace, test.sandbox, test.uid, test.ttl); err == nil {
+				t.Fatal("expected mint to fail")
+			}
+		})
 	}
 }
 
@@ -297,6 +396,21 @@ func TestParseScopedTokenVerificationKeys_AcceptsOverlapKeySet(t *testing.T) {
 	if len(keys) != 2 || !oldPublic.Equal(keys["old"]) || !newPublic.Equal(keys["new"]) {
 		t.Fatalf("parsed keys do not match input")
 	}
+}
+
+func signScopedTokenV2Claims(t *testing.T, privateKey ed25519.PrivateKey, keyID string, claims scopedTokenV2Claims) string {
+	t.Helper()
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
+	return strings.Join([]string{
+		scopedTokenV2Version,
+		keyID,
+		encodedPayload,
+		base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, scopedTokenV2SigningInput(keyID, encodedPayload))),
+	}, ".")
 }
 
 func decodeScopedTokenV2Claims(t *testing.T, token string) scopedTokenV2Claims {

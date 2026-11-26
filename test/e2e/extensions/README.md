@@ -37,8 +37,10 @@ behaviour across different container runtimes (runc, gVisor, kata).
 | `SANDBOX_CLUSTER_ID` | *(auto-detected)* | Override cluster identity string in report paths |
 | `SANDBOX_VERSION` | *(auto-detected)* | Override agent-sandbox version. Defaults to the controller deployment image tag. |
 | `SANDBOX_WORKLOAD_SEC` | `30` | Seconds the workload container sleeps in burst recovery and benchmark tests. `0` uses a pause container. Longevity mode overrides this to `max(10, coldStart×5)` unless explicitly set — derived from cold start calibration so pods survive pool fill time. |
-| `SANDBOX_TTL` | `0` | TTL in seconds for claim auto-cleanup after workload finishes. All claims use `ShutdownPolicy: Delete` with this TTL. Set higher to simulate Retain-like behavior where claims linger before deletion. |
+| `SANDBOX_TTL` | `0` | TTL in seconds for non-burst claim auto-cleanup (lifecycle, benchmark tests). Burst recovery uses `ShutdownTime` instead — see [Design Decisions](#design-decisions). |
 | `SANDBOX_IMAGES` | `registry.k8s.io/pause:3.10` | Comma-separated images for cold start and warm claim benchmarks |
+| `SANDBOX_DEFAULT_TIMEOUT` | `60s` | Default per-operation timeout for framework waits (WaitForObject, WaitForWarmPoolReady, etc.). Set to `5m` for kata-remote (peer-pods) where pod VM provisioning takes 60-80s on AWS and 2-3 minutes on Azure. |
+| `SANDBOX_CONTROLLER_WORKERS` | *(auto for kata, unset otherwise)* | Override controller worker counts. Format: `sandbox:20,claim:10,pool:1,batch:10`. Patches the controller deployment, waits for rollout, and restores original args on cleanup. For VM runtimes (kata), auto-derives node-aware defaults when unset — see [Controller Worker Auto-Tuning](#controller-worker-auto-tuning). |
 
 ## Quick Start
 
@@ -101,6 +103,37 @@ SANDBOX_RUNTIME_CLASS=kata-clh \
   SANDBOX_LONGEVITY=5m \
   SANDBOX_DEBUG=true \
   go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 10m
+
+# Worker tuning sweep — compare default vs reduced concurrency for kata
+SANDBOX_RUNTIME_CLASS=kata-clh \
+  SANDBOX_POOL_SIZES=20 \
+  SANDBOX_CONTROLLER_WORKERS=sandbox:10,claim:10,batch:10 \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 60m
+```
+
+### Kata-Remote (Peer-Pods)
+
+Peer-pods (`kata-remote`) provision a full VM per sandbox via a cloud provider
+API (AWS, Azure). Cold start is significantly slower than local kata: 60-80s on
+AWS, 2-3 minutes on Azure. Set `SANDBOX_DEFAULT_TIMEOUT` to avoid per-operation
+timeouts in the test framework.
+
+```shell
+# Lifecycle smoke test on AWS peer-pods
+SANDBOX_RUNTIME_CLASS=kata-remote \
+  SANDBOX_DEFAULT_TIMEOUT=5m \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassLifecycle -v -timeout 30m
+
+# Cold vs warm comparison
+SANDBOX_RUNTIME_CLASS=kata-remote \
+  SANDBOX_DEFAULT_TIMEOUT=5m \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassStartupComparison -v -timeout 30m
+
+# Burst recovery (smaller pool sizes due to VM provisioning cost)
+SANDBOX_RUNTIME_CLASS=kata-remote \
+  SANDBOX_DEFAULT_TIMEOUT=5m \
+  SANDBOX_POOL_SIZES=2,4,6 \
+  go test ./test/e2e/extensions/... -run TestRuntimeClassBurstRecovery -v -timeout 60m
 ```
 
 ## Batch Sizing
@@ -146,6 +179,63 @@ always fires `2×poolSize` claims to capture the warm-to-cold transition
 point. Pool depletion (`ReadyReplicas ≤ 1`) is logged but does not stop
 the test — claims past depletion exercise the cold fallback path and
 appear as `is_warm=false` in the CSV.
+
+## Controller Worker Auto-Tuning
+
+For VM runtimes (`kata-*`), the test auto-derives controller worker counts
+based on the number of worker nodes when `SANDBOX_CONTROLLER_WORKERS` is not
+set. VM boot is a **per-node** operation — parallelism scales with node count,
+not total cluster CPU.
+
+### Why node count matters
+
+Each QEMU boot consumes ~1 vCPU of CPU and significant memory bandwidth during
+the boot sequence (BIOS → kernel → init). Adding more CPUs to a node gives
+diminishing returns because VM boot stages are largely sequential. Adding more
+nodes directly multiplies the number of independent boot lanes:
+
+| Topology | Parallel boot lanes | Pool=40 fill estimate |
+|---|---|---|
+| 24 × 4 vCPU | ~24 | 2 rounds ≈ 7s |
+| 12 × 8 vCPU | ~12-24 | 2-3 rounds ≈ 7-10s |
+| 6 × 16 vCPU | ~6-12 | 4-7 rounds ≈ 13-22s |
+
+### Auto-derived values
+
+```text
+sandbox_workers  = nodes × 2     (concurrent VM boot reconcilers; floor 2)
+claim_workers    = 10             (lightweight adoption ops, always safe)
+pool_workers     = 1              (serialize pool reconciliation, prevent boot storms)
+max_batch_size   = sandbox_workers (match pool batch ceiling to boot capacity)
+```
+
+The multiplier `2` (boots per node) means each node sustains two concurrent VM
+boots with mild contention. At 3+ concurrent boots per node, individual boot
+times degrade due to memory bandwidth and disk IO saturation.
+
+| Cluster | sandbox | claim | pool | batch | Rationale |
+|---------|---------|-------|------|-------|-----------|
+| 2 nodes | 4 | 10 | 1 | 4 | Small cluster — serialize boots |
+| 5 nodes | 10 | 10 | 1 | 10 | Medium cluster — 2 boots/node |
+| 12 nodes | 24 | 10 | 1 | 24 | Large cluster — full parallelism |
+
+### Explicit override
+
+Set `SANDBOX_CONTROLLER_WORKERS` to override the auto-derived values:
+
+```shell
+SANDBOX_CONTROLLER_WORKERS=sandbox:5,claim:10,pool:1,batch:5
+```
+
+The CSV records both the values used and whether they were auto-derived:
+
+```text
+# controller_workers,sandbox:10,claim:10,pool:1,batch:10
+# controller_workers_source,auto(5 nodes × 2 boots/node)
+```
+
+When explicitly set, only the `# controller_workers` line appears (no
+`_source` line).
 
 ## Pool Lifecycle and Fill Measurement
 
@@ -307,12 +397,13 @@ Key differences from regular burst mode:
   longevity mode sets workload duration to `max(10, coldStart×5)` seconds —
   derived from cold start calibration so pods survive one full pool fill
   cycle.
-- **Claim auto-cleanup**: all claims (burst, baseline, lifecycle, benchmarks)
-  use `ShutdownPolicy: Delete` with `TTLSecondsAfterFinished: 0` by default
-  (configurable via `SANDBOX_TTL`). The controller deletes claims after the
-  workload exits — no client-side GC needed. This prevents defer cleanup
-  storms at test end (a 2-minute run produces 800+ claims).
-- **Minimum pool size**: longevity mode skips pool sizes below 20 — smaller
+- **Claim auto-cleanup**: all claims use `ShutdownPolicy: Delete` with
+  `ShutdownTime` set to `now + coldBaseline + workloadSec + 10s`. The controller deletes
+  claims at the deadline regardless of pod restart policy — no client-side
+  GC needed. `TTLSecondsAfterFinished` is not used because it requires the
+  sandbox to reach a terminal state, which never happens with the default
+  `RestartPolicy: Always` (see [#1306](https://github.com/kubernetes-sigs/agent-sandbox/issues/1306#issuecomment-5528926334)).
+- **Minimum pool size**: longevity mode skips pool sizes below 8 — smaller
   pools deplete too fast for meaningful adaptive tuning.
 - **Summary CSV**: a `burst_summary_<runtime>_pool<N>.csv` is written every
   10 batches with aggregated p50/p95 latencies, throughput, green/grey/cold
@@ -477,9 +568,11 @@ the hypervisor layer, the storage layer, or the application stack.
 
 ## Design Decisions
 
-All claims use `ShutdownPolicy: Delete` with `TTLSecondsAfterFinished: 0`
-(configurable via `SANDBOX_TTL`) to prevent zombie claim/sandbox/pod
-accumulation. Without this, the API default (`Retain` or no lifecycle at all)
-leaves finished claims and their underlying VMs alive indefinitely — a
-resource leak and security gap documented in
-[#1306](https://github.com/kubernetes-sigs/agent-sandbox/issues/1306).
+All claims use `ShutdownPolicy: Delete` with `ShutdownTime` set to
+`now + coldBaseline + workloadSec + 10s` to prevent zombie
+claim/sandbox/pod accumulation. `ShutdownTime` is used instead of
+`TTLSecondsAfterFinished` because TTL only fires after the sandbox reaches
+a terminal state — with `RestartPolicy: Always` (the default), the container
+restarts indefinitely and TTL never fires, causing unbounded VM accumulation.
+`ShutdownTime` is a hard wall-clock deadline regardless of pod state.
+See [#1306](https://github.com/kubernetes-sigs/agent-sandbox/issues/1306).

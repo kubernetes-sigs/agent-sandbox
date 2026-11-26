@@ -95,8 +95,6 @@ spec:
             capabilities:
               drop: ["ALL"]
           env:
-            - name: OPENCLAW_GATEWAY_TOKEN
-              value: "dummy-token-for-sandbox"
             - name: OPENCLAW_CONFIG_PATH
               value: "/etc/openclaw/openclaw.json"
             # HOME=/workspace puts OpenClaw's own state directory at
@@ -172,7 +170,32 @@ spec:
                                   "(-> .invalid); starting on base config: " + e.message);
                   }
                 }
-                fs.writeFileSync(eff, JSON.stringify(effective, null, 2));'
+                // Each employee gets their own gateway token. A token in
+                // this template would be the same for every sandbox in the
+                // fleet, so anyone who can reach a gateway could use it. The
+                // token lives in the workspace of the employee, so it
+                // survives suspend, resume, and rebuilds, and no other
+                // employee can read it. Keep apostrophes out of this script:
+                // the shell passes it to node in single quotes.
+                const tokenFile = "/workspace/.openclaw/gateway-token";
+                let token = "";
+                try { token = fs.readFileSync(tokenFile, "utf8").trim(); } catch (e) {}
+                if (!/^[0-9a-f]{64}$/.test(token)) {
+                  token = require("crypto").randomBytes(32).toString("hex");
+                  fs.writeFileSync(tokenFile, token + "\n", { mode: 0o600 });
+                }
+                effective.gateway = effective.gateway || {};
+                effective.gateway.auth = { mode: "token", token };
+                // The init container copied this file from the ConfigMap
+                // with a world-readable mode. It now holds the token.
+                fs.chmodSync(eff, 0o600);
+                fs.writeFileSync(eff, JSON.stringify(effective, null, 2));' || {
+                # Starting the gateway without this config would leave it
+                # on a token that is not in the workspace. Exit so that
+                # restartPolicy: OnFailure retries the setup.
+                echo "Failed to prepare the gateway config; not starting." >&2
+                exit 1
+              }
               echo "Workspace bound; starting OpenClaw gateway."
               node dist/index.js gateway --bind=lan --port 18789 --allow-unconfigured --verbose
           ports:

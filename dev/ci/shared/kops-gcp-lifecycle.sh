@@ -1,0 +1,370 @@
+#!/bin/bash
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Shared kOps/GCE lifecycle for benchmark and e2e scenario scripts.
+#
+# Source this file (do not exec) so callers can interleave their own
+# kops-edit blocks between kops_create_cluster and kops_apply_and_validate.
+#
+# Usage:
+#   REPO_ROOT="$(git rev-parse --show-toplevel)"
+#   source "${REPO_ROOT}/dev/ci/shared/kops-gcp-lifecycle.sh"
+#   kops_install_tools
+#   kops_acquire_project
+#   kops_register_cleanup  # install early; tolerates resources not yet created
+#   kops_setup_images "agent-sandbox-controller"
+#   kops_create_bucket
+#   kops_create_cluster "sandbox-${UNIQUE_SUFFIX}" "${ZONE}"
+#   # ... scenario-specific kops edit calls ...
+#   kops_apply_and_validate
+
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+cd "${REPO_ROOT}"
+
+export WORKDIR="${REPO_ROOT}/.build"
+rm -rf "${WORKDIR}"
+mkdir -p "${WORKDIR}/bin"
+
+export BINDIR="${WORKDIR}/bin"
+export PATH="${BINDIR}:${PATH}"
+
+export KUBECONFIG="${WORKDIR}/kubeconfig"
+
+UNIQUE_SUFFIX="$(date +%Y%m%d-%H%M%S)"
+
+KOPS_VERSION="${KOPS_VERSION:-v1.36.0}"
+
+# Zones tried, in order, when the control-plane managed instance group reports
+# ZONE_RESOURCE_POOL_EXHAUSTED for the requested machine type. On 2026-11-12
+# both benchmark presubmits lost their c3 control plane this way in
+# us-central1-a (#1921): the group retried the create for 13 minutes, the VM
+# booted 26 minutes after `kops update`, and `kops validate` had already given
+# up. c3-standard-8/22 and n2 are offered in all four us-central1 zones.
+KOPS_FALLBACK_ZONES="${KOPS_FALLBACK_ZONES:-us-central1-b us-central1-c us-central1-f}"
+# Seconds to watch the control-plane group for a capacity error after
+# `kops update` before handing over to `kops validate`. The first
+# ZONE_RESOURCE_POOL_EXHAUSTED error in the 11-12 runs arrived after 5 minutes.
+KOPS_CAPACITY_WATCH_SECONDS="${KOPS_CAPACITY_WATCH_SECONDS:-480}"
+
+# kops_go_install retries `go install` so a transient checksum-database or
+# module-proxy error does not fail a 30-minute lane before a cluster exists.
+# Compiling kOps verifies a few hundred modules against sum.golang.org, and
+# its HTTP/2 stream errors show up as "verifying module: ... INTERNAL_ERROR".
+# Downloaded modules stay cached between attempts, so a retry only re-reads
+# the tiles that failed; checksum verification is never bypassed.
+kops_go_install() {
+  local attempt
+  for attempt in 1 2 3; do
+    if GOBIN="${BINDIR}" go install "$@"; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt 3 ]]; then
+      echo "go install $* failed (attempt ${attempt}/3); retrying in 15s..." >&2
+      sleep 15
+    fi
+  done
+  echo "go install $* failed after 3 attempts" >&2
+  return 1
+}
+
+kops_install_tools() {
+  echo "Installing kOps ${KOPS_VERSION} to ${BINDIR}..."
+  kops_go_install "k8s.io/kops/cmd/kops@${KOPS_VERSION}"
+
+  echo "Installing resourcectl to ${BINDIR}..."
+  pushd dev/tools >/dev/null
+  kops_go_install ./resourcectl
+  popd >/dev/null
+}
+
+kops_acquire_project() {
+  if [[ -n "${BOSKOS_HOST:-}" ]]; then
+    if ! PROJECT_ID=$(resourcectl get --key project-main --boskos-type gce-project); then
+      echo "Failed to acquire project from Boskos"
+      exit 1
+    fi
+    echo "Acquired project ${PROJECT_ID} from Boskos."
+    trap 'resourcectl cleanup || true' EXIT
+  else
+    PROJECT_ID=$(gcloud config get-value project)
+  fi
+
+  PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+  echo "Using project: ${PROJECT_ID} (number: ${PROJECT_NUMBER})"
+}
+
+kops_setup_images() {
+  IMAGE_PREFIX="gcr.io/${PROJECT_ID}/agent-sandbox/"
+  export IMAGE_PREFIX
+  echo "Using image prefix: ${IMAGE_PREFIX}"
+
+  gcloud auth configure-docker --quiet gcr.io
+
+  IMAGE_TAG=$(git describe --tags --dirty --always)
+  if [[ "${IMAGE_TAG}" == *"-dirty" ]]; then
+    IMAGE_TAG="${IMAGE_TAG}-${UNIQUE_SUFFIX}"
+  fi
+  export IMAGE_TAG
+  echo "Using image tag: ${IMAGE_TAG}"
+
+  for image in "$@"; do
+    echo "Pushing ${image} to ${IMAGE_PREFIX}..."
+    dev/tools/push-images --image-prefix="${IMAGE_PREFIX}" --platform=linux/amd64 --images "${image}"
+  done
+}
+
+kops_create_bucket() {
+  BUCKET_NAME="kops-state-${PROJECT_NUMBER}"
+  echo "Using bucket: ${BUCKET_NAME}"
+
+  if ! gcloud storage buckets describe "gs://${BUCKET_NAME}" >/dev/null 2>&1; then
+    echo "Creating bucket gs://${BUCKET_NAME}..."
+    gcloud storage buckets create "gs://${BUCKET_NAME}" --project="${PROJECT_ID}" --location=us-central1
+  else
+    echo "Bucket gs://${BUCKET_NAME} already exists."
+  fi
+
+  export KOPS_STATE_STORE="gs://${BUCKET_NAME}"
+}
+
+kops_create_cluster() {
+  CLUSTER_NAME="$1"
+  ZONE="${2:-us-central1-a}"
+
+  local cni="${CNI:-cilium}"
+  local node_count="${STRESS_NODE_COUNT:-3}"
+  local cp_size="${STRESS_CONTROL_PLANE_SIZE:-n2-standard-4}"
+  local node_size="${STRESS_NODE_SIZE:-n2-standard-8}"
+  local node_volume_type="${STRESS_NODE_VOLUME_TYPE:-pd-ssd}"
+
+  echo "Creating kOps cluster: ${CLUSTER_NAME} (${node_count} workers, CP=${cp_size}, CNI=${cni})"
+  kops create cluster \
+    --cloud=gce \
+    --gce-service-account=default \
+    --networking="${cni}" \
+    --name="${CLUSTER_NAME}" \
+    --zones="${ZONE}" \
+    --project="${PROJECT_ID}" \
+    --control-plane-count=1 \
+    --control-plane-size="${cp_size}" \
+    --node-count="${node_count}" \
+    --node-size="${node_size}"
+
+  kops edit instancegroup --name "${CLUSTER_NAME}" "nodes-${ZONE}" \
+    --set "spec.rootVolume.type=${node_volume_type}"
+
+  kops edit instancegroup --name "${CLUSTER_NAME}" "control-plane-${ZONE}" \
+    --set "spec.rootVolume.type=pd-ssd"
+}
+
+kops_apply_and_validate() {
+  local wait_time="${1:-${STRESS_VALIDATE_WAIT:-25m}}"
+
+  echo "Applying cluster configuration..."
+  kops update cluster --name "${CLUSTER_NAME}" --yes
+
+  kops_relocate_on_capacity_exhaustion
+
+  echo "Exporting kubeconfig..."
+  kops export kubeconfig --name "${CLUSTER_NAME}" --admin
+
+  kops_validate_cluster "${wait_time}"
+}
+
+kops_validate_cluster() {
+  local wait_time="${1:-${STRESS_VALIDATE_WAIT:-25m}}"
+
+  echo "Waiting for cluster to be ready (timeout: ${wait_time})..."
+  if ! kops validate cluster --wait "${wait_time}"; then
+    kops_capture_cp_serial_port
+    kops_capture_igm_diagnostics
+    exit 1
+  fi
+}
+
+# Records why the control-plane VM was late or missing. In the 11-09 and
+# 11-10 validate timeouts the control plane booted more than 20 minutes after
+# `kops update`, and by the time the serial console was captured the managed
+# instance group had already replaced the instance. The IGM's own error list
+# and the project's failed GCE operations are the only record of the attempts
+# that never booted.
+kops_capture_igm_diagnostics() {
+  local out_dir="${ARTIFACTS:-.}"
+  mkdir -p "${out_dir}"
+  local igm
+  igm="$(kops_control_plane_igm_name)"
+  local out_file="${out_dir}/control-plane-igm-diagnostics.log"
+  echo "Saving managed instance group diagnostics to ${out_file}..."
+  {
+    echo "== managed instances of ${igm} =="
+    gcloud compute instance-groups managed list-instances "${igm}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --format="table(instance.basename(),instanceStatus,currentAction,lastAttempt.errors.errors[].code,version.instanceTemplate.basename())"
+    echo
+    echo "== errors reported by ${igm} =="
+    gcloud compute instance-groups managed list-errors "${igm}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --format="table(timestamp,error.code,error.message,instanceActionDetails.instance.basename())"
+    echo
+    echo "== failed GCE operations in ${PROJECT_ID} (newest first) =="
+    gcloud compute operations list --project="${PROJECT_ID}" \
+      --filter="httpErrorStatusCode>=400" --sort-by="~insertTime" --limit=50 \
+      --format="table(insertTime,operationType,targetLink.basename(),error.errors[].code,error.errors[].message)"
+  } > "${out_file}" 2>&1 || true
+}
+
+# kOps names a managed instance group after the zone's last component, the
+# instance group, and the cluster (NameForInstanceGroupManager in
+# upup/pkg/fi/cloudup/gce), so the control-plane group in us-central1-b is
+# b-control-plane-us-central1-b-<cluster>. Deriving the prefix from ZONE keeps
+# every lookup pointed at the group that exists after a zone move. kOps also
+# replaces dots with hyphens, which this mirrors. It hashes names longer than
+# 63 characters, which this does not: the sandbox-<timestamp> cluster names
+# used here give at most 58.
+kops_control_plane_igm_name() {
+  local name="${ZONE##*-}-control-plane-${ZONE}-${CLUSTER_NAME}"
+  echo "${name//./-}"
+}
+
+# Prints the error codes the control-plane managed instance group has
+# recorded for its current instance create attempts, one per line.
+kops_control_plane_igm_error_codes() {
+  gcloud compute instance-groups managed list-errors \
+    "$(kops_control_plane_igm_name)" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --format="value(error.code)" 2>/dev/null || true
+}
+
+# Succeeds once the control-plane group has a RUNNING instance with no
+# pending action.
+kops_control_plane_running() {
+  local status
+  status=$(gcloud compute instance-groups managed list-instances \
+    "$(kops_control_plane_igm_name)" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --format="value(instanceStatus,currentAction)" 2>/dev/null | head -n1 || true)
+  [[ "${status}" == "RUNNING"$'\t'"NONE" ]]
+}
+
+# Watches the control-plane group for up to KOPS_CAPACITY_WATCH_SECONDS.
+# Returns 1 as soon as the group reports ZONE_RESOURCE_POOL_EXHAUSTED, 0 when
+# the instance is running or the watch expires without a capacity error (any
+# other delay is left to `kops validate` and its diagnostics).
+kops_watch_control_plane_capacity() {
+  local deadline=$(( $(date +%s) + KOPS_CAPACITY_WATCH_SECONDS ))
+  echo "Watching control-plane capacity in ${ZONE} for up to ${KOPS_CAPACITY_WATCH_SECONDS}s..."
+  while (( $(date +%s) < deadline )); do
+    if kops_control_plane_running; then
+      echo "Control-plane instance is running in ${ZONE}."
+      return 0
+    fi
+    if kops_control_plane_igm_error_codes | grep -q "^ZONE_RESOURCE_POOL_EXHAUSTED"; then
+      echo "Control-plane group in ${ZONE} reports ZONE_RESOURCE_POOL_EXHAUSTED."
+      return 1
+    fi
+    sleep 20
+  done
+  echo "No capacity error from the control-plane group within ${KOPS_CAPACITY_WATCH_SECONDS}s; continuing to validation."
+  return 0
+}
+
+# Recreates the cluster in another zone from its own exported spec. Every
+# zone-bound name in the spec (subnet, instance groups, etcd members) embeds
+# the zone string, so one substitution moves all of them together. The
+# cluster name and state store are unchanged, so cleanup still finds it.
+kops_move_cluster_to_zone() {
+  local new_zone="$1"
+  local spec="${WORKDIR}/cluster-${new_zone}.yaml"
+  echo "Recreating ${CLUSTER_NAME} in ${new_zone} (control-plane capacity exhausted in ${ZONE})..."
+  {
+    kops get cluster --name "${CLUSTER_NAME}" -o yaml
+    echo "---"
+    kops get instancegroups --name "${CLUSTER_NAME}" -o yaml
+  } | sed "s/${ZONE}/${new_zone}/g" > "${spec}"
+  kops delete cluster --name "${CLUSTER_NAME}" --yes
+  kops create -f "${spec}"
+  ZONE="${new_zone}"
+  kops update cluster --name "${CLUSTER_NAME}" --yes
+}
+
+# After `kops update`, moves the cluster through KOPS_FALLBACK_ZONES while
+# the current zone cannot place the control plane. Falls through to
+# validation (which captures the group's errors) when every zone is
+# exhausted, so the failure is still reported with its cause.
+kops_relocate_on_capacity_exhaustion() {
+  local zone
+  # shellcheck disable=SC2086  # word-split the space-separated zone list
+  for zone in ${KOPS_FALLBACK_ZONES}; do
+    if kops_watch_control_plane_capacity; then
+      return 0
+    fi
+    if [[ "${zone}" == "${ZONE}" ]]; then
+      continue
+    fi
+    kops_move_cluster_to_zone "${zone}"
+  done
+  kops_watch_control_plane_capacity || \
+    echo "Control-plane capacity exhausted in every zone tried; leaving the last attempt to validation."
+}
+
+kops_capture_cp_serial_port() {
+  echo "kOps cluster validation failed. Capturing control plane serial port output..."
+  local out_dir="${ARTIFACTS:-.}"
+  mkdir -p "${out_dir}"
+  local cp_instance
+  cp_instance=$(gcloud compute instance-groups managed list-instances \
+    "$(kops_control_plane_igm_name)" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --format="value(instance.basename())" 2>/dev/null | head -n1 || true)
+  if [[ -z "${cp_instance}" ]]; then
+    cp_instance=$(gcloud compute instances list --project="${PROJECT_ID}" \
+      --filter="name ~ 'control-plane.*${CLUSTER_NAME}' AND zone:${ZONE}" \
+      --format="value(name)" 2>/dev/null | head -n1 || true)
+  fi
+  if [[ -n "${cp_instance}" ]]; then
+    echo "Saving serial port output from ${cp_instance} to ${out_dir}/control-plane-serial-port.log..."
+    gcloud compute instances get-serial-port-output "${cp_instance}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      > "${out_dir}/control-plane-serial-port.log" 2>&1 || true
+  else
+    echo "WARNING: Could not find control-plane instance for ${CLUSTER_NAME}; serial port output was not captured." >&2
+  fi
+}
+
+kops_register_cleanup() {
+  cleanup() {
+    echo "Cleaning up..."
+
+    if declare -F "${KOPS_PRE_CLEANUP_HOOK:-}" >/dev/null 2>&1; then
+      "${KOPS_PRE_CLEANUP_HOOK}" || true
+    fi
+
+    if [[ -n "${CLUSTER_NAME:-}" ]]; then
+      kops delete cluster --name="${CLUSTER_NAME}" --yes || true
+    fi
+
+    if [[ "${CLEANUP_BUCKET:-false}" == "true" && -n "${BUCKET_NAME:-}" ]]; then
+      echo "Deleting bucket gs://${BUCKET_NAME}..."
+      gcloud storage buckets delete "gs://${BUCKET_NAME}" --quiet || true
+    fi
+
+    echo "Cleaning up resources via resourcectl..."
+    resourcectl cleanup || true
+
+    rm -rf "${WORKDIR}"
+    echo "DONE"
+  }
+  trap cleanup EXIT
+}

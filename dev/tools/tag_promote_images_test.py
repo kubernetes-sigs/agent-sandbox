@@ -41,6 +41,7 @@ class TagPromoteImagesListTest(unittest.TestCase):
             "chrome-sandbox",
             "python-runtime-sandbox",
             "sandbox-router-go",
+            "sandboxd",
         ]
         self.assertEqual(tag_promote.IMAGES_TO_PROMOTE, expected)
 

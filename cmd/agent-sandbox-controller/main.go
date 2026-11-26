@@ -40,6 +40,7 @@ import (
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 	extensionscontrollers "sigs.k8s.io/agent-sandbox/extensions/controllers"
 	"sigs.k8s.io/agent-sandbox/extensions/controllers/queue"
+	internalconfig "sigs.k8s.io/agent-sandbox/internal/config"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -64,6 +65,7 @@ func main() {
 	var enableTracing bool
 	var enablePprof bool
 	var enablePprofDebug bool
+	var enableRESTClientMetrics bool
 	var pprofBlockProfileRate int
 	var pprofMutexProfileFraction int
 	var kubeAPIQPS float64
@@ -78,11 +80,13 @@ func main() {
 	var sandboxWarmPoolReplenishDelay time.Duration
 	var sandboxWarmPoolMaxRefillRate float64
 	var sandboxWriteBehindWindow time.Duration
+	var sandboxClaimWarmCandidateGracePeriod time.Duration
 	var sandboxWarmPoolReadinessGracePeriod time.Duration
 	var sandboxWarmPoolUnschedulableRecheckInterval time.Duration
 	var enableWarmPoolEviction bool
 	var cacheLabelSelectors bool
 	var printVersion bool
+	var disableSandboxEvents bool
 	var disableClaimEvents bool
 	var disableClaimObservabilityAnnotations bool
 	var metricsSecureServing bool
@@ -105,6 +109,10 @@ func main() {
 	flag.BoolVar(&enablePprofDebug, "enable-pprof-debug", false,
 		"Enable all pprof endpoints including sensitive ones (cmdline, symbol, heap, goroutine, etc). "+
 			"Implies --enable-pprof. WARNING: May expose sensitive information and comes with performance overhead.")
+	flag.BoolVar(&enableRESTClientMetrics, "enable-rest-client-metrics", true,
+		"Enable client-go REST client metrics (request latency, DNS resolution latency, request/response sizes, "+
+			"rate limiter latency, request retries). These metrics provide visibility into Kubernetes API client health. "+
+			"Set to false to disable if the additional histogram overhead is not acceptable.")
 	flag.IntVar(&pprofBlockProfileRate, "pprof-block-profile-rate", 1000000,
 		"Block profile sampling rate for /debug/pprof/block when --enable-pprof-debug is set. "+
 			"<=0 disables; 1 samples all blocking events; >=2 sets the rate in nanoseconds (e.g. 1000000 ~= 1ms).")
@@ -140,17 +148,21 @@ func main() {
 			"pacing refill into a smooth stream instead of full-deficit bursts that flood the write path and compete with claim adoption. "+
 			"Composes with --sandbox-warm-pool-replenish-delay: the delay defers the start of refill, the rate shapes its flow. "+
 			"0 (default) leaves refill unpaced (whole deficit per reconcile).")
-	flag.DurationVar(&sandboxWarmPoolReadinessGracePeriod, "sandbox-warm-pool-readiness-grace-period", extensionscontrollers.DefaultWarmPoolReadinessGracePeriod, "How long a warm pool sandbox may stay non-Ready before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable). Raise this for images with long initialization or clusters with slow node auto-provisioning. Must be a positive duration.")
-	flag.DurationVar(&sandboxWarmPoolUnschedulableRecheckInterval, "sandbox-warm-pool-unschedulable-recheck-interval", extensionscontrollers.DefaultUnschedulableRecheckInterval, "Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable sandboxes past the readiness grace period. Must be a positive duration.")
+	flag.DurationVar(&sandboxClaimWarmCandidateGracePeriod, "sandbox-claim-warm-candidate-grace-period", extensionscontrollers.DefaultWarmCandidateGracePeriod, "How long a newly created SandboxClaim waits for a warm pool candidate to report a Pod IP before falling back to cold creation. Must be a positive duration.")
+	flag.DurationVar(&sandboxWarmPoolReadinessGracePeriod, "sandbox-warm-pool-readiness-grace-period", extensionscontrollers.DefaultWarmPoolReadinessGracePeriod, "How long a warm pool sandbox may stay non-Ready, counted from when its pod is scheduled (or from creation if it has not been), before the SandboxWarmPool controller considers it stuck and replaces it (or holds it, if its pod is unschedulable or waiting on scheduling gates). Raise this for images with long initialization. Must be a positive duration.")
+	flag.DurationVar(&sandboxWarmPoolUnschedulableRecheckInterval, "sandbox-warm-pool-unschedulable-recheck-interval", extensionscontrollers.DefaultUnschedulableRecheckInterval, "Requeue interval at which the SandboxWarmPool controller re-checks a pool holding unschedulable or scheduling-gated sandboxes past the readiness grace period. Must be a positive duration.")
 	flag.BoolVar(&enableWarmPoolEviction, "enable-warm-pool-eviction", true, "Mark pods created by a warm pool as ready-to-evict by default.")
 	flag.BoolVar(&cacheLabelSelectors, "cache-label-selectors", false,
 		"Scope the manager's Pod and Service informer caches to objects carrying the sandbox tracking label ("+
-			controllers.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
+			sandboxv1beta1.SandboxNameHashLabel+"). The controller only ever creates/looks up Pods and Services it "+
 			"labeled itself, so on shared or high-churn clusters this cuts informer list/watch volume, JSON decode "+
 			"CPU, and cache memory from O(cluster) to O(sandboxes). CAVEAT: externally pre-provisioned resources "+
 			"that rely on the "+sandboxv1beta1.SandboxAdoptableLabel+"=true adoption path MUST also carry the "+
 			"tracking label (value = the owning sandbox's name hash) to remain visible to the controller when "+
 			"this flag is enabled.")
+	flag.BoolVar(&disableSandboxEvents, "disable-sandbox-events", false,
+		"Disable Kubernetes Event emission from the Sandbox controller (its Eventf calls become no-ops), "+
+			"reducing API server writes during large warm-pool fills. Default false (events enabled).")
 	flag.BoolVar(&disableClaimEvents, "disable-claim-events", false,
 		"Disable Kubernetes Event emission from the SandboxClaim controller (its Eventf calls become no-ops), "+
 			"reducing API server writes during large claim bursts. Default false (events enabled).")
@@ -190,6 +202,37 @@ func main() {
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Apply ConfigMap overrides from the volume mount.
+	configData, err := readConfigDir("/etc/sandbox-config")
+	if err != nil {
+		setupLog.Error(err, "failed to read controller config directory")
+		os.Exit(1)
+	}
+	if len(configData) > 0 {
+		// flag.CommandLine is the flag set used by main(); the allowlist in
+		// internalconfig gates which flags are touched, so imported-package
+		// flags (e.g. klog) are never modified.
+		overrides, skipped, cliOverridden, err := internalconfig.ApplyConfigMapData(configData, flag.CommandLine)
+		if err != nil {
+			setupLog.Error(err, "failed to parse controller config from ConfigMap")
+			os.Exit(1)
+		}
+		for _, o := range overrides {
+			setupLog.Info("ConfigMap override applied", "key", o.Key, "value", o.Value)
+		}
+		for _, key := range skipped {
+			setupLog.Info("ConfigMap key ignored (not a ConfigMap-tunable flag; see docs/configuration.md)", "key", key)
+		}
+		for _, key := range cliOverridden {
+			setupLog.Info("ConfigMap key ignored (CLI flag takes precedence)", "key", key)
+		}
+	}
+
+	if sandboxClaimWarmCandidateGracePeriod <= 0 {
+		setupLog.Error(nil, "--sandbox-claim-warm-candidate-grace-period must be a positive duration", "value", sandboxClaimWarmCandidateGracePeriod)
+		os.Exit(1)
+	}
 	if sandboxWarmPoolReadinessGracePeriod <= 0 {
 		setupLog.Error(nil, "--sandbox-warm-pool-readiness-grace-period must be a positive duration", "value", sandboxWarmPoolReadinessGracePeriod)
 		os.Exit(1)
@@ -279,15 +322,19 @@ func main() {
 
 	// Register client-go REST client metrics.
 	// These metrics provide visibility into API server interactions.
-	setupLog.Info("client-go REST client metrics enabled")
-	metrics.RegisterRESTClientMetrics(
-		metrics.MetricRequestLatency,
-		metrics.MetricDNSResolutionLatency,
-		metrics.MetricRequestSize,
-		metrics.MetricResponseSize,
-		metrics.MetricRateLimiterLatency,
-		metrics.MetricRequestRetry,
-	)
+	if enableRESTClientMetrics {
+		setupLog.Info("client-go REST client metrics enabled")
+		metrics.RegisterRESTClientMetrics(
+			metrics.MetricRequestLatency,
+			metrics.MetricDNSResolutionLatency,
+			metrics.MetricRequestSize,
+			metrics.MetricResponseSize,
+			metrics.MetricRateLimiterLatency,
+			metrics.MetricRequestRetry,
+		)
+	} else {
+		setupLog.Info("client-go REST client metrics disabled (--enable-rest-client-metrics=false)")
+	}
 
 	// Importing net/http/pprof registers handlers on the global DefaultServeMux.
 	// Reset it to avoid accidentally exposing pprof via any server that uses the default mux.
@@ -317,6 +364,7 @@ func main() {
 			metricsOpts.CertDir = metricsCertDir
 		}
 		setupLog.Info("metrics server TLS enabled (--metrics-secure-serving)")
+		metricsOpts.TLSOpts = append(metricsOpts.TLSOpts, alpnOpt)
 		tlsOpts, err := buildMetricsTLSOpts(tlsMinVersion, tlsCipherSuites)
 		if err != nil {
 			setupLog.Error(err, "invalid TLS configuration")
@@ -416,7 +464,7 @@ func main() {
 	mgrOpts.Cache = cacheOpts
 	if cacheLabelSelectors {
 		setupLog.Info("informer caches for Pods and Services scoped to the sandbox tracking label (--cache-label-selectors)",
-			"label", controllers.SandboxNameHashLabel)
+			"label", sandboxv1beta1.SandboxNameHashLabel)
 	}
 	if watchHTTPClient != nil {
 		// The manager cache builds its list/watch REST clients from this
@@ -443,10 +491,20 @@ func main() {
 			"window", sandboxWriteBehindWindow, "podPatchBound", "1s")
 	}
 
+	// Every Eventf site in the sandbox controller is nil-guarded on the
+	// recorder, so a nil recorder cleanly disables event emission.
+	var sandboxRecorder events.EventRecorder
+	if disableSandboxEvents {
+		setupLog.Info("Sandbox controller event emission disabled (--disable-sandbox-events)")
+	} else {
+		sandboxRecorder = mgr.GetEventRecorder("sandbox-controller")
+	}
+
 	if err = (&controllers.SandboxReconciler{
 		Client:            mgr.GetClient(),
+		APIReader:         mgr.GetAPIReader(),
 		Scheme:            mgr.GetScheme(),
-		Recorder:          mgr.GetEventRecorder("sandbox-controller"),
+		Recorder:          sandboxRecorder,
 		Tracer:            instrumenter,
 		ClusterDomain:     clusterDomain,
 		WriteBehindWindow: sandboxWriteBehindWindow,
@@ -456,6 +514,11 @@ func main() {
 	}
 
 	if extensions {
+		// Warm-pool collector lists extensionsv1beta1.SandboxWarmPoolList, whose
+		// scheme is only registered when extensions are enabled. Register here so
+		// scrapes don't fail with "no kind is registered" in non-extensions builds.
+		asmetrics.RegisterWarmPoolCollector(mgr.GetClient(), mgr.GetLogger().WithName("warmpool-collector"))
+
 		warmSandboxQueue := queue.NewSimpleSandboxQueue()
 
 		var allowedDomains []string
@@ -499,6 +562,7 @@ func main() {
 			Tracer:                          instrumenter,
 			AllowedLabelDomains:             allowedDomains,
 			DisableObservabilityAnnotations: disableClaimObservabilityAnnotations,
+			WarmCandidateGracePeriod:        sandboxClaimWarmCandidateGracePeriod,
 		}).SetupWithManager(mgr, sandboxClaimConcurrentWorkers); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "SandboxClaim")
 			os.Exit(1)
@@ -547,4 +611,29 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// readConfigDir reads all regular files from dir into a map[string]string
+// keyed by filename. Returns (nil, nil) when the directory does not exist
+// (the volume mount is optional).
+func readConfigDir(dir string) (map[string]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading config directory %s: %w", dir, err)
+	}
+	data := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), "..") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("reading config key %s: %w", e.Name(), err)
+		}
+		data[e.Name()] = string(raw)
+	}
+	return data, nil
 }

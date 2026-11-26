@@ -206,5 +206,25 @@ def test_env_close(mock_client, mock_sandbox):
     env.reset()
     env.close()
 
-    mock_sandbox.terminate.assert_called_once()
+    mock_client.delete_sandbox.assert_called_once_with(
+        "test-claim",
+        namespace="default",
+    )
+    mock_sandbox.terminate.assert_not_called()
     assert env._sandbox is None
+
+def test_env_reset_removes_previous_sandbox_from_client(mock_client):
+    env = SandboxEnv(
+        reward_fn=MockReward(),
+        termination_fn=MockTermination(),
+        client=mock_client,
+    )
+
+    env.reset()
+    env.reset()
+
+    mock_client.delete_sandbox.assert_called_once_with(
+        "test-claim",
+        namespace="default",
+    )
+    assert mock_client.create_sandbox.call_count == 2

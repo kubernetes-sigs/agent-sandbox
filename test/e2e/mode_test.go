@@ -46,7 +46,7 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 	nameHash := NameHash(sandboxObj.Name)
 	svc := "my-sandbox"
 	fqdn := fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name)
-	selector := "agents.x-k8s.io/sandbox-name-hash=" + nameHash
+	selector := sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash
 
 	// runningStatus / suspendedStatus describe the expected Sandbox status at a
 	// given spec generation. Suspended must persist across the whole lifecycle
@@ -89,6 +89,13 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 					ObservedGeneration: gen,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
 					Message:            "Pod has been terminated. Sandbox is suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gen,
+					Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+					Message:            "Sandbox has no backing Pod",
 				},
 				{
 					Type:               "Ready",
@@ -176,7 +183,7 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
@@ -255,7 +262,7 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
@@ -310,7 +317,7 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 			Service:       "my-sandbox",
 			ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-			LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+			LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(sandboxv1beta1.SandboxConditionSuspended),
@@ -318,6 +325,13 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 					ObservedGeneration: 2,
 					Reason:             sandboxv1beta1.SandboxReasonSuspendedPodTerminated,
 					Message:            "Pod has been terminated. Sandbox is suspended",
+				},
+				{
+					Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: 2,
+					Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+					Message:            "Sandbox has no backing Pod",
 				},
 				{
 					Type:               "Ready",
@@ -356,7 +370,7 @@ func TestSandboxPodDeletionKeepsSuspendedFalse(t *testing.T) {
 	runningReady := sandboxv1beta1.SandboxStatus{
 		Service:       "my-sandbox",
 		ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
-		LabelSelector: "agents.x-k8s.io/sandbox-name-hash=" + nameHash,
+		LabelSelector: sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash,
 		Conditions: []metav1.Condition{
 			{
 				Type:               string(sandboxv1beta1.SandboxConditionSuspended),
@@ -478,7 +492,7 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 	nameHash := NameHash(sandboxObj.Name)
 	svc := "my-sandbox-conflict"
 	fqdn := fmt.Sprintf("my-sandbox-conflict.%s.svc.cluster.local", ns.Name)
-	selector := "agents.x-k8s.io/sandbox-name-hash=" + nameHash
+	selector := sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash
 
 	expectedStatus := sandboxv1beta1.SandboxStatus{
 		Service: svc, ServiceFQDN: fqdn, LabelSelector: selector,
@@ -489,6 +503,13 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 				ObservedGeneration: 1,
 				Reason:             sandboxv1beta1.SandboxReasonSuspendedPodNotOwned,
 				Message:            "Refused to delete pod because it is not owned by this sandbox",
+			},
+			{
+				Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: 1,
+				Reason:             sandboxv1beta1.SandboxReasonPodAbsent,
+				Message:            "Sandbox has no backing Pod",
 			},
 			{
 				Type:               "Ready",

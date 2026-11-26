@@ -30,6 +30,20 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 if TYPE_CHECKING:
     from .models import SandboxTracerConfig
 
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "OPENTELEMETRY_AVAILABLE",
+    "initialize_tracer",
+    "trace_span",
+    "async_trace_span",
+    "TracerManager",
+    "create_tracer_manager",
+    "trace",
+    "context",
+    "TraceContextTextMapPropagator",
+]
+
 # If optional dependency OpenTelemetry is not installed, define a complete set of mock objects
 # to prevent runtime errors.
 try:
@@ -42,7 +56,7 @@ try:
     OPENTELEMETRY_AVAILABLE = True
 except ImportError:
     OPENTELEMETRY_AVAILABLE = False
-    logging.debug("OpenTelemetry not installed; using MockTracer.")
+    logger.debug("OpenTelemetry not installed; using MockTracer.")
 
     class MockSpan:
         """Mock class for OpenTelemetry Span."""
@@ -134,7 +148,7 @@ def initialize_tracer(service_name: str) -> None:
     global _TRACER_PROVIDER
 
     if not OPENTELEMETRY_AVAILABLE:
-        logging.error(
+        logger.error(
             "OpenTelemetry not installed; skipping tracer initialization.")
         return
 
@@ -144,7 +158,7 @@ def initialize_tracer(service_name: str) -> None:
             existing_name = _TRACER_PROVIDER.resource.attributes.get(
                 "service.name")
             if existing_name and existing_name != service_name:
-                logging.warning(
+                logger.warning(
                     f"Global TracerProvider already initialized with service name '{existing_name}'. "
                     f"Ignoring request to initialize with '{service_name}'."
                 )
@@ -164,7 +178,7 @@ def initialize_tracer(service_name: str) -> None:
             trace.set_tracer_provider(_TRACER_PROVIDER)
             # Ensure shutdown is called only once when the process exits.
             atexit.register(_TRACER_PROVIDER.shutdown)
-            logging.info(
+            logger.info(
                 f"Global OpenTelemetry TracerProvider configured for service '{service_name}'.")
 
 
@@ -276,7 +290,7 @@ def create_tracer_manager(
         return None, None
 
     if not OPENTELEMETRY_AVAILABLE:
-        logging.error("OpenTelemetry not installed; skipping tracer initialization.")
+        logger.error("OpenTelemetry not installed; skipping tracer initialization.")
         return None, None
 
     manager = TracerManager(service_name=config.trace_service_name)

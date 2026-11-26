@@ -28,11 +28,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/creack/pty"
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/pathutil"
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
@@ -43,7 +45,7 @@ import (
 // permission denied) into appropriate gRPC status codes (NOT_FOUND,
 // PERMISSION_DENIED) instead of generic INTERNAL error codes.
 func mapCommandError(err error, msg string) error {
-	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 		return status.Errorf(codes.NotFound, "%s: command or path not found: %v", msg, err)
 	}
 	if errors.Is(err, fs.ErrPermission) {
@@ -64,6 +66,7 @@ type ProcessServer struct {
 	rootDir         string
 	registry        *processmanager.ProcessRegistry
 	streamChunkSize int
+	executionPolicy ExecutionPolicy
 	log             logr.Logger
 }
 
@@ -126,7 +129,24 @@ func (s *ProcessServer) buildCommand(_ context.Context, config *processv1.Proces
 			if errors.Is(err, pathutil.ErrPathEscapes) {
 				return nil, status.Errorf(codes.PermissionDenied, "cwd: %v", err)
 			}
+			if errors.Is(err, syscall.ENOTDIR) {
+				return nil, status.Errorf(codes.NotFound, "cwd: path does not exist: %v", err)
+			}
 			return nil, status.Errorf(codes.Internal, "cwd: %v", err)
+		}
+		// Match WatchDir: a path that exists but is not a directory is an
+		// invalid argument. A missing leaf is NOT_FOUND. ENOTDIR from
+		// executing a command path such as "f.txt/prog" stays in
+		// mapCommandError, where NOT_FOUND is the right code.
+		info, err := os.Stat(sanitizedCwd)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, status.Errorf(codes.NotFound, "cwd: path does not exist: %s", config.GetCwd())
+			}
+			return nil, status.Errorf(codes.Internal, "cwd: %v", err)
+		}
+		if !info.IsDir() {
+			return nil, status.Errorf(codes.InvalidArgument, "cwd is not a directory: %s", config.GetCwd())
 		}
 		cmd.Dir = sanitizedCwd
 	} else {
@@ -166,7 +186,18 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// its own process group (pgid == pid), so process-group signalling
 		// works without Setpgid. Setting both would make fork fail with
 		// EPERM (setpgid is illegal on a session leader).
-		ptyFile, err = pty.Start(cmd)
+		//
+		// The initial size must be applied before the child starts: setting
+		// it afterwards races with a child that reads the terminal size
+		// immediately (e.g. `stty size` would report 0 0).
+		if req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
+			ptyFile, err = pty.StartWithSize(cmd, &pty.Winsize{
+				Cols: uint16(req.GetPty().GetCols()),
+				Rows: uint16(req.GetPty().GetRows()),
+			})
+		} else {
+			ptyFile, err = pty.Start(cmd)
+		}
 		if err != nil {
 			return mapCommandError(err, "failed to start command with PTY")
 		}
@@ -217,15 +248,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	// Kill the entire process group (not just the child PID) when the
 	// stream context is cancelled (client disconnects). This prevents
 	// grandchildren from becoming orphan processes.
-	s.killProcessGroupOnContextDone(stream.Context(), cmd, proc.Done)
-
-	// Set initial TTY size if requested.
-	if usePTY && req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
-		_ = pty.Setsize(ptyFile, &pty.Winsize{
-			Cols: uint16(req.GetPty().GetCols()),
-			Rows: uint16(req.GetPty().GetRows()),
-		})
-	}
+	stopCancelKill := s.killProcessGroupOnContextDone(stream.Context(), cmd)
 
 	if err := stream.Send(&processv1.StartResponse{
 		Event: &processv1.StartResponse_Init{
@@ -235,9 +258,10 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		_ = proc.Signal(syscall.SIGKILL)
 		closeAll(stdoutR, stderrR, stdinW)
 		go func() {
+			stopCancelKill()
 			_ = cmd.Wait()
 			_ = proc.ClosePTY()
-			close(proc.Done) // release the cancellation watcher so it doesn't leak
+			close(proc.Done)
 		}()
 		return status.Errorf(codes.Internal, "failed to send InitEvent: %v", err)
 	}
@@ -278,36 +302,33 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	if usePTY {
 		streamWg.Add(1)
 		go streamOutput(ptyFile, false)
-		// For a PTY the reader unblocks with EIO once the child exits, so
-		// reaping first is safe; closing the PTY afterwards unblocks any
-		// straggling read (e.g. a grandchild still holds the slave side).
-		waitErr = cmd.Wait()
+		// For a PTY the reader unblocks with EIO once the child exits and
+		// the kernel's buffered output is drained. Closing the master right
+		// after Wait would discard that buffer, dropping the output of a
+		// short-lived process, so give the reader a chance to finish first.
+		// Closing the PTY only on timeout unblocks a straggling read (e.g. a
+		// grandchild still holds the slave side).
+		waitForExit(cmd.Process.Pid)
+		waitForReaders(&streamWg, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
-		streamWg.Wait()
+		stopCancelKill()
+		waitErr = cmd.Wait()
 	} else {
 		streamWg.Add(2)
 		go streamOutput(stdoutR, false)
 		go streamOutput(stderrR, true)
 
+		waitForExit(cmd.Process.Pid)
+		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
+		closeAll(stdoutR, stderrR)
+		stopCancelKill()
 		waitErr = cmd.Wait()
-
-		readersDone := make(chan struct{})
-		go func() {
-			streamWg.Wait()
-			close(readersDone)
-		}()
-		select {
-		case <-readersDone:
-		case <-time.After(pipeDrainGrace):
-			closeAll(stdoutR, stderrR)
-			<-readersDone
-		}
 	}
 
 	exitCode := int32(0)
 	if waitErr != nil {
 		if exitErr, ok := errors.AsType[*exec.ExitError](waitErr); ok {
-			exitCode = int32(exitErr.ExitCode())
+			exitCode = exitStatus(exitErr)
 		} else {
 			exitCode = -1
 		}
@@ -329,55 +350,360 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 
 // Execute runs a command synchronously and returns its buffered output.
 func (s *ProcessServer) Execute(ctx context.Context, req *processv1.ExecuteRequest) (*processv1.ExecuteResponse, error) {
-	cmd, err := s.buildCommand(ctx, req.GetConfig())
+	limits, err := s.executionPolicy.resolve(nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.execute(ctx, req.GetConfig(), limits)
+	if err != nil {
+		return nil, err
+	}
+	if result.TerminationReason == processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED {
+		return nil, status.Error(codes.ResourceExhausted, "Execute exceeded its execution time limit; ExecuteWithLimits reports structured outcomes")
+	}
+	if result.StdoutTruncated || result.StderrTruncated {
+		return nil, status.Error(codes.ResourceExhausted, "Execute output was truncated by deployment policy; ExecuteWithLimits reports retained output")
+	}
+	return &processv1.ExecuteResponse{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, nil
+}
+
+// ExecuteWithLimits retains bounded output without interrupting pipe draining.
+func (s *ProcessServer) ExecuteWithLimits(ctx context.Context, req *processv1.ExecuteWithLimitsRequest) (*processv1.ExecuteWithLimitsResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	limits, err := s.executionPolicy.resolve(req)
+	if err != nil {
+		return nil, err
+	}
+	return s.execute(ctx, req.GetConfig(), limits)
+}
+
+type executionLimits struct {
+	timeLimit                time.Duration
+	stdoutBytes, stderrBytes uint64
+}
+
+func requestedTimeLimit(d *durationpb.Duration) (time.Duration, error) {
+	if d == nil {
+		return 0, nil
+	}
+	if err := d.CheckValid(); err != nil {
+		return 0, status.Errorf(codes.InvalidArgument, "invalid time_limit: %v", err)
+	}
+	v := d.AsDuration()
+	// AsDuration saturates on overflow; a requested bound must remain exact.
+	roundTrip := durationpb.New(v)
+	if v <= 0 || roundTrip.Seconds != d.Seconds || roundTrip.Nanos != d.Nanos {
+		return 0, status.Error(codes.InvalidArgument, "time_limit must be positive and fit in a Go duration")
+	}
+	return v, nil
+}
+
+// executionStream accepts the entire stream while retaining only its prefix.
+// A zero internal limit preserves the unconfigured, unlimited behavior.
+type executionStream struct {
+	buffer         bytes.Buffer
+	limit          uint64
+	truncated      bool
+	reader, writer *os.File
+	done           chan struct{}
+	err            error
+}
+
+func (b *executionStream) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.limit != 0 {
+		remaining := b.limit - uint64(b.buffer.Len())
+		if uint64(n) > remaining {
+			p = p[:int(remaining)]
+			b.truncated = true
+		}
+	}
+	_, err := b.buffer.Write(p)
+	return n, err
+}
+
+func newExecutionStream(limit uint64) (*executionStream, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	return &executionStream{limit: limit, reader: r, writer: w, done: make(chan struct{})}, nil
+}
+
+func (b *executionStream) close() {
+	_ = b.reader.Close()
+	_ = b.writer.Close()
+}
+
+func (b *executionStream) collect() {
+	_ = b.writer.Close()
+	go func() {
+		_, b.err = io.Copy(b, b.reader)
+		_ = b.reader.Close()
+		close(b.done)
+	}()
+}
+
+type unaryExecution struct {
+	cmd            *exec.Cmd
+	stdout, stderr *executionStream
+	drainGrace     time.Duration
+}
+
+type executionOutcome struct {
+	exitCode          int32
+	timeLimitExceeded bool
+}
+
+func channelClosed(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (run unaryExecution) finished(exited <-chan struct{}) bool {
+	return channelClosed(exited) && channelClosed(run.stdout.done) && channelClosed(run.stderr.done)
+}
+
+func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessConfig, limits executionLimits) (*processv1.ExecuteWithLimitsResponse, error) {
+	cmd, err := s.buildCommand(ctx, config)
 	if err != nil {
 		return nil, err
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = waitDelay
+	drainGrace := waitDelay
+	if limits.timeLimit > 0 {
+		drainGrace = pipeDrainGrace
+	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	stdoutBuf, err := newExecutionStream(limits.stdoutBytes)
+	if err != nil {
+		return nil, mapCommandError(err, "create stdout pipe")
+	}
+	defer stdoutBuf.close()
+	stderrBuf, err := newExecutionStream(limits.stderrBytes)
+	if err != nil {
+		return nil, mapCommandError(err, "create stderr pipe")
+	}
+	defer stderrBuf.close()
+	cmd.Stdout = stdoutBuf.writer
+	cmd.Stderr = stderrBuf.writer
 
 	// Bail out early if the caller's context is already cancelled.
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
 
+	started := time.Now()
+	var timeExpired <-chan time.Time
+	if limits.timeLimit > 0 {
+		timer := time.NewTimer(limits.timeLimit)
+		defer timer.Stop()
+		timeExpired = timer.C
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, mapCommandError(err, "failed to execute command")
 	}
+	stdoutBuf.collect()
+	stderrBuf.collect()
+	defer func() {
+		// Closing readers also unblocks collection on a cleanup-error path.
+		stdoutBuf.close()
+		stderrBuf.close()
+		<-stdoutBuf.done
+		<-stderrBuf.done
+	}()
 
-	// Kill the entire process group on context cancellation. Use a local
-	// done channel since Execute does not register in the process registry.
-	execDone := make(chan struct{})
-	defer close(execDone)
-	s.killProcessGroupOnContextDone(ctx, cmd, execDone)
-
-	runErr := cmd.Wait()
-	exitCode := int32(0)
-	if runErr != nil {
-		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
-			exitCode = int32(exitErr.ExitCode())
-		} else {
-			return nil, mapCommandError(runErr, "failed to execute command")
-		}
+	outcome, err := s.waitExecution(ctx, unaryExecution{cmd, stdoutBuf, stderrBuf, drainGrace}, timeExpired)
+	if err != nil {
+		return nil, err
 	}
-
-	// The command may have been killed by killProcessGroupOnContextDone
-	// because the caller's context was cancelled. Surface that as a gRPC
-	// cancellation rather than a normal (successful) response with a
-	// non-zero exit code.
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
+	reason := processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_EXITED
+	if outcome.timeLimitExceeded {
+		reason = processv1.ExecuteTerminationReason_EXECUTE_TERMINATION_REASON_TIME_LIMIT_EXCEEDED
+	}
 
-	return &processv1.ExecuteResponse{
-		ExitCode: exitCode,
-		Stdout:   stdoutBuf.Bytes(),
-		Stderr:   stderrBuf.Bytes(),
+	return &processv1.ExecuteWithLimitsResponse{
+		ExitCode:          outcome.exitCode,
+		Stdout:            stdoutBuf.buffer.Bytes(),
+		Stderr:            stderrBuf.buffer.Bytes(),
+		TerminationReason: reason,
+		ElapsedDuration:   durationpb.New(time.Since(started)),
+		StdoutTruncated:   stdoutBuf.truncated,
+		StderrTruncated:   stderrBuf.truncated,
 	}, nil
+}
+
+// waitExecution owns the sole Wait call and joins termination before inspecting
+// output. Even if cleanup times out, the Wait goroutine still reaps the child.
+//
+// The leader stays unreaped until the loop ends, so its PID cannot be reused
+// while termination may still signal it or its process group.
+func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, timeExpired <-chan time.Time) (executionOutcome, error) {
+	exited := make(chan struct{})
+	release := make(chan struct{})
+	waitDone := make(chan struct{})
+	var runErr error
+	go func() {
+		waitForExit(run.cmd.Process.Pid)
+		close(exited)
+		<-release
+		runErr = run.cmd.Wait()
+		close(waitDone)
+	}()
+	var releaseOnce sync.Once
+	releaseLeader := func() { releaseOnce.Do(func() { close(release) }) }
+	var pendingKill chan struct{}
+	defer func() {
+		// On an early return the leader stays unreaped until termination ends.
+		if pendingKill == nil {
+			releaseLeader()
+			return
+		}
+		go func() {
+			<-pendingKill
+			releaseLeader()
+		}()
+	}()
+	var outcome executionOutcome
+	pendingWait, pendingOut, pendingErr := exited, run.stdout.done, run.stderr.done
+	ctxDone := ctx.Done()
+	var cleanupDone <-chan struct{}
+	var cleanupCancel context.CancelFunc
+	var drainDone <-chan time.Time
+	var drainTimer *time.Timer
+	var drainErr error
+	startCleanup := func() {
+		ctxDone, timeExpired = nil, nil
+		if cleanupCancel != nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), executionCleanupTimeout)
+		cleanupCancel = cancel
+		cleanupDone = cleanupCtx.Done()
+		pendingKill = s.terminateExecution(cleanupCtx, run.cmd)
+	}
+	defer func() {
+		if cleanupCancel != nil {
+			cleanupCancel()
+		}
+		if drainTimer != nil {
+			drainTimer.Stop()
+		}
+	}()
+	for pendingWait != nil || pendingOut != nil || pendingErr != nil || pendingKill != nil {
+		select {
+		case <-pendingWait:
+			pendingWait = nil
+			if pendingOut != nil || pendingErr != nil {
+				drainTimer = time.NewTimer(run.drainGrace)
+				drainDone = drainTimer.C
+			}
+		case <-pendingOut:
+			pendingOut = nil
+		case <-pendingErr:
+			pendingErr = nil
+		case <-pendingKill:
+			pendingKill = nil
+			if drainErr != nil {
+				run.stdout.close()
+				run.stderr.close()
+			}
+		case <-ctxDone:
+			ctxDone, timeExpired = nil, nil
+			if run.finished(exited) {
+				continue
+			}
+			startCleanup()
+		case <-timeExpired:
+			ctxDone, timeExpired = nil, nil
+			if run.finished(exited) {
+				continue
+			}
+			outcome.timeLimitExceeded = true
+			startCleanup()
+		case <-cleanupDone:
+			if run.finished(exited) && (pendingKill == nil || channelClosed(pendingKill)) {
+				cleanupDone = nil
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return executionOutcome{}, status.FromContextError(err).Err()
+			}
+			return executionOutcome{}, status.Error(codes.Internal, "command cleanup exceeded its waiting limit")
+		case <-drainDone:
+			if channelClosed(run.stdout.done) && channelClosed(run.stderr.done) {
+				drainDone = nil
+				continue
+			}
+			// A failed drain still owns the group. Finish its termination
+			// attempt before closing readers and returning the drain error.
+			drainDone = nil
+			drainErr = status.Error(codes.Internal, "command output pipes did not finish draining")
+			startCleanup()
+			if pendingKill == nil {
+				run.stdout.close()
+				run.stderr.close()
+			}
+		}
+		if pendingOut == nil && pendingErr == nil && drainTimer != nil {
+			drainTimer.Stop()
+			drainDone = nil
+		}
+	}
+	releaseLeader()
+	<-waitDone
+	if err := ctx.Err(); err != nil {
+		return executionOutcome{}, status.FromContextError(err).Err()
+	}
+	if drainErr != nil {
+		return executionOutcome{}, drainErr
+	}
+	if run.stdout.err != nil {
+		return executionOutcome{}, status.Errorf(codes.Internal, "failed to collect stdout: %v", run.stdout.err)
+	}
+	if run.stderr.err != nil {
+		return executionOutcome{}, status.Errorf(codes.Internal, "failed to collect stderr: %v", run.stderr.err)
+	}
+	if runErr != nil {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
+			outcome.exitCode = exitStatus(exitErr)
+		} else {
+			return executionOutcome{}, mapCommandError(runErr, "failed to execute command")
+		}
+	}
+	return outcome, nil
+}
+
+// waitForExit blocks until the process pid has exited, without reaping it. An
+// unreaped process keeps its PID reserved, so signalling the PID or its process
+// group stays safe until the caller reaps it with cmd.Wait.
+func waitForExit(pid int) {
+	var info [128]byte // siginfo_t
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, 1 /* P_PID */, uintptr(pid),
+			uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOWAIT, 0, 0)
+		if errno != syscall.EINTR {
+			return
+		}
+	}
+}
+
+func (s *ProcessServer) terminateExecution(ctx context.Context, cmd *exec.Cmd) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.killProcessTree(ctx, cmd)
+	}()
+	return done
 }
 
 // WriteStdin sends input bytes or EOF to a running process.
@@ -389,6 +715,10 @@ func (s *ProcessServer) WriteStdin(_ context.Context, req *processv1.WriteStdinR
 
 	if req.GetEof() != nil {
 		if err := proc.CloseStdin(); err != nil {
+			if errors.Is(err, processmanager.ErrStdinIsTerminal) {
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"process %d has a PTY; write 0x04 (Ctrl-D) at the start of a line to end input, or use SendSignal", req.GetProcessId())
+			}
 			return nil, status.Errorf(codes.Internal, "failed to close stdin: %v", err)
 		}
 		return &processv1.WriteStdinResponse{}, nil
@@ -457,9 +787,11 @@ func closeAll(files ...*os.File) {
 // killProcessGroupOnContextDone starts a goroutine that terminates the
 // command's entire process tree when ctx is cancelled. This replaces the
 // default exec.CommandContext behaviour (which only sends SIGKILL to the
-// child PID) so that grandchildren are reaped as well. The goroutine exits
-// when ctx is done OR when the process exits (done closed), whichever comes
-// first.
+// child PID) so that grandchildren are reaped as well.
+//
+// The returned stop function prevents any new termination and waits for one
+// in progress. Callers must call it before cmd.Wait reaps the leader, since
+// its PID/PGID may be reused by an unrelated process afterwards.
 //
 // The kill strategy is layered to work across container runtimes:
 //
@@ -475,39 +807,44 @@ func closeAll(files ...*os.File) {
 //
 // The caller must have set Setpgid (or Setsid via PTY) on the command so
 // that the child and its descendants share a process group.
-func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
+func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *exec.Cmd) (stop func()) {
+	var mu sync.Mutex
+	var stopped bool
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
 	go func() {
 		select {
 		case <-ctx.Done():
-			// Skip the kill if the child has already been reaped by Wait;
-			// its PID/PGID may have been reused by an unrelated process.
-			select {
-			case <-done:
-				return
-			default:
+			mu.Lock()
+			defer mu.Unlock()
+			if !stopped {
+				s.killProcessTree(context.Background(), cmd)
 			}
-			pid := cmd.Process.Pid
-
-			// Strategy 1: process-group kill (real Linux; reaches all
-			// descendants in one syscall when the runtime honours PGIDs).
-			if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				s.log.Error(err, "failed to kill process group on context cancellation", "pgid", pid)
-			}
-
-			// Strategy 2: walk /proc to find and kill descendants. This
-			// is the fallback for runtimes where negative-PID signalling
-			// does not reach the whole tree (e.g. gVisor). On real Linux
-			// this is mostly a no-op — strategy 1 already killed them —
-			// and any remaining Kill calls return ESRCH which we ignore.
-			s.killDescendants(pid)
-
-			// Strategy 3: direct PID kill as last resort.
-			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				s.log.Error(err, "failed to kill child process on context cancellation", "pid", pid)
-			}
-		case <-done:
+		case <-stopCh:
 		}
 	}()
+	return func() {
+		stopOnce.Do(func() {
+			// Taking the lock waits for a termination already in progress.
+			mu.Lock()
+			stopped = true
+			mu.Unlock()
+			close(stopCh)
+		})
+	}
+}
+
+func (s *ProcessServer) killProcessTree(ctx context.Context, cmd *exec.Cmd) {
+	// The group can outlive its leader and keep output pipes open. Reaping
+	// the leader must not suppress termination of the remaining group.
+	pid := cmd.Process.Pid
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		s.log.Error(err, "failed to kill process group", "pgid", pid)
+	}
+	s.killDescendants(ctx, pid)
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		s.log.Error(err, "failed to kill child process", "pid", pid)
+	}
 }
 
 // killDescendants recursively kills all descendant processes of rootPID by
@@ -515,12 +852,15 @@ func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *
 // already killed the tree, so the Kill calls below return ESRCH and are
 // silently skipped. In runtimes like gVisor where PGID kill does not
 // propagate, this ensures grandchildren do not outlive the parent.
-func (s *ProcessServer) killDescendants(rootPID int) {
-	for _, cpid := range readProcChildren(rootPID) {
+func (s *ProcessServer) killDescendants(ctx context.Context, rootPID int) {
+	for _, cpid := range readProcChildren(ctx, rootPID) {
+		if ctx.Err() != nil {
+			return
+		}
 		// Recurse first so we kill leaves before their parents — otherwise
 		// a child reaped mid-walk could reparent its children to init
 		// before we get a chance to signal them.
-		s.killDescendants(cpid)
+		s.killDescendants(ctx, cpid)
 		if err := syscall.Kill(cpid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			s.log.V(1).Info("failed to kill descendant process", "pid", cpid, "error", err)
 		}
@@ -533,7 +873,7 @@ func (s *ProcessServer) killDescendants(rootPID int) {
 // only appear under that thread's TID, so scanning only the main PID
 // would miss grandchildren of multithreaded parents. Returns nil when the
 // directory is unavailable.
-func readProcChildren(pid int) []int {
+func readProcChildren(ctx context.Context, pid int) []int {
 	taskDir := fmt.Sprintf("/proc/%d/task", pid)
 	entries, err := os.ReadDir(taskDir)
 	if err != nil {
@@ -542,6 +882,9 @@ func readProcChildren(pid int) []int {
 	seen := make(map[int]struct{})
 	var children []int
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			break
+		}
 		data, err := os.ReadFile(fmt.Sprintf("%s/%s/children", taskDir, entry.Name()))
 		if err != nil {
 			continue
@@ -556,4 +899,32 @@ func readProcChildren(pid int) []int {
 		}
 	}
 	return children
+}
+
+// waitForReaders blocks until every output reader in wg has finished. Readers
+// get pipeDrainGrace to reach EOF on their own; after that forceClose is called
+// to unblock any that are stuck (a grandchild may still hold the write side),
+// and waitForReaders waits for them to return.
+func waitForReaders(wg *sync.WaitGroup, forceClose func()) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(pipeDrainGrace):
+		forceClose()
+		<-done
+	}
+}
+
+// exitStatus returns the process's exit code, or 128+n when signal n killed
+// it, as a shell reports it. exec.ExitError.ExitCode returns -1 for a
+// signal, which is indistinguishable from sandboxd's own failure value.
+func exitStatus(exitErr *exec.ExitError) int32 {
+	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int32(ws.Signal())
+	}
+	return int32(exitErr.ExitCode())
 }

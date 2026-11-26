@@ -15,12 +15,9 @@
 
 import os
 import argparse
-import shutil
+import json
 import subprocess
 import sys
-
-import json
-import time
 
 from shared import utils
 from shared.node import ensure_node
@@ -208,7 +205,7 @@ def run_python_e2e_tests(repo_root, artifact_dir, env):
     return result.returncode
 
 
-def ensure_extensions_enabled():
+def ensure_extensions_enabled(env):
     """Ensures the controller is running with --extensions flag.
 
     Both k8s/controller.yaml and k8s/extensions.controller.yaml define the
@@ -219,14 +216,23 @@ def ensure_extensions_enabled():
     """
     print("========= Ensuring controller extensions are enabled... =========")
 
+    # This call mutates the controller Deployment, so it must hit the same
+    # cluster the SDK test frameworks talk to, not kubectl's ambient
+    # current-context. main() has pinned the resolved kubeconfig in `env`, and
+    # we pass env=env to every subprocess.run call below so kubectl picks it
+    # up via $KUBECONFIG. Do NOT use --kubeconfig here: it treats the whole
+    # value as a single filename, so it breaks the colon-separated multi-file
+    # KUBECONFIG merging that kubectl's native env handling supports.
+    kubectl = ["kubectl"]
+
     # Check current args
     result = subprocess.run(
         [
-            "kubectl", "get", "deployment", "agent-sandbox-controller",
+            *kubectl, "get", "deployment", "agent-sandbox-controller",
             "-n", "agent-sandbox-system",
             "-o", "json",
         ],
-        capture_output=True, text=True, check=False,
+        env=env, capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
         print(f"Warning: could not read controller deployment args: {result.stderr.strip()}")
@@ -257,11 +263,11 @@ def ensure_extensions_enabled():
 
     patch_result = subprocess.run(
         [
-            "kubectl", "patch", "deployment", "agent-sandbox-controller",
+            *kubectl, "patch", "deployment", "agent-sandbox-controller",
             "-n", "agent-sandbox-system",
             "-p", patch,
         ],
-        capture_output=True, text=True, check=False,
+        env=env, capture_output=True, text=True, check=False,
     )
     if patch_result.returncode != 0:
         print(f"Error patching deployment: {patch_result.stderr.strip()}")
@@ -270,11 +276,11 @@ def ensure_extensions_enabled():
     print("Patch applied. Waiting for rollout to complete...")
     rollout_result = subprocess.run(
         [
-            "kubectl", "rollout", "status", "deployment/agent-sandbox-controller",
+            *kubectl, "rollout", "status", "deployment/agent-sandbox-controller",
             "-n", "agent-sandbox-system",
             "--timeout=120s",
         ],
-        check=False,
+        env=env, check=False,
     )
     if rollout_result.returncode != 0:
         print("Error: controller rollout did not complete within 120s.")
@@ -299,6 +305,16 @@ def main(args):
     if not os.environ.get("PIP_EXTRA_INDEX_URL"):
         env.pop("PIP_EXTRA_INDEX_URL", None)
 
+    # Resolve the kubeconfig once and pin it in the environment every test
+    # subprocess inherits (Go, Python, TypeScript) so they all target the same
+    # cluster: an explicit $KUBECONFIG, else the kind kubeconfig make deploy-kind
+    # writes to bin/KUBECONFIG. Without this the SDK frameworks' `kubectl`
+    # invocations (e.g. the Python framework's apply_manifest_text) fall back to
+    # kubectl's ambient current-context, which may point at a different cluster.
+    env["KUBECONFIG"] = os.environ.get("KUBECONFIG") or os.path.join(
+        repo_root, "bin", "KUBECONFIG"
+    )
+
     if not setup_python_sdk(repo_root, env):
         return 1
 
@@ -316,7 +332,7 @@ def main(args):
 
         # SDK tests (Python + TypeScript) use SandboxClaim and SandboxWarmPool,
         # which require --extensions to be set on the controller.
-        if not ensure_extensions_enabled():
+        if not ensure_extensions_enabled(env):
             print("Failed to enable extensions on controller. Aborting.")
             return 1
 

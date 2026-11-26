@@ -25,6 +25,10 @@ $info: #adb5bd;
 $light: #dee2e6;
 $link-color: #2B6AA2;
 
+// Keep the brand blue for light surfaces; dark surfaces need lighter link text.
+$link-color-dark: #58a6ff;
+$link-hover-color-dark: tint-color($link-color-dark, 20%);
+
 // Nav bar colors
 $white: #fff;
 $navbar-dark-color: rgba($white, 1);

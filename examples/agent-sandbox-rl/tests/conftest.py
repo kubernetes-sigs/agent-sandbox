@@ -35,8 +35,18 @@ class FakeCluster:
     self.api_client = MagicMock()
     self.core_api = MagicMock()
     self.apps_api = MagicMock()
+    # Direct custom-object reads (snapshot listing by label at release): a
+    # Sandbox without a selector yet and no PodSnapshots, unless a test says so.
+    self.custom_api = MagicMock()
+    self.custom_api.get_namespaced_custom_object.return_value = {"metadata": {}, "status": {}}
+    self.custom_api.list_namespaced_custom_object.return_value = {"items": []}
     self.resources = MagicMock()
     self.resources.managed_selector.return_value = "app=agent-sandbox-rl"
+    # A live, unlabelled pool: owned (pre-run-id semantics) and present, so unwarm
+    # issues its delete. Tests of the missing / foreign / unreadable cases override.
+    self.resources.get_warmpool.return_value = {"metadata": {}}
+    self.resources.get_template.return_value = {"metadata": {}}   # same, templates
+    self.resources.ensure_namespace.return_value = False  # namespace pre-existed
     self.resources.list_warmpools.return_value = []
     self.resources.list_templates.return_value = []
     self.resources.list_claims.return_value = []

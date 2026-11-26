@@ -1,0 +1,91 @@
+# Each sandbox gets one credential: a projected service account token with
+# audience "recall". The agent trades it for a Recall key.
+#
+# The network policy allows cluster DNS, the recall pods, and the public
+# internet. polign_db and every other pod in the cluster stay out of reach.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: recall-agent
+  namespace: agents
+spec:
+  networkPolicyManagement: Managed
+  networkPolicy:
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: agent-sandbox-system
+            podSelector:
+              matchLabels:
+                app: sandbox-router
+    egress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - protocol: UDP
+            port: 53
+          - protocol: TCP
+            port: 53
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: recall
+            podSelector:
+              matchLabels:
+                app: recall
+        ports:
+          - protocol: TCP
+            port: 8080
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+              except:
+                - 10.0.0.0/8
+                - 172.16.0.0/12
+                - 192.168.0.0/16
+                - 169.254.0.0/16
+          - ipBlock:
+              cidr: "::/0"
+              except:
+                - "fc00::/7"
+                - "fe80::/10"
+  podTemplate:
+    spec:
+      serviceAccountName: runner
+      dnsPolicy: ClusterFirst
+      containers:
+        # Stands in for an agent. A real agent image runs `recall connect`
+        # (MCP over stdio) or the polign-recall Python client. Both read
+        # RECALL_URL and RECALL_TOKEN_FILE.
+        - name: agent
+          image: curlimages/curl:8.11.1
+          command: ["sleep", "infinity"]
+          env:
+            - name: RECALL_URL
+              value: http://recall.recall.svc:8080
+            - name: RECALL_TOKEN_FILE
+              value: /var/run/secrets/recall/token
+          volumeMounts:
+            - name: recall-token
+              mountPath: /var/run/secrets/recall
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 100
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: recall-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: recall
+                  expirationSeconds: 3600

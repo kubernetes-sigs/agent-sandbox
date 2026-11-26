@@ -12,30 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
+import gc
 import json
+import subprocess
+import sys
 import threading
 import unittest
+import weakref
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
 from unittest.mock import MagicMock, patch, ANY
 
+import pytest
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from kubernetes import config as k8s_config
 from k8s_agent_sandbox.sandbox_client import SandboxClient
+from k8s_agent_sandbox.sandbox import Sandbox
 from k8s_agent_sandbox.connector import SandboxConnector
+from k8s_agent_sandbox.models import AdditionalPodMetadata
 from k8s_agent_sandbox.pod_metadata import validate_labels
 from k8s_agent_sandbox.models import (
     SandboxDirectConnectionConfig,
     SandboxInClusterConnectionConfig,
     SandboxLocalTunnelConnectionConfig,
+    SandboxdInClusterConnectionConfig,
 )
 from k8s_agent_sandbox.exceptions import (
     SandboxPortForwardError,
     SandboxRequestError,
     SandboxNotFoundError,
+    SandboxMetadataError,
 )
 from k8s_agent_sandbox.k8s_helper import K8sHelper
 
@@ -48,6 +59,12 @@ class TestSandboxClient(unittest.TestCase):
         self.mock_k8s_helper = self.client.k8s_helper
         self.mock_sandbox_class = MagicMock()
         self.client.sandbox_class = self.mock_sandbox_class
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_api_client_forwarded_to_k8s_helper(self, MockK8sHelper):
+        sentinel = MagicMock(name="ApiClient")
+        SandboxClient(api_client=sentinel)
+        MockK8sHelper.assert_called_once_with(api_client=sentinel)
 
     @patch('uuid.uuid4')
     def test_create_sandbox_success(self, mock_uuid):
@@ -102,6 +119,7 @@ class TestSandboxClient(unittest.TestCase):
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
+        mock_sandbox.sandbox_id = "resolved-id"
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_sandbox
         
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
@@ -114,6 +132,7 @@ class TestSandboxClient(unittest.TestCase):
 
         mock_inactive_sandbox = MagicMock()
         mock_inactive_sandbox.is_active = False
+        mock_inactive_sandbox.sandbox_id = "resolved-id"
         self.client._active_connection_sandboxes[("test-namespace", "test-claim")] = mock_inactive_sandbox
         
         self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
@@ -128,6 +147,54 @@ class TestSandboxClient(unittest.TestCase):
         self.assertEqual(self.client._active_connection_sandboxes[("test-namespace", "test-claim")], mock_new_sandbox)
         self.mock_k8s_helper.get_sandbox.assert_called_with("resolved-id", "test-namespace")
         self.mock_sandbox_class.assert_called_once()
+
+    def test_get_sandbox_replaces_handle_when_claim_rebinds(self):
+        """A claim deleted and re-created under the same name binds to a new
+        sandbox, so get_sandbox must not return the old sandbox's handle."""
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-aaaaa"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        old_handle = MagicMock()
+        old_handle.is_active = True
+        old_handle.sandbox_id = "python-aaaaa"
+        new_handle = MagicMock()
+        self.mock_sandbox_class.side_effect = [old_handle, new_handle]
+
+        self.assertIs(self.client.get_sandbox("c1", "ns"), old_handle)
+
+        # The claim is deleted and re-created; the warm pool binds it to a new sandbox.
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-bbbbb"
+
+        sandbox = self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        # The stale handle is closed locally; nothing is deleted server-side.
+        old_handle.close_connection.assert_called_once_with()
+        old_handle.terminate.assert_not_called()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_called()
+
+    def test_get_sandbox_replaces_stale_handle_when_close_fails(self):
+        """A stale handle that fails to close is still replaced, so the caller
+        gets a handle for the claim's current sandbox."""
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "python-bbbbb"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+        stale_handle = MagicMock()
+        stale_handle.is_active = True
+        stale_handle.sandbox_id = "python-aaaaa"
+        stale_handle.close_connection.side_effect = RuntimeError("socket already gone")
+        self.client._active_connection_sandboxes[("ns", "c1")] = stale_handle
+        new_handle = MagicMock()
+        self.mock_sandbox_class.return_value = new_handle
+
+        with self.assertLogs("k8s_agent_sandbox.sandbox_client", level="ERROR") as logs:
+            sandbox = self.client.get_sandbox("c1", "ns")
+
+        self.assertIs(sandbox, new_handle)
+        self.assertEqual(self.mock_sandbox_class.call_args.kwargs["sandbox_id"], "python-bbbbb")
+        self.assertIs(self.client._active_connection_sandboxes[("ns", "c1")], new_handle)
+        stale_handle.close_connection.assert_called_once_with()
+        self.assertIn("socket already gone", logs.output[0])
 
     def test_get_sandbox_not_found_k8s_error(self):
         self.mock_k8s_helper.resolve_sandbox_name.side_effect = Exception("Not found")
@@ -200,6 +267,44 @@ class TestSandboxClient(unittest.TestCase):
             mock_delete.assert_any_call("claim1", namespace="ns1")
             mock_delete.assert_any_call("claim2", namespace="ns2")
 
+    def _track_sandboxes(self):
+        automatic = MagicMock()
+        explicit = MagicMock()
+        self.client._active_connection_sandboxes[("ns", "auto")] = automatic
+        self.client._active_connection_sandboxes[("ns", "named")] = explicit
+        self.client._explicit_claims.add(("ns", "named"))
+        return automatic, explicit
+
+    def test_context_manager_cleans_up_on_exit(self):
+        automatic, explicit = self._track_sandboxes()
+
+        with self.client as c:
+            self.assertIs(c, self.client)
+            automatic.terminate.assert_not_called()
+
+        automatic.terminate.assert_called_once()
+        # Caller-owned claims keep their Claim and only lose the connection.
+        explicit.terminate.assert_not_called()
+        explicit.close_connection.assert_called_once()
+
+    def test_context_manager_cleans_up_on_exception(self):
+        automatic, _ = self._track_sandboxes()
+
+        with self.assertRaises(RuntimeError):
+            with self.client:
+                raise RuntimeError("boom")
+
+        automatic.terminate.assert_called_once()
+
+    def test_context_manager_deletes_attached_claim(self):
+        self.mock_k8s_helper.resolve_sandbox_name.return_value = "resolved-id"
+        self.mock_k8s_helper.get_sandbox.return_value = {"metadata": {}}
+
+        with self.client:
+            attached = self.client.get_sandbox("claim", "ns")
+
+        attached.terminate.assert_called_once()
+
     @patch('uuid.uuid4')
     def test_create_sandbox_with_labels(self, mock_uuid):
         mock_uuid.return_value.hex = '1234abcd'
@@ -246,10 +351,10 @@ class TestSandboxClient(unittest.TestCase):
                 labels=None,
                 lifecycle=None,
                 volume_claim_templates=None,
-                pod_metadata={
-                    "labels": {"client-id": "tenant-a"},
-                    "annotations": {"note": "owned-by-tenant-a"},
-                },
+                pod_metadata=AdditionalPodMetadata(
+                    labels={"client-id": "tenant-a"},
+                    annotations={"note": "owned-by-tenant-a"},
+                ),
                 env=None,
             )
 
@@ -329,7 +434,7 @@ class TestSandboxClient(unittest.TestCase):
         self.client.tracing_manager = MagicMock()
         self.client.tracing_manager.get_trace_context_json.return_value = "trace-data"
 
-        pod_metadata = {"labels": {"client-id": "tenant-a"}}
+        pod_metadata = AdditionalPodMetadata(labels={"client-id": "tenant-a"})
         self.client._create_claim(
             "test-claim", "test-warmpool", "test-namespace", pod_metadata=pod_metadata
         )
@@ -340,7 +445,7 @@ class TestSandboxClient(unittest.TestCase):
             labels=None,
             lifecycle=None,
             volume_claim_templates=None,
-            pod_metadata={"labels": {"client-id": "tenant-a"}},
+            pod_metadata=AdditionalPodMetadata(labels={"client-id": "tenant-a"}),
             env=None,
         )
 
@@ -384,6 +489,16 @@ class TestSandboxClient(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.client.create_sandbox("test-warmpool", labels={"a" * 64: "value"})
         self.assertIn("exceeds max length", str(ctx.exception))
+
+    def test_validate_labels_rejects_trailing_newline(self):
+        # A regex "$" also matches before a trailing newline.
+        for labels in (
+            {"agent": "value\n"},
+            {"agent\n": "value"},
+            {"app.kubernetes.io\n/name": "value"},
+        ):
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                validate_labels(labels)
 
     def test_validate_labels_accepts_prefixed_key(self):
         validate_labels({"app.kubernetes.io/name": "my-app"})
@@ -570,6 +685,11 @@ class TestSandboxClient(unittest.TestCase):
         with self.assertRaises(SandboxNotFoundError):
             self.client.get_sandbox_claim_warmpool_name("my-claim", "my-namespace")
 
+
+    def test_get_sandbox_claim_warmpool_name_missing_warmpool_ref(self):
+        self.mock_k8s_helper.get_sandbox_claim.return_value = {"spec": {}}
+        with self.assertRaises(SandboxMetadataError):
+            self.client.get_sandbox_claim_warmpool_name("my-claim", "my-namespace")
 
 class SandboxHandler(BaseHTTPRequestHandler):
     """Minimal api handler with basic routing to exercise error paths."""
@@ -824,6 +944,12 @@ class TestSandboxClientInClusterConfig(unittest.TestCase):
         self.assertIsInstance(sc.connection_config, SandboxInClusterConnectionConfig)
 
     @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
+    def test_sandboxd_in_cluster_config_stored(self, _):
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-service")
+        client = SandboxClient(connection_config=config)
+        self.assertIs(client.connection_config, config)
+
+    @patch('k8s_agent_sandbox.sandbox_client.K8sHelper')
     def test_default_config_is_local_tunnel(self, _):
         sc = SandboxClient()
         self.assertIsInstance(sc.connection_config, SandboxLocalTunnelConnectionConfig)
@@ -887,10 +1013,97 @@ class TestConnectionConfigValidation(unittest.TestCase):
             "ns|sh",           # pipe attempt
             "ns&rm",           # ampersand attempt
             "",                # empty namespace
+            "default\n",       # trailing newline
         ]
         for ns in invalid_namespaces:
             with self.assertRaises(ValidationError):
                 SandboxLocalTunnelConnectionConfig(router_namespace=ns)
+
+
+class TestLibraryLogging(unittest.TestCase):
+    """The SDK must leave root logger configuration to the application."""
+
+    def test_import_leaves_root_logger_unconfigured(self):
+        # Fresh interpreter: pytest itself installs root handlers in-process.
+        code = (
+            "import logging, k8s_agent_sandbox.sandbox_client\n"
+            "root = logging.getLogger()\n"
+            "assert not root.handlers, root.handlers\n"
+            "assert root.level == logging.WARNING, root.level\n"
+        )
+        subprocess.run([sys.executable, "-c", code], check=True)
+
+    def test_no_root_logger_calls(self):
+        # logging.info() and friends call basicConfig() on a bare root logger.
+        root_calls = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+        package_dir = Path(__file__).resolve().parents[2]
+        offenders = []
+        for path in package_dir.rglob("*.py"):
+            if "test" in path.relative_to(package_dir).parts:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "logging"
+                        and node.func.attr in root_calls):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(offenders, [])
+
+
+def test_tracked_handle_does_not_keep_its_client_alive():
+    with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'):
+        client = SandboxClient(connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"))
+    client.sandbox_class = Sandbox
+    client.k8s_helper.wait_for_claim_ready.return_value = "sandbox-id"
+    with patch.object(client, '_create_claim', return_value={}):
+        sandbox = client.create_sandbox("pool", "ns")
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+        sandbox.close_connection()
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["registry-empty", "registry-tracking"])
+def test_dropped_client_is_freed_and_its_exit_hook_still_cleans_up(tracked):
+    with patch('k8s_agent_sandbox.sandbox_client.K8sHelper'), \
+            patch('k8s_agent_sandbox.sandbox_client.atexit') as mock_atexit:
+        client = SandboxClient(
+            connection_config=SandboxDirectConnectionConfig(api_url="http://sandbox.invalid"), cleanup=True
+        )
+    exit_hook = mock_atexit.register.call_args.args[0]
+    client.sandbox_class = Sandbox
+    helper = client.k8s_helper
+    helper.wait_for_claim_ready.return_value = "sandbox-id"
+    claim = {"metadata": {"uid": "uid-kept", "resourceVersion": "1"}, "spec": {"warmPoolRef": {"name": "pool"}}}
+    with patch.object(client, '_create_claim', return_value=claim):
+        generated = client.create_sandbox("pool", "ns")
+        explicit = client.create_sandbox("pool", "ns", claim_name="kept")
+    generated_name = generated.claim_name
+    if not tracked:
+        generated.terminate()
+        explicit.terminate()
+    helper.delete_sandbox_claim.reset_mock()
+    # With the collector off, only reference counting can free the client.
+    gc.disable()
+    try:
+        client_ref = weakref.ref(client)
+        del client
+        assert client_ref() is None
+    finally:
+        gc.enable()
+    exit_hook()
+    if tracked:
+        helper.delete_sandbox_claim.assert_called_once_with(generated_name, "ns")
+    else:
+        helper.delete_sandbox_claim.assert_not_called()
+    assert not generated.is_active
+    assert not explicit.is_active
 
 
 if __name__ == '__main__':

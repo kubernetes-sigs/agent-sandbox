@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	fakedynamic "k8s.io/client-go/dynamic/fake"
 	fakekube "k8s.io/client-go/kubernetes/fake"
@@ -72,8 +73,8 @@ func validateAllOptions(o *Options) error {
 }
 
 func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -109,8 +110,8 @@ func newTestSandbox(opts Options) (*Sandbox, *fakeagents.Clientset, *fakeextensi
 }
 
 func newTestSandboxWithDynamic(opts Options, dynCS *fakedynamic.FakeDynamicClient) (*Sandbox, *fakeagents.Clientset, *fakeextensions.Clientset) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts.K8sHelper = &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -529,7 +530,7 @@ func TestResolveRouterPod_Success(t *testing.T) {
 		}},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fakekube.NewClientset(slice)
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",
@@ -553,7 +554,7 @@ func TestResolveRouterPod_NoEndpoints(t *testing.T) {
 		},
 	}
 
-	kubeCS := fakekube.NewSimpleClientset(slice) //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	kubeCS := fakekube.NewClientset(slice)
 	ts := &tunnelStrategy{
 		discoveryClient: kubeCS.DiscoveryV1(),
 		namespace:       "default",
@@ -960,6 +961,32 @@ func TestOpen_RollbackDeletesClaim(t *testing.T) {
 	}
 }
 
+func TestOpen_TerminalClaimFailsFastAndRollsBack(t *testing.T) {
+	opts := defaultTestOpts()
+	c, _, extensionsCS := newTestSandbox(opts)
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, claimNotReady("test-claim", "WarmPoolNotFound"), nil
+	})
+
+	err := c.Open(context.Background())
+	if !errors.Is(err, ErrWarmPoolNotFound) {
+		t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+	}
+	if c.ClaimName() != "" {
+		t.Errorf("expected empty ClaimName after rollback, got %q", c.ClaimName())
+	}
+
+	deleted := false
+	for _, action := range extensionsCS.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxclaims" {
+			deleted = true
+		}
+	}
+	if !deleted {
+		t.Error("expected the SandboxClaim to be deleted during rollback")
+	}
+}
+
 func TestClose_DeleteClaim_NotFound(t *testing.T) {
 	opts := defaultTestOpts()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
@@ -1091,6 +1118,47 @@ func TestOpen_CreateClaimFailure(t *testing.T) {
 	}
 }
 
+func TestCreateClaim_Labels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+		want   map[string]string
+	}{
+		{
+			name: "none",
+			want: map[string]string{sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+		{
+			name:   "user labels are kept",
+			labels: map[string]string{"app": "agent", "example.com/tier": ""},
+			want:   map[string]string{"app": "agent", "example.com/tier": "", sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+		{
+			name:   "created-by label cannot be overridden",
+			labels: map[string]string{sandboxv1beta1.CreatedByLabel: "someone-else"},
+			want:   map[string]string{sandboxv1beta1.CreatedByLabel: "go-client"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extensionsCS := fakeextensions.NewClientset()
+			var created *extv1beta1.SandboxClaim
+			extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+				created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+				created.Name = created.GenerateName + "test12345"
+				return true, created, nil
+			})
+			h := &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}
+
+			if _, err := h.createClaim(context.Background(), newClaim(&Options{Namespace: "default", WarmPoolName: "pool", Labels: tc.labels}, time.Now()), otel.GetTracerProvider().Tracer("test"), "test"); err != nil {
+				t.Fatalf("createClaim() error: %v", err)
+			}
+			if !reflect.DeepEqual(created.Labels, tc.want) {
+				t.Errorf("claim labels = %v, want %v", created.Labels, tc.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // drainSandboxWatch tests (K8sHelper method)
 // ---------------------------------------------------------------------------
@@ -1109,7 +1177,7 @@ func TestDrainSandboxWatch_ErrorTriggersRelist(t *testing.T) {
 			go func() { fw.Error(&tc.status) }()
 
 			var lastCond string
-			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+			_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", "", isSandboxReady)
 			if done {
 				t.Error("expected done=false")
 			}
@@ -1129,7 +1197,7 @@ func TestDrainSandboxWatch_Deleted(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", "", isSandboxReady)
 	if done {
 		t.Error("expected done=false for Deleted event")
 	}
@@ -1256,7 +1324,7 @@ func TestClose_CancelsBlockedOpen(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// monitorPortForward tests (TunnelStrategy)
+// monitorPortForward tests (portForwardTunnel)
 // ---------------------------------------------------------------------------
 
 func TestMonitorPortForward_ClearsStateOnDeath(t *testing.T) {
@@ -1276,8 +1344,8 @@ func TestMonitorPortForward_ClearsStateOnDeath(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}
@@ -1321,8 +1389,8 @@ func TestMonitorPortForward_StaleMonitorIgnored(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: newStopChan,
 	}
@@ -1405,15 +1473,13 @@ func TestOpen_CreateClaimSendsCorrectTemplate(t *testing.T) {
 	}
 }
 
-func TestOpen_CreateClaimSendsEnv(t *testing.T) {
-	opts := defaultTestOpts()
-	opts.Env = []extv1beta1.EnvVar{
-		{Name: "FOO", Value: "bar"},
-		{Name: "DEBUG", Value: "true"},
-	}
+// openAndCaptureClaim opens a sandbox with opts and returns the SandboxClaim
+// it created.
+func openAndCaptureClaim(t *testing.T, opts Options) *extv1beta1.SandboxClaim {
+	t.Helper()
 	c, agentsCS, extensionsCS := newTestSandbox(opts)
 
-	var capturedEnv []extv1beta1.EnvVar
+	var captured *extv1beta1.SandboxClaim
 	fakeWatcher := watch.NewFake()
 
 	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
@@ -1423,7 +1489,7 @@ func TestOpen_CreateClaimSendsEnv(t *testing.T) {
 			if claim.Name == "" && claim.GenerateName != "" {
 				claim.Name = claim.GenerateName + "test12345"
 			}
-			capturedEnv = claim.Spec.Env
+			captured = claim
 			go fakeWatcher.Add(readySandbox(claim.Name))
 		}
 		return false, nil, nil
@@ -1434,10 +1500,134 @@ func TestOpen_CreateClaimSendsEnv(t *testing.T) {
 	if err := c.Open(context.Background()); err != nil {
 		t.Fatalf("Open() error: %v", err)
 	}
-	defer c.Close(context.Background())
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	return captured
+}
 
-	if !reflect.DeepEqual(capturedEnv, opts.Env) {
-		t.Errorf("expected env %+v, got %+v", opts.Env, capturedEnv)
+func TestOpen_CreateClaimSendsEnv(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.Env = []extv1beta1.EnvVar{
+		{Name: "FOO", Value: "bar"},
+		{Name: "DEBUG", Value: "true"},
+	}
+
+	claim := openAndCaptureClaim(t, opts)
+	if !reflect.DeepEqual(claim.Spec.Env, opts.Env) {
+		t.Errorf("expected env %+v, got %+v", opts.Env, claim.Spec.Env)
+	}
+}
+
+func TestOpen_CreateClaimSendsShutdownAfter(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.ShutdownAfter = time.Hour
+
+	before := time.Now()
+	claim := openAndCaptureClaim(t, opts)
+	after := time.Now()
+
+	lifecycle := claim.Spec.Lifecycle
+	if lifecycle == nil || lifecycle.ShutdownTime == nil {
+		t.Fatalf("expected spec.lifecycle.shutdownTime, got %+v", lifecycle)
+	}
+	// The deadline is rounded up to a whole second, so it may overshoot by under 1s.
+	lo, hi := before.Add(opts.ShutdownAfter), after.Add(opts.ShutdownAfter+time.Second)
+	if got := lifecycle.ShutdownTime.Time; got.Before(lo) || got.After(hi) {
+		t.Errorf("shutdownTime = %v, want within [%v, %v]", got, lo, hi)
+	}
+	if lifecycle.ShutdownPolicy != extv1beta1.ShutdownPolicyDelete {
+		t.Errorf("shutdownPolicy = %q, want %q", lifecycle.ShutdownPolicy, extv1beta1.ShutdownPolicyDelete)
+	}
+}
+
+func TestClaimLifecycle_RoundsUpToWholeSecond(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 100, time.UTC)
+	for _, tc := range []struct {
+		ttl  time.Duration
+		want time.Time
+	}{
+		{500 * time.Millisecond, now.Truncate(time.Second).Add(time.Second)},
+		{time.Hour, now.Truncate(time.Second).Add(time.Hour + time.Second)},
+		{time.Second - 100, now.Truncate(time.Second).Add(time.Second)},
+	} {
+		if got := claimLifecycle(now, &Options{ShutdownAfter: tc.ttl}).ShutdownTime.Time; !got.Equal(tc.want) {
+			t.Errorf("ttl %s: shutdownTime = %v, want %v", tc.ttl, got, tc.want)
+		}
+	}
+	whole := now.Truncate(time.Second)
+	if got := claimLifecycle(whole, &Options{ShutdownAfter: time.Minute}).ShutdownTime.Time; !got.Equal(whole.Add(time.Minute)) {
+		t.Errorf("whole-second deadline moved: %v", got)
+	}
+}
+
+func TestClaimLifecycle_PolicyAndTTL(t *testing.T) {
+	now := time.Now()
+	ttl := int32(30)
+	for _, tc := range []struct {
+		name       string
+		opts       Options
+		wantPolicy extv1beta1.ShutdownPolicy
+		wantTTL    *int32
+		wantTime   bool
+	}{
+		{"policy only", Options{ShutdownPolicy: extv1beta1.ShutdownPolicyRetain}, extv1beta1.ShutdownPolicyRetain, nil, false},
+		{"ttl only defaults to Delete", Options{TTLSecondsAfterFinished: &ttl}, extv1beta1.ShutdownPolicyDelete, &ttl, false},
+		{"zero ttl is kept", Options{TTLSecondsAfterFinished: new(int32)}, extv1beta1.ShutdownPolicyDelete, new(int32), false},
+		{"all set", Options{ShutdownAfter: time.Hour, ShutdownPolicy: extv1beta1.ShutdownPolicyDeleteForeground, TTLSecondsAfterFinished: &ttl}, extv1beta1.ShutdownPolicyDeleteForeground, &ttl, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claimLifecycle(now, &tc.opts)
+			if got == nil {
+				t.Fatal("expected a lifecycle")
+			}
+			if got.ShutdownPolicy != tc.wantPolicy {
+				t.Errorf("shutdownPolicy = %q, want %q", got.ShutdownPolicy, tc.wantPolicy)
+			}
+			if (got.TTLSecondsAfterFinished == nil) != (tc.wantTTL == nil) || (tc.wantTTL != nil && *got.TTLSecondsAfterFinished != *tc.wantTTL) {
+				t.Errorf("ttlSecondsAfterFinished = %v, want %v", got.TTLSecondsAfterFinished, tc.wantTTL)
+			}
+			if (got.ShutdownTime != nil) != tc.wantTime {
+				t.Errorf("shutdownTime = %v, want set: %v", got.ShutdownTime, tc.wantTime)
+			}
+		})
+	}
+}
+
+func TestCreateOptions_ShutdownPolicyAndTTLOverrideClientLevel(t *testing.T) {
+	clientTTL := int32(60)
+	base := Options{ShutdownPolicy: extv1beta1.ShutdownPolicyRetain, TTLSecondsAfterFinished: &clientTTL}
+
+	var kept createOptions
+	o := base
+	kept.apply(&o)
+	if o.ShutdownPolicy != extv1beta1.ShutdownPolicyRetain || *o.TTLSecondsAfterFinished != 60 {
+		t.Errorf("without per-call options the Client values should apply, got %q and %d", o.ShutdownPolicy, *o.TTLSecondsAfterFinished)
+	}
+
+	var co createOptions
+	WithShutdownPolicy(extv1beta1.ShutdownPolicyDeleteForeground)(&co)
+	WithTTLSecondsAfterFinished(0)(&co)
+	o = base
+	co.apply(&o)
+	if o.ShutdownPolicy != extv1beta1.ShutdownPolicyDeleteForeground || *o.TTLSecondsAfterFinished != 0 {
+		t.Errorf("per-call options should win, got %q and %d", o.ShutdownPolicy, *o.TTLSecondsAfterFinished)
+	}
+	if clientTTL != 60 {
+		t.Errorf("the Client-level TTL was modified: %d", clientTTL)
+	}
+
+	// An explicit empty policy replaces the Client's, restoring the Delete default.
+	var empty createOptions
+	WithShutdownPolicy("")(&empty)
+	o = Options{ShutdownAfter: time.Hour, ShutdownPolicy: extv1beta1.ShutdownPolicyRetain}
+	empty.apply(&o)
+	if got := claimLifecycle(time.Now(), &o).ShutdownPolicy; got != extv1beta1.ShutdownPolicyDelete {
+		t.Errorf("empty per-call policy should restore Delete, got %q", got)
+	}
+}
+
+func TestOpen_CreateClaimWithoutShutdownAfterHasNoLifecycle(t *testing.T) {
+	if claim := openAndCaptureClaim(t, defaultTestOpts()); claim.Spec.Lifecycle != nil {
+		t.Errorf("expected no spec.lifecycle, got %+v", claim.Spec.Lifecycle)
 	}
 }
 
@@ -1607,6 +1797,9 @@ func TestValidation_NegativeTimeouts(t *testing.T) {
 		{"negative RequestTimeout", Options{WarmPoolName: "pool", RequestTimeout: -1}},
 		{"negative PerAttemptTimeout", Options{WarmPoolName: "pool", PerAttemptTimeout: -1}},
 		{"negative MaxDownloadSize", Options{WarmPoolName: "pool", MaxDownloadSize: -1}},
+		{"negative ShutdownAfter", Options{WarmPoolName: "pool", ShutdownAfter: -time.Second}},
+		{"unknown ShutdownPolicy", Options{WarmPoolName: "pool", ShutdownPolicy: "Keep"}},
+		{"negative TTLSecondsAfterFinished", Options{WarmPoolName: "pool", TTLSecondsAfterFinished: new(int32(-1))}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1626,6 +1819,11 @@ func TestValidation_InvalidNames(t *testing.T) {
 		{"uppercase GatewayName", Options{WarmPoolName: "pool", GatewayName: "MyGateway"}},
 		{"uppercase Namespace", Options{WarmPoolName: "pool", Namespace: "MyNS"}},
 		{"uppercase WarmPoolName", Options{WarmPoolName: "MyWarmPool"}},
+		{"uppercase ClaimName", Options{WarmPoolName: "pool", ClaimName: "MyClaim"}},
+		{"AdoptExisting without ClaimName", Options{WarmPoolName: "pool", AdoptExisting: true}},
+		{"Labels key with a space", Options{WarmPoolName: "pool", Labels: map[string]string{"bad key": "v"}}},
+		{"Labels value with a slash", Options{WarmPoolName: "pool", Labels: map[string]string{"k": "a/b"}}},
+		{"PodLabels key with a space", Options{WarmPoolName: "pool", PodLabels: map[string]string{"bad key": "v"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1635,6 +1833,233 @@ func TestValidation_InvalidNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpen_PopulatesClaimPodMetadataAndVolumeClaimTemplates(t *testing.T) {
+	opts := defaultTestOpts()
+	opts.Labels = map[string]string{"app": "agent"}
+	opts.Env = []extv1beta1.EnvVar{{Name: "MODE", Value: "prod"}}
+	opts.PodLabels = map[string]string{"sandbox.users.io/team": "agents"}
+	opts.PodAnnotations = map[string]string{"example.com/trace": "enabled"}
+	opts.VolumeClaimTemplates = []sandboxv1beta1.PersistentVolumeClaimTemplate{
+		{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{
+				Name:   "workspace",
+				Labels: map[string]string{"sandbox.users.io/vol": "ssd"},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		},
+	}
+
+	s, agentsCS, extensionsCS := newTestSandbox(opts)
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("test-sandbox"))
+
+	var created *extv1beta1.SandboxClaim
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+		return false, nil, nil
+	})
+
+	// Mutate caller maps/slices after New() before Open() to ensure Open uses
+	// isolated copies when building the claim.
+	opts.Labels["app"] = "mutated"
+	opts.Env[0].Value = "mutated"
+	opts.PodLabels["sandbox.users.io/team"] = "mutated"
+	opts.PodAnnotations["example.com/trace"] = "mutated"
+	opts.VolumeClaimTemplates[0].EmbeddedObjectMetadata.Labels["sandbox.users.io/vol"] = "mutated"
+
+	if err := s.Open(context.Background()); err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	defer s.Close(context.Background())
+
+	if created == nil {
+		t.Fatal("expected SandboxClaim to be created")
+	}
+	wantLabels := map[string]string{"app": "agent", sandboxv1beta1.CreatedByLabel: "go-client"}
+	if !reflect.DeepEqual(created.Labels, wantLabels) {
+		t.Errorf("Labels = %v, want %v", created.Labels, wantLabels)
+	}
+	wantEnv := []extv1beta1.EnvVar{{Name: "MODE", Value: "prod"}}
+	if !reflect.DeepEqual(created.Spec.Env, wantEnv) {
+		t.Errorf("Env = %v, want %v", created.Spec.Env, wantEnv)
+	}
+	wantPodLabels := map[string]string{"sandbox.users.io/team": "agents"}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Labels, wantPodLabels) {
+		t.Errorf("AdditionalPodMetadata.Labels = %v, want %v", created.Spec.AdditionalPodMetadata.Labels, wantPodLabels)
+	}
+	wantPodAnnotations := map[string]string{"example.com/trace": "enabled"}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations) {
+		t.Errorf("AdditionalPodMetadata.Annotations = %v, want %v", created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations)
+	}
+	if len(created.Spec.VolumeClaimTemplates) != 1 || created.Spec.VolumeClaimTemplates[0].Name != "workspace" {
+		t.Fatalf("VolumeClaimTemplates = %+v, want 1 workspace template", created.Spec.VolumeClaimTemplates)
+	}
+	if got := created.Spec.VolumeClaimTemplates[0].Labels["sandbox.users.io/vol"]; got != "ssd" {
+		t.Errorf("VolumeClaimTemplates[0].Labels[vol] = %q, want %q", got, "ssd")
+	}
+}
+
+func TestOpen_DeterministicClaimName_CreatesAndAdoptsOnConflict(t *testing.T) {
+	t.Run("creates with explicit Name and empty GenerateName", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "my-deterministic-claim"
+
+		s, agentsCS, extensionsCS := newTestSandbox(opts)
+		setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("my-deterministic-claim"))
+
+		var created *extv1beta1.SandboxClaim
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+			created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+			return false, nil, nil
+		})
+
+		if err := s.Open(context.Background()); err != nil {
+			t.Fatalf("Open() error: %v", err)
+		}
+		defer s.Close(context.Background())
+
+		if created == nil {
+			t.Fatal("expected SandboxClaim to be created")
+		}
+		if created.Name != "my-deterministic-claim" {
+			t.Errorf("created.Name = %q, want %q", created.Name, "my-deterministic-claim")
+		}
+		if created.GenerateName != "" {
+			t.Errorf("created.GenerateName = %q, want empty", created.GenerateName)
+		}
+		if s.ClaimName() != "my-deterministic-claim" {
+			t.Errorf("s.ClaimName() = %q, want %q", s.ClaimName(), "my-deterministic-claim")
+		}
+	})
+
+	t.Run("keeps newly created named claim on rollback", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "newly-created-claim"
+
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		// Create succeeds (not 409), then resolveSandboxName fails with terminal condition.
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, claimNotReady("newly-created-claim", "WarmPoolNotFound"), nil
+		})
+
+		deleteCalled := false
+		extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			deleteCalled = true
+			return true, nil, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+		}
+		if deleteCalled {
+			t.Error("rollbackOpen must not delete a caller-owned named claim")
+		}
+		if s.ClaimName() != "" {
+			t.Errorf("expected s.ClaimName() to be cleared after failed Open, got %q", s.ClaimName())
+		}
+	})
+
+	t.Run("fails when the adopted claim is replaced during resolution", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "replaced-claim"
+		opts.AdoptExisting = true
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "replaced-claim")
+		})
+		gets := 0
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			gets++
+			uid := types.UID("uid-adopted")
+			if gets > 1 {
+				uid = "uid-replacement"
+			}
+			return true, &extv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "replaced-claim", Namespace: "default", UID: uid},
+				Spec:       extv1beta1.SandboxClaimSpec{WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: opts.WarmPoolName}},
+				Status:     extv1beta1.SandboxClaimStatus{SandboxStatus: extv1beta1.SandboxStatus{Name: "replacement-sandbox"}},
+			}, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrSandboxDeleted) || !strings.Contains(err.Error(), "replaced") {
+			t.Fatalf("expected ErrSandboxDeleted for a replaced claim, got: %v", err)
+		}
+	})
+
+	t.Run("does not adopt on 409 without AdoptExisting", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "someone-elses-claim"
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "someone-elses-claim")
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrClaimFailed) || !k8serrors.IsAlreadyExists(err) {
+			t.Fatalf("expected ErrClaimFailed wrapping AlreadyExists, got: %v", err)
+		}
+		if s.ClaimName() != "" {
+			t.Errorf("expected s.ClaimName() to stay empty, got %q", s.ClaimName())
+		}
+	})
+
+	t.Run("rejects terminating existing claim on 409", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "terminating-claim"
+		opts.AdoptExisting = true
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		now := metav1.Now()
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "terminating-claim")
+		})
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, &extv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "terminating-claim",
+					Namespace:         "default",
+					DeletionTimestamp: &now,
+				},
+			}, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrSandboxDeleted) || !strings.Contains(err.Error(), "is terminating") {
+			t.Fatalf("expected terminating ErrSandboxDeleted, got: %v", err)
+		}
+	})
+
+	t.Run("rejects existing claim with mismatched WarmPoolRef on 409", func(t *testing.T) {
+		opts := defaultTestOpts()
+		opts.ClaimName = "other-pool-claim"
+		opts.AdoptExisting = true
+		s, _, extensionsCS := newTestSandbox(opts)
+
+		extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, "other-pool-claim")
+		})
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, &extv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "other-pool-claim", Namespace: "default"},
+				Spec: extv1beta1.SandboxClaimSpec{
+					WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: "different-pool"},
+				},
+			}, nil
+		})
+
+		err := s.Open(context.Background())
+		if !errors.Is(err, ErrClaimFailed) || !strings.Contains(err.Error(), `references warm pool "different-pool"`) {
+			t.Fatalf("expected warm pool mismatch ErrClaimFailed, got: %v", err)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1885,7 +2310,7 @@ func TestDrainSandboxWatch_NonSandboxObject(t *testing.T) {
 	}()
 
 	var lastCond string
-	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", 5*time.Second, &lastCond)
+	_, done, err := h.drainSandboxWatch(context.Background(), fw, "test-claim", &lastCond, "readiness", "", isSandboxReady)
 	if done {
 		t.Error("expected done=false for non-sandbox object")
 	}
@@ -2531,8 +2956,8 @@ func TestMonitorPortForward_Timeout(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}
@@ -2604,8 +3029,8 @@ func TestMonitorPortForward_Timeout_SetsLastError(t *testing.T) {
 	errChan := make(chan error, 1)
 	stderrBuf := &syncBuffer{}
 
-	ts := &tunnelStrategy{
-		connector:           conn,
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
 		log:                 logr.Discard(),
 		portForwardStopChan: stopChan,
 	}
@@ -2631,6 +3056,51 @@ func TestMonitorPortForward_Timeout_SetsLastError(t *testing.T) {
 	}
 	if conn.lastError != nil && !errors.Is(conn.lastError, ErrPortForwardDied) {
 		t.Errorf("expected ErrPortForwardDied in lastError, got: %v", conn.lastError)
+	}
+}
+
+// An old ForwardPorts that outlives its stop signal must not report death
+// once a reconnect has replaced its tunnel.
+func TestMonitorPortForward_TimeoutAfterReplacementIgnored(t *testing.T) {
+	conn := newConnector(connectorConfig{
+		Strategy:          &DirectStrategy{URL: "http://127.0.0.1:12345"},
+		Namespace:         "default",
+		ServerPort:        8888,
+		RequestTimeout:    5 * time.Second,
+		PerAttemptTimeout: 2 * time.Second,
+		Log:               logr.Discard(),
+	})
+	conn.mu.Lock()
+	conn.baseURL = "http://127.0.0.1:12345"
+	conn.mu.Unlock()
+	conn.SetGRPCTarget("127.0.0.1:12346")
+
+	oldStopChan := make(chan struct{})
+	ts := &portForwardTunnel{
+		onDied:              conn.SetLastError,
+		log:                 logr.Discard(),
+		portForwardStopChan: make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ts.monitorPortForward(make(chan error), &syncBuffer{}, "test-pod", oldStopChan)
+		close(done)
+	}()
+
+	close(oldStopChan)
+
+	select {
+	case <-done:
+	case <-time.After(monitorExitTimeout + 5*time.Second):
+		t.Fatal("monitorPortForward did not exit after stop signal timeout")
+	}
+
+	if conn.BaseURL() != "http://127.0.0.1:12345" {
+		t.Error("stale monitor should not have cleared baseURL")
+	}
+	if got := grpcTarget(conn); got != "127.0.0.1:12346" {
+		t.Errorf("stale monitor should not have cleared grpcTarget, got %q", got)
 	}
 }
 
@@ -2836,6 +3306,9 @@ func TestOpen_ReconnectTransientClaimError(t *testing.T) {
 	if !errors.Is(err, ErrOrphanedClaim) {
 		t.Errorf("expected ErrOrphanedClaim, got: %v", err)
 	}
+	if errors.Is(err, ErrSandboxDeleted) {
+		t.Errorf("a transient claim error must not report ErrSandboxDeleted, got: %v", err)
+	}
 	if c.ClaimName() == "" {
 		t.Error("expected claimName preserved for Close retry")
 	}
@@ -2968,7 +3441,7 @@ func TestDisconnect_Timeout(t *testing.T) {
 }
 
 func TestDeleteClaim_EmptyName(t *testing.T) {
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck
+	extensionsCS := fakeextensions.NewClientset()
 	deleteCalled := false
 	extensionsCS.PrependReactor("delete", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
 		deleteCalled = true
@@ -3109,6 +3582,59 @@ func TestConnector_SetPodIP(t *testing.T) {
 			c.mu.Unlock()
 			if gotPodIP != tc.expected {
 				t.Errorf("expected podIP %q, got %q", tc.expected, gotPodIP)
+			}
+		})
+	}
+}
+
+// TestWaitForSandboxReady_Public covers the context-only API without tracing setup.
+func TestWaitForSandboxReady_Public(t *testing.T) {
+	for _, scenario := range []string{"ready", "becomes ready", "canceled", "deadline", "deleted"} {
+		t.Run(scenario, func(t *testing.T) {
+			opts := defaultTestOpts()
+			s, agentsCS, _ := newTestSandbox(opts)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ready := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: opts.Namespace},
+				Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{
+					{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue},
+				}},
+			}
+			agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+				list := &sandboxv1beta1.SandboxList{}
+				if scenario == "ready" {
+					list.Items = append(list.Items, *ready)
+				}
+				return true, list, nil
+			})
+			fw := watch.NewRaceFreeFake()
+			defer fw.Stop()
+			agentsCS.PrependWatchReactor("sandboxes", func(_ ktesting.Action) (bool, watch.Interface, error) {
+				switch scenario {
+				case "becomes ready":
+					fw.Modify(ready)
+				case "canceled":
+					cancel()
+				case "deleted":
+					fw.Delete(ready)
+				}
+				return true, fw, nil
+			})
+			var want error
+			switch scenario {
+			case "canceled":
+				want = context.Canceled
+			case "deadline":
+				var deadlineCancel context.CancelFunc
+				ctx, deadlineCancel = context.WithDeadline(ctx, time.Now().Add(-time.Second))
+				defer deadlineCancel()
+				want = context.DeadlineExceeded
+			case "deleted":
+				want = ErrSandboxDeleted
+			}
+			if err := s.k8s.WaitForSandboxReady(ctx, "target", opts.Namespace); !errors.Is(err, want) {
+				t.Fatalf("got %v, want %v", err, want)
 			}
 		})
 	}

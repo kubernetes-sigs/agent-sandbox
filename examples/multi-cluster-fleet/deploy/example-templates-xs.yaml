@@ -1,0 +1,161 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# Operator-managed SandboxTemplates for the XS profile (`fleet-spec-xs.yaml`).
+#
+# Assumes sandbox-pool was created with `--sandbox=type=gvisor` (which is the
+# default in run-xs-e2e.sh Phase 2 when USE_GVISOR=yes is set — matches
+# the single-cluster baseline). Two things follow from that:
+#   1. runtimeClassName: gvisor — required so containerd knows to use runsc.
+#   2. Toleration for sandbox.gke.io/runtime=gvisor:NoSchedule — required so
+#      the pod is scheduleable onto the gVisor-tainted pool.
+# Without BOTH, pods will stay Pending forever.
+#
+# If you disabled gvisor (USE_GVISOR=no when creating clusters), remove
+# runtimeClassName + the tolerations block on every template below.
+#
+# Apply on each XS cluster BEFORE running `fleetctl apply -f demo/fleet-spec-xs.yaml`.
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sb-tmpl-a
+  namespace: multi-cluster-fleet
+spec:
+  podTemplate:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: sandbox-pool
+      runtimeClassName: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: sandbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits:   {cpu: 200m, memory: 128Mi}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sb-tmpl-b
+  namespace: multi-cluster-fleet
+spec:
+  podTemplate:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: sandbox-pool
+      runtimeClassName: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: sandbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits:   {cpu: 200m, memory: 128Mi}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sb-tmpl-c
+  namespace: multi-cluster-fleet
+spec:
+  podTemplate:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: sandbox-pool
+      runtimeClassName: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: sandbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits:   {cpu: 200m, memory: 128Mi}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sb-tmpl-d
+  namespace: multi-cluster-fleet
+spec:
+  podTemplate:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: sandbox-pool
+      runtimeClassName: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: sandbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits:   {cpu: 200m, memory: 128Mi}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sb-tmpl-e
+  namespace: multi-cluster-fleet
+spec:
+  podTemplate:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: sandbox-pool
+      runtimeClassName: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: sandbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits:   {cpu: 200m, memory: 128Mi}
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: sb-tmpl-f
+  namespace: multi-cluster-fleet
+spec:
+  podTemplate:
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: sandbox-pool
+      runtimeClassName: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: sandbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits:   {cpu: 200m, memory: 128Mi}

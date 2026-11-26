@@ -16,6 +16,7 @@ linters:
     - misspell
     - modernize
     - nilnesserr
+    - reassign
     - recvcheck
     - revive
     - sloglint

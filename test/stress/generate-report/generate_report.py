@@ -160,6 +160,33 @@ def metrics_timeseries(conn, metrics_path, metrics, labels=None, group_by=None, 
     return conn.execute(sql).fetchall()
 
 
+def containerd_operations_by_phase(conn, metrics_path):
+    timers = [
+        ("containerd_cri_sandbox_runtime_create_seconds", "sandbox_runtime_create"),
+        ("containerd_cri_sandbox_create_network_seconds", "sandbox_create_network"),
+        # Containerd's timer library appends a second _seconds suffix.
+        ("containerd_cri_network_plugin_operations_duration_seconds_seconds", "network_plugin_operations"),
+    ]
+    rows = metrics_by_phase(
+        conn, metrics_path,
+        metrics=[f"{metric}_{suffix}" for metric, _ in timers for suffix in ("count", "sum")],
+        labels={"runtime": "runtime", "operation_type": "operation_type"},
+        group_by=["operation_type"],
+        where="source = 'containerd'")
+    operations = []
+    for phase, operation_type, *values in rows:
+        for i, (_, operation) in enumerate(timers):
+            count, duration = values[2 * i:2 * i + 2]
+            if count > 0:
+                operations.append({
+                    "phase_name": phase,
+                    "operation_type": f"{operation}_{operation_type}" if operation_type else operation,
+                    "count_delta": int(count),
+                    "avg_latency_ms": duration / count * 1000,
+                })
+    return operations
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate stress test bottleneck report.")
     parser.add_argument("--input-dir", required=True, help="Directory containing stress test outputs (summary.json, metrics.jsonl)")
@@ -253,7 +280,7 @@ def main():
                  "kubelet_runtime_operations_duration_seconds_sum"],
         labels={"operation_type": "operation_type"})
     cri_ops_raw = [r for r in cri_ops_raw if r[2] > 0]
-    cri_ops_raw.sort(key=lambda r: (r[0], -r[2]))
+    cri_ops_raw.sort(key=lambda r: (phase_order_map_early[r[0]], -r[2]))
 
     cri_ops = []
     for row in cri_ops_raw:
@@ -265,6 +292,10 @@ def main():
             "count_delta": int(count_delta),
             "avg_latency_ms": avg_latency_ms
         })
+
+    print("Querying containerd operations by phase...")
+    containerd_ops = containerd_operations_by_phase(conn, metrics_path_str)
+    containerd_ops.sort(key=lambda r: (phase_order_map_early[r["phase_name"]], -r["count_delta"]))
 
     print("Querying CRI timeseries...")
     cri_ts_raw = metrics_timeseries(
@@ -950,7 +981,27 @@ def main():
     # cpu-seconds by mode, so busy% = 1 - (idle + iowait) / total. iowait is
     # carried separately: it is the waiting-on-disk share, the node-level
     # number that distinguishes I/O starvation from CPU starvation.
+    # Node roles come from the node-role.kubernetes.io/* labels in the watch
+    # stream (the same test the stress tool's inspectCluster applies). The
+    # node name is only a fallback: kOps names GCE nodes after the instance
+    # group ("control-plane-us-central1-a-xxxx"), but AWS nodes after the
+    # EC2 instance id ("i-0123..."), which says nothing about the role.
+    node_roles = {}
+    if watch_file.exists():
+        node_roles_raw = conn.execute(f"""
+            SELECT
+                CAST(object->'metadata'->>'name' AS VARCHAR) as name,
+                bool_or(coalesce(list_has_any(json_keys(object, '$.metadata.labels'),
+                    ['node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master']), false)) as is_control_plane
+            FROM {json_scan(watch_path_str, WATCH_COLUMNS)}
+            WHERE resource = 'nodes'
+            GROUP BY name
+        """).fetchall()
+        node_roles = {name: "control-plane" if is_control_plane else "worker" for name, is_control_plane in node_roles_raw}
+
     def node_role(instance):
+        if instance in node_roles:
+            return node_roles[instance]
         return "control-plane" if ("control-plane" in instance or "master" in instance) else "worker"
 
     def cpu_shares(modes):
@@ -1373,6 +1424,7 @@ def main():
         "active_page": "cri",
         "summary": summary,
         "cri_ops": cri_ops,
+        "containerd_ops": containerd_ops,
         "chart_data": cri_chart_data,
         "phases": js_phases
     }

@@ -16,7 +16,9 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -24,8 +26,13 @@ import (
 
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace/noop"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	ktesting "k8s.io/client-go/testing"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -36,8 +43,8 @@ import (
 
 func newTestClient(t *testing.T) (*Client, *fakeextensions.Clientset) {
 	t.Helper()
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	opts := Options{
 		WarmPoolName:        "test-warmpool",
 		Namespace:           "default",
@@ -168,6 +175,34 @@ func TestClient_ListAllSandboxes(t *testing.T) {
 	}
 }
 
+func TestClient_ListAllSandboxes_LabelSelector(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []ListOption
+		want string
+	}{
+		{name: "no selector"},
+		{name: "selector", opts: []ListOption{WithLabelSelector("app=agent,tier!=dev")}, want: "app=agent,tier!=dev"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, extensionsCS := newTestClient(t)
+
+			var got string
+			extensionsCS.PrependReactor("list", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+				got = action.(ktesting.ListAction).GetListRestrictions().Labels.String()
+				return true, &extv1beta1.SandboxClaimList{}, nil
+			})
+
+			if _, err := c.ListAllSandboxes(context.Background(), "default", tc.opts...); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("label selector = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClient_DeleteSandbox_Untracked(t *testing.T) {
 	c, extensionsCS := newTestClient(t)
 
@@ -218,9 +253,201 @@ func TestClient_CreateSandbox_InvalidWarmPoolName(t *testing.T) {
 	}
 }
 
+func TestClient_CreateSandbox_CreateOptions(t *testing.T) {
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
+
+	baseOpts := Options{
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		Quiet:               true,
+		Labels:              map[string]string{"base": "keep", "override": "old"},
+		PodLabels:           map[string]string{"sandbox.users.io/base": "keep", "sandbox.users.io/override": "old"},
+		PodAnnotations:      map[string]string{"example.com/base": "keep", "example.com/override": "old"},
+		Env:                 []extv1beta1.EnvVar{{Name: "BASE", Value: "1"}},
+	}
+	baseOpts.setDefaults()
+	baseOpts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		ga := action.(ktesting.GetAction)
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: ga.GetName()},
+			},
+		}, nil
+	})
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("placeholder"))
+
+	var created *extv1beta1.SandboxClaim
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		created = action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+		return false, nil, nil
+	})
+
+	c, err := NewClient(context.Background(), baseOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vct := []sandboxv1beta1.PersistentVolumeClaimTemplate{
+		{
+			EmbeddedObjectMetadata: sandboxv1beta1.EmbeddedObjectMetadata{Name: "data"},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			},
+		},
+	}
+
+	sb, err := c.CreateSandbox(
+		context.Background(),
+		"test-warmpool",
+		"default",
+		WithClaimName("custom-claim"),
+		WithClaimLabels(map[string]string{"override": "new", "extra": "1"}),
+		WithPodLabels(map[string]string{"sandbox.users.io/override": "new", "sandbox.users.io/extra": "1"}),
+		WithPodAnnotations(map[string]string{"example.com/override": "new", "example.com/extra": "1"}),
+		WithClaimEnv([]extv1beta1.EnvVar{{Name: "CALL", Value: "2"}}),
+		WithVolumeClaimTemplates(vct),
+	)
+	if err != nil {
+		t.Fatalf("CreateSandbox with CreateOptions: %v", err)
+	}
+	if sb.ClaimName() != "custom-claim" {
+		t.Errorf("sb.ClaimName() = %q, want %q", sb.ClaimName(), "custom-claim")
+	}
+	if created == nil {
+		t.Fatal("expected SandboxClaim to be created")
+	}
+	wantLabels := map[string]string{
+		"base":                        "keep",
+		"override":                    "new",
+		"extra":                       "1",
+		sandboxv1beta1.CreatedByLabel: "go-client",
+	}
+	if !reflect.DeepEqual(created.Labels, wantLabels) {
+		t.Errorf("created.Labels = %v, want %v", created.Labels, wantLabels)
+	}
+	wantPodLabels := map[string]string{
+		"sandbox.users.io/base":     "keep",
+		"sandbox.users.io/override": "new",
+		"sandbox.users.io/extra":    "1",
+	}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Labels, wantPodLabels) {
+		t.Errorf("AdditionalPodMetadata.Labels = %v, want %v", created.Spec.AdditionalPodMetadata.Labels, wantPodLabels)
+	}
+	wantPodAnnotations := map[string]string{
+		"example.com/base":     "keep",
+		"example.com/override": "new",
+		"example.com/extra":    "1",
+	}
+	if !reflect.DeepEqual(created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations) {
+		t.Errorf("AdditionalPodMetadata.Annotations = %v, want %v", created.Spec.AdditionalPodMetadata.Annotations, wantPodAnnotations)
+	}
+	wantEnv := []extv1beta1.EnvVar{{Name: "CALL", Value: "2"}}
+	if !reflect.DeepEqual(created.Spec.Env, wantEnv) {
+		t.Errorf("created.Spec.Env = %v, want %v", created.Spec.Env, wantEnv)
+	}
+	if len(created.Spec.VolumeClaimTemplates) != 1 || created.Spec.VolumeClaimTemplates[0].Name != "data" {
+		t.Errorf("created.Spec.VolumeClaimTemplates = %+v, want [data]", created.Spec.VolumeClaimTemplates)
+	}
+
+	// Ensure Client base options were not mutated by per-call merges.
+	if c.opts.Labels["override"] != "old" {
+		t.Errorf("c.opts.Labels was mutated: %v", c.opts.Labels)
+	}
+	if c.opts.PodLabels["sandbox.users.io/override"] != "old" {
+		t.Errorf("c.opts.PodLabels was mutated: %v", c.opts.PodLabels)
+	}
+	if c.opts.PodAnnotations["example.com/override"] != "old" {
+		t.Errorf("c.opts.PodAnnotations was mutated: %v", c.opts.PodAnnotations)
+	}
+}
+
+func TestClient_CreateSandbox_WithClaimName_AdoptsExisting(t *testing.T) {
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
+
+	opts := Options{
+		Namespace:           "default",
+		APIURL:              "http://localhost:9999",
+		SandboxReadyTimeout: 2 * time.Second,
+		Quiet:               true,
+	}
+	opts.setDefaults()
+	opts.K8sHelper = &K8sHelper{
+		AgentsClient:     agentsCS.AgentsV1beta1(),
+		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
+		Log:              logr.Discard(),
+	}
+
+	const (
+		claimName   = "adopted-claim"
+		sandboxName = "adopted-sandbox"
+	)
+
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, k8serrors.NewAlreadyExists(schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxclaims"}, claimName)
+	})
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default"},
+			Spec: extv1beta1.SandboxClaimSpec{
+				WarmPoolRef: extv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"},
+			},
+			Status: extv1beta1.SandboxClaimStatus{
+				SandboxStatus: extv1beta1.SandboxStatus{Name: sandboxName},
+			},
+		}, nil
+	})
+	agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		return true, &sandboxv1beta1.SandboxList{Items: []sandboxv1beta1.Sandbox{*readySandbox(sandboxName)}}, nil
+	})
+
+	c, err := NewClient(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sb, err := c.CreateSandbox(context.Background(), "test-warmpool", "default", WithClaimName(claimName), WithAdoptExisting())
+	if err != nil {
+		t.Fatalf("CreateSandbox adopting existing claim: %v", err)
+	}
+	if sb.ClaimName() != claimName {
+		t.Errorf("sb.ClaimName() = %q, want %q", sb.ClaimName(), claimName)
+	}
+	if sb.SandboxName() != sandboxName {
+		t.Errorf("sb.SandboxName() = %q, want %q", sb.SandboxName(), sandboxName)
+	}
+	if _, named := c.namedClaims[Key{Namespace: "default", ClaimName: claimName}]; !named {
+		t.Error("CreateSandbox with WithClaimName should record the claim as named on the Client")
+	}
+}
+
+func TestClient_CreateSandbox_InvalidCreateOptions(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+	createCalled := false
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+		createCalled = true
+		return false, nil, nil
+	})
+	if _, err := c.CreateSandbox(context.Background(), "test-warmpool", "default", WithClaimName("Invalid_Name")); err == nil {
+		t.Fatal("expected validation error for invalid ClaimName")
+	}
+	if createCalled {
+		t.Error("CreateSandbox should fail validation before creating a claim")
+	}
+}
+
 func TestClient_GetSandbox_Reattach_WithoutClientWarmPoolName(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	const (
 		claimName   = "reattach-claim"
@@ -343,8 +570,8 @@ func TestClient_DeleteSandbox_Tracked(t *testing.T) {
 // redundant transport (Disconnect) and NOT delete the shared claim — otherwise
 // it deletes the sandbox out from under the tracked handle it returns.
 func TestClient_CreateSandbox_RedundantHandleKeepsSharedClaim(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	opts := Options{
 		WarmPoolName:        "test-warmpool",
@@ -436,8 +663,8 @@ func TestClient_CreateSandbox_RedundantHandleKeepsSharedClaim(t *testing.T) {
 // attaching), so by the time it reaches trackOrAdoptRace the adopt branch is
 // guaranteed to fire.
 func TestClient_GetSandbox_AdoptsRacingHandleKeepsSharedClaim(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 
 	opts := Options{
 		WarmPoolName:        "test-warmpool",
@@ -538,10 +765,120 @@ func TestClient_EnableAutoCleanup_Idempotent(t *testing.T) {
 	stop2()
 }
 
+// Signal cleanup must delete generated-name claims but only disconnect named
+// claims, including when the tracked handle came from GetSandbox and so has
+// no Options.ClaimName.
+func TestClient_SignalCleanup_KeepsNamedClaims(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+
+	var deleted []string
+	extensionsCS.PrependReactor("delete", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		deleted = append(deleted, action.(ktesting.DeleteAction).GetName())
+		return true, nil, nil
+	})
+
+	handles := map[string]*Sandbox{}
+	for _, name := range []string{"sandbox-claim-gen", "my-named-claim"} {
+		sb := &Sandbox{
+			k8s:  c.k8s,
+			log:  logr.Discard(),
+			opts: c.opts,
+			connector: &connector{
+				strategy:   &DirectStrategy{URL: "http://fake"},
+				httpClient: &http.Client{},
+			},
+			inflightOps:  &sync.WaitGroup{},
+			lifecycleSem: make(chan struct{}, 1),
+		}
+		sb.connector.baseURL = "http://fake"
+		sb.claimName = name
+		sb.sandboxName = "sb-" + name
+		handles[name] = sb
+		c.registry[Key{Namespace: "default", ClaimName: name}] = sb
+	}
+	c.namedClaims[Key{Namespace: "default", ClaimName: "my-named-claim"}] = struct{}{}
+
+	c.closeTracked(context.Background(), true)
+
+	if !reflect.DeepEqual(deleted, []string{"sandbox-claim-gen"}) {
+		t.Errorf("deleted claims = %v, want only the generated-name claim", deleted)
+	}
+	if handles["my-named-claim"].IsReady() {
+		t.Error("named claim's handle should be disconnected")
+	}
+	if len(c.registry) != 0 {
+		t.Errorf("expected empty registry, got %d entries", len(c.registry))
+	}
+}
+
+func TestNewClient_RejectsPerSandboxClaimOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"ClaimName", Options{ClaimName: "my-claim"}},
+		{"AdoptExisting", Options{AdoptExisting: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewClient(context.Background(), tc.opts); err == nil || !strings.Contains(err.Error(), "per-sandbox") {
+				t.Fatalf("expected per-sandbox rejection, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestClient_CreateSandbox_PerCallLifetimeAndTimeout(t *testing.T) {
+	c, extensionsCS := newTestClient(t)
+	c.opts.ShutdownAfter = time.Hour
+	agentsCS := fakeagents.NewClientset()
+	c.k8s.AgentsClient = agentsCS.AgentsV1beta1()
+	setupWatchWithReactor(agentsCS, extensionsCS, readySandbox("placeholder"))
+	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		name := action.(ktesting.GetAction).GetName()
+		return true, &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Status:     extv1beta1.SandboxClaimStatus{SandboxStatus: extv1beta1.SandboxStatus{Name: name}},
+		}, nil
+	})
+	var created []*extv1beta1.SandboxClaim
+	extensionsCS.PrependReactor("create", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
+		claim := action.(ktesting.CreateAction).GetObject().(*extv1beta1.SandboxClaim)
+		created = append(created, claim)
+		return false, nil, nil
+	})
+
+	sb, err := c.CreateSandbox(context.Background(), "test-warmpool", "default",
+		WithClaimName("no-ttl"), WithShutdownAfter(0), WithSandboxReadyTimeout(7*time.Second))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if created[0].Spec.Lifecycle != nil {
+		t.Errorf("WithShutdownAfter(0) should clear the Client-level lifetime, got %+v", created[0].Spec.Lifecycle)
+	}
+	if sb.opts.SandboxReadyTimeout != 7*time.Second {
+		t.Errorf("SandboxReadyTimeout = %s, want 7s", sb.opts.SandboxReadyTimeout)
+	}
+
+	if _, err := c.CreateSandbox(context.Background(), "test-warmpool", "default", WithClaimName("client-ttl")); err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if created[1].Spec.Lifecycle == nil || created[1].Spec.Lifecycle.ShutdownTime == nil {
+		t.Error("without WithShutdownAfter the Client-level ShutdownAfter should apply")
+	}
+
+	sb, err = c.CreateSandbox(context.Background(), "test-warmpool", "default", WithClaimName("zero-timeout"), WithSandboxReadyTimeout(0))
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if sb.opts.SandboxReadyTimeout != c.opts.SandboxReadyTimeout {
+		t.Errorf("WithSandboxReadyTimeout(0): SandboxReadyTimeout = %s, want Client value %s", sb.opts.SandboxReadyTimeout, c.opts.SandboxReadyTimeout)
+	}
+}
+
 // TestResolveSandboxName_FromClaimStatus verifies the new resolution path.
 func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	k8s := &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -560,7 +897,7 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 		}, nil
 	})
 
-	name, err := k8s.resolveSandboxName(context.Background(), "my-claim", "default", 5*time.Second, noop.NewTracerProvider().Tracer("test"), "test")
+	name, err := k8s.resolveSandboxName(context.Background(), "my-claim", "default", "", 5*time.Second, noop.NewTracerProvider().Tracer("test"), "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,11 +906,248 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 	}
 }
 
+// claimNotReady returns a claim whose Ready condition is False for reason.
+func claimNotReady(name, reason string) *extv1beta1.SandboxClaim {
+	return &extv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Status: extv1beta1.SandboxClaimStatus{
+			Conditions: []metav1.Condition{{
+				Type:    string(sandboxv1beta1.SandboxConditionReady),
+				Status:  metav1.ConditionFalse,
+				Reason:  reason,
+				Message: "detail",
+			}},
+		},
+	}
+}
+
+func TestClaimFailure(t *testing.T) {
+	for _, tc := range []struct {
+		reason string
+		want   error
+	}{
+		{"TemplateNotFound", ErrTemplateNotFound},
+		{"WarmPoolNotFound", ErrWarmPoolNotFound},
+		{"InvalidMetadata", ErrClaimFailed},
+		{"EnvVarsInjectionRejected", ErrClaimFailed},
+		{"VolumeClaimTemplatesError", ErrClaimFailed},
+		{"ClaimExpired", ErrClaimFailed},
+		{"SandboxExpired", ErrClaimFailed},
+		{"InvalidConfiguration", ErrClaimFailed},
+		{"PodFailed", ErrClaimFailed},
+		{"PodSucceeded", ErrClaimFailed},
+		// The controller retries these, so waiting can still succeed.
+		{"AdoptionPending", nil},
+		{"SandboxMissing", nil},
+		{"SandboxNotReady", nil},
+		{"ReconcilerError", nil},
+		// Transient while the Pod is being deleted. The outcome is on Finished.
+		{sandboxv1beta1.SandboxReasonPodTerminating, nil},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			err := claimFailure(claimNotReady("c", tc.reason))
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("expected no failure, got: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("expected %v, got: %v", tc.want, err)
+			}
+		})
+	}
+
+	t.Run("no conditions", func(t *testing.T) {
+		if err := claimFailure(&extv1beta1.SandboxClaim{}); err != nil {
+			t.Fatalf("expected no failure, got: %v", err)
+		}
+	})
+	t.Run("ready", func(t *testing.T) {
+		claim := claimNotReady("c", "ClaimExpired")
+		claim.Status.Conditions[0].Status = metav1.ConditionTrue
+		if err := claimFailure(claim); err != nil {
+			t.Fatalf("expected no failure for Ready=True, got: %v", err)
+		}
+	})
+	t.Run("stale generation", func(t *testing.T) {
+		claim := claimNotReady("c", "WarmPoolNotFound")
+		claim.Generation = 2
+		claim.Status.Conditions[0].ObservedGeneration = 1
+		if err := claimFailure(claim); err != nil {
+			t.Fatalf("expected no failure for a stale condition, got: %v", err)
+		}
+		claim.Status.Conditions[0].ObservedGeneration = 2
+		if err := claimFailure(claim); !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound for a current condition, got: %v", err)
+		}
+	})
+}
+
+// A claim that can never become ready must fail fast instead of waiting out
+// the timeout, whether it is seen by the initial get or by the watch.
+func TestResolveSandboxName_FailsFastOnTerminalClaim(t *testing.T) {
+	newHelper := func() (*K8sHelper, *fakeextensions.Clientset) {
+		extensionsCS := fakeextensions.NewClientset()
+		return &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}, extensionsCS
+	}
+	tracer := noop.NewTracerProvider().Tracer("test")
+
+	t.Run("get", func(t *testing.T) {
+		k8s, extensionsCS := newHelper()
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, claimNotReady("c", "WarmPoolNotFound"), nil
+		})
+
+		_, err := k8s.resolveSandboxName(context.Background(), "c", "default", "", 5*time.Second, tracer, "test")
+		if !errors.Is(err, ErrWarmPoolNotFound) {
+			t.Fatalf("expected ErrWarmPoolNotFound, got: %v", err)
+		}
+	})
+
+	t.Run("watch", func(t *testing.T) {
+		k8s, extensionsCS := newHelper()
+		extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+			return true, &extv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default"}}, nil
+		})
+		fw := watch.NewFake()
+		extensionsCS.PrependWatchReactor("sandboxclaims", ktesting.DefaultWatchReactor(fw, nil))
+		go fw.Modify(claimNotReady("c", "InvalidMetadata"))
+
+		_, err := k8s.resolveSandboxName(context.Background(), "c", "default", "", 5*time.Second, tracer, "test")
+		if !errors.Is(err, ErrClaimFailed) {
+			t.Fatalf("expected ErrClaimFailed, got: %v", err)
+		}
+	})
+}
+
+// With a pinned UID, a same-name replacement or a terminating claim must fail
+// resolution instead of binding the handle to another claim's sandbox.
+func TestResolveSandboxName_PinnedUID(t *testing.T) {
+	tracer := noop.NewTracerProvider().Tracer("test")
+	resolved := func(uid types.UID, terminating bool) *extv1beta1.SandboxClaim {
+		claim := &extv1beta1.SandboxClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", UID: uid},
+			Status:     extv1beta1.SandboxClaimStatus{SandboxStatus: extv1beta1.SandboxStatus{Name: "sb-" + string(uid)}},
+		}
+		if terminating {
+			now := metav1.Now()
+			claim.DeletionTimestamp = &now
+		}
+		return claim
+	}
+
+	for _, tc := range []struct {
+		name    string
+		claim   *extv1beta1.SandboxClaim
+		wantErr bool
+	}{
+		{"same uid resolves", resolved("uid-1", false), false},
+		{"replacement fails", resolved("uid-2", false), true},
+		{"terminating fails", resolved("uid-1", true), true},
+	} {
+		for _, path := range []string{"get", "watch"} {
+			t.Run(tc.name+"/"+path, func(t *testing.T) {
+				extensionsCS := fakeextensions.NewClientset()
+				k8s := &K8sHelper{ExtensionsClient: extensionsCS.ExtensionsV1beta1(), Log: logr.Discard()}
+				if path == "get" {
+					extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+						return true, tc.claim, nil
+					})
+				} else {
+					extensionsCS.PrependReactor("get", "sandboxclaims", func(_ ktesting.Action) (bool, runtime.Object, error) {
+						return true, &extv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", UID: "uid-1"}}, nil
+					})
+					fw := watch.NewFake()
+					extensionsCS.PrependWatchReactor("sandboxclaims", ktesting.DefaultWatchReactor(fw, nil))
+					go fw.Modify(tc.claim)
+				}
+
+				name, err := k8s.resolveSandboxName(context.Background(), "c", "default", "uid-1", 5*time.Second, tracer, "test")
+				if !tc.wantErr {
+					if err != nil || name != "sb-uid-1" {
+						t.Fatalf("resolveSandboxName() = %q, %v; want sb-uid-1, nil", name, err)
+					}
+					return
+				}
+				if !errors.Is(err, ErrSandboxDeleted) {
+					t.Fatalf("expected ErrSandboxDeleted, got name=%q err=%v", name, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxFailure(t *testing.T) {
+	notReady := func(reason string) *sandboxv1beta1.Sandbox {
+		return &sandboxv1beta1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "sb", Generation: 2},
+			Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				ObservedGeneration: 2,
+			}}},
+		}
+	}
+	if err := sandboxFailure(notReady("PodFailed")); !errors.Is(err, ErrClaimFailed) {
+		t.Fatalf("expected ErrClaimFailed, got: %v", err)
+	}
+	if err := sandboxFailure(notReady("DependenciesNotReady")); err != nil {
+		t.Fatalf("expected no failure for a transient reason, got: %v", err)
+	}
+	if err := sandboxFailure(notReady(sandboxv1beta1.SandboxReasonPodTerminating)); err != nil {
+		t.Fatalf("expected no failure while the Pod is terminating, got: %v", err)
+	}
+	stale := notReady("PodFailed")
+	stale.Status.Conditions[0].ObservedGeneration = 1
+	if err := sandboxFailure(stale); err != nil {
+		t.Fatalf("expected no failure for a stale condition, got: %v", err)
+	}
+}
+
+// A Sandbox that can never become ready must fail fast instead of waiting out
+// the timeout, whether it is seen by the initial list or by the watch.
+func TestWaitForSandboxReady_FailsFastOnTerminalSandbox(t *testing.T) {
+	failed := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: "default"},
+		Status: sandboxv1beta1.SandboxStatus{Conditions: []metav1.Condition{{
+			Type:   string(sandboxv1beta1.SandboxConditionReady),
+			Status: metav1.ConditionFalse,
+			Reason: sandboxv1beta1.SandboxReasonPodFailed,
+		}}},
+	}
+	for _, scenario := range []string{"list", "watch"} {
+		t.Run(scenario, func(t *testing.T) {
+			agentsCS := fakeagents.NewClientset()
+			k8s := &K8sHelper{AgentsClient: agentsCS.AgentsV1beta1(), Log: logr.Discard()}
+			agentsCS.PrependReactor("list", "sandboxes", func(_ ktesting.Action) (bool, runtime.Object, error) {
+				list := &sandboxv1beta1.SandboxList{}
+				if scenario == "list" {
+					list.Items = append(list.Items, *failed)
+				}
+				return true, list, nil
+			})
+			fw := watch.NewRaceFreeFake()
+			defer fw.Stop()
+			agentsCS.PrependWatchReactor("sandboxes", func(_ ktesting.Action) (bool, watch.Interface, error) {
+				fw.Modify(failed)
+				return true, fw, nil
+			})
+
+			_, err := k8s.waitForSandboxReady(context.Background(), "target", "default", 5*time.Second, 0, "", "", noop.NewTracerProvider().Tracer("test"), "test")
+			if !errors.Is(err, ErrClaimFailed) {
+				t.Fatalf("expected ErrClaimFailed, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestWaitForSandboxReady_UsesSandboxName verifies the ready check uses the
 // resolved sandbox name, not the claim name.
 func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
-	agentsCS := fakeagents.NewSimpleClientset()         //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
-	extensionsCS := fakeextensions.NewSimpleClientset() //nolint:staticcheck // TODO: regenerate clientsets with --with-applyconfig
+	agentsCS := fakeagents.NewClientset()
+	extensionsCS := fakeextensions.NewClientset()
 	k8s := &K8sHelper{
 		AgentsClient:     agentsCS.AgentsV1beta1(),
 		ExtensionsClient: extensionsCS.ExtensionsV1beta1(),
@@ -599,7 +1173,7 @@ func TestWaitForSandboxReady_UsesSandboxName(t *testing.T) {
 		}, nil
 	})
 
-	state, err := k8s.waitForSandboxReady(context.Background(), "warm-pool-sandbox-xyz", "default", 5*time.Second, noop.NewTracerProvider().Tracer("test"), "test")
+	state, err := k8s.waitForSandboxReady(context.Background(), "warm-pool-sandbox-xyz", "default", 5*time.Second, 0, "", "", noop.NewTracerProvider().Tracer("test"), "test")
 	if err != nil {
 		t.Fatal(err)
 	}

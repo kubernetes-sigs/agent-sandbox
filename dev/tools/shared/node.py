@@ -30,6 +30,10 @@ _KNOWN_SHASUMS: dict[tuple[str, str, str], str] = {
     ("v22.22.0", "darwin", "arm64"): "5ed4db0fcf1eaf84d91ad12462631d73bf4576c1377e192d222e48026a902640",
 }
 
+# Older system installs are ignored in favour of the pinned version above.
+# Matches "engines.node" in clients/typescript/agentic-sandbox-client/package.json.
+_MIN_NODE_MAJOR = 22
+
 
 def _verify_sha256(path: str, expected_hex: str) -> None:
     h = hashlib.sha256()
@@ -159,8 +163,24 @@ def install_node(install_dir):
     return bin_dir
 
 
+def _node_major_version(node_path, env):
+    """Returns the major version reported by `node --version`, or None if unknown."""
+    try:
+        result = subprocess.run(
+            [node_path, "--version"],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        # Output looks like "v22.22.0".
+        return int(result.stdout.strip().lstrip("v").split(".")[0])
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        return None
+
+
 def ensure_node(repo_root, env):
     """Ensures Node.js and npm are available, installing locally if needed.
+
+    The system npm is used only if the system node is at least
+    _MIN_NODE_MAJOR; otherwise a local installation is used.
 
     Updates env["PATH"] if a local installation is used, then resolves the
     full paths of npm and npx via shutil.which so callers can pass them
@@ -169,13 +189,25 @@ def ensure_node(repo_root, env):
     Returns:
         (npm_path, npx_path) tuple of absolute paths, or (None, None) on failure.
     """
-    # Check if npm is already available in PATH
+    # Check if npm is already available in PATH, backed by a recent enough node
     npm_path = shutil.which("npm")
+    use_system_npm = False
+    if not npm_path:
+        print("npm not found in PATH.")
+    else:
+        system_node = shutil.which("node")
+        node_major = _node_major_version(system_node, env) if system_node else None
+        if node_major is None:
+            print(f"Could not determine the version of system Node.js ({system_node}).")
+        elif node_major < _MIN_NODE_MAJOR:
+            print(f"System Node.js v{node_major} ({system_node}) is older than "
+                  f"the required v{_MIN_NODE_MAJOR}.")
+        else:
+            use_system_npm = True
 
-    if npm_path:
+    if use_system_npm:
         print(f"Using system npm: {npm_path}")
     else:
-        print("npm not found in PATH.")
         node_install_dir = os.path.join(repo_root, ".node")
 
         # Check if we already have a local installation

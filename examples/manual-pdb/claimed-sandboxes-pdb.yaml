@@ -1,0 +1,18 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: claimed-sandboxes
+  # No namespace is set, so `kubectl apply -n <namespace>` chooses it.
+  # Apply it to every namespace where SandboxClaims create pods.
+spec:
+  # Larger than any realistic pod count, so disruptionsAllowed is always 0.
+  # Use an integer: maxUnavailable or a percentage would need a /scale
+  # subresource on Sandbox, which it doesn't have.
+  minAvailable: 1000000
+  # Let drains evict pods that aren't Ready, so a broken sandbox doesn't block node maintenance.
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchExpressions:
+    # Set on every pod that belongs to a SandboxClaim, whether adopted from a warm pool or newly created.
+    - key: agents.x-k8s.io/claim-uid
+      operator: Exists

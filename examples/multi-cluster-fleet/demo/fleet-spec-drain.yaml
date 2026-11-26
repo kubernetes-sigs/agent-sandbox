@@ -1,0 +1,44 @@
+# Copyright 2026 The Kubernetes Authors.
+# Licensed under the Apache License, Version 2.0.
+#
+# DRAIN SPEC — zero models, so the planner emits an empty pool list for every
+# cluster in `cluster_weights` and the members delete everything they own.
+#
+# WHY THIS EXISTS. The obvious teardown (scale members to 0, kubectl delete
+# warmpools, restart members) has a race that silently corrupts the next
+# measurement: on restart a member reads whatever assignment is still in the
+# bucket and starts reconciling it immediately. On 2026-08-09 that pre-warmed
+# 12.4% of the fleet ~21 min before T0 and made the wall clock incomparable.
+#
+# Draining through the fleet layer avoids it completely -- the members never
+# restart, so there is never a stale plan for them to pick up. It also cannot
+# be worked around by publishing first, because `fleetctl apply` builds its
+# registry from FRESH capacity reports: members scaled to 0 go stale and get
+# filtered out of placement.
+#
+#   fleetctl apply -f demo/fleet-spec-drain.yaml
+#   # wait for pods -> 0 on every cluster, THEN apply the real spec
+#
+# There is nothing to bump before using this. The planner derives the
+# assignment generation from the published plan, so both the drain and the
+# real spec that follows it advance on their own.
+
+# max_concurrent / max_pool are > 0 only to satisfy validation; with no models
+# there is nothing to size.
+max_concurrent: 1
+max_pool: 1
+placement_policy: capacity-aware
+min_clusters: 0
+
+# Every cluster that should be drained MUST be listed here. `plan()` emits an
+# empty assignment for each cluster in the registry, and clusters reach the
+# registry via their capacity report or this map.
+cluster_weights:
+  m2-density-a: 1.0
+  m2-density-b: 1.0
+  m2-density-c: 1.0
+  m2-density-d: 1.0
+  m2-density-e: 1.0
+  m2-density-f: 1.0
+
+models: []

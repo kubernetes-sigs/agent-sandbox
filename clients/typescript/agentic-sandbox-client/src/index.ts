@@ -12,19 +12,60 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+export { ProcessHandle, SandboxCommands } from "./commands.js";
 export {
   SandboxClaimFailedError,
+  SandboxClosedError,
+  SandboxConnectionError,
+  type SandboxConnectionErrorKind,
+  type SandboxdApiCode,
+  SandboxdApiError,
+  SandboxdRpcError,
   SandboxError,
   SandboxMetadataError,
+  SandboxNoServiceError,
   SandboxNotFoundError,
   SandboxTemplateNotFoundError,
   SandboxTimeoutError,
   SandboxWarmPoolNotFoundError,
 } from "./exceptions.js";
+export { SandboxFiles } from "./files.js";
 export { Sandbox } from "./sandbox.js";
 export { SandboxClient } from "./sandbox-client.js";
 export type {
   CreateSandboxOptions,
+  DeleteOptions,
+  DirectoryListing,
+  ExecutionResult,
+  FileCallOptions,
+  FileEntry,
+  FileEvent,
+  FileEventType,
+  GetSandboxByNameOptions,
+  GetSandboxOptions,
+  ListOptions,
   Logger,
+  MkdirOptions,
+  MoveCopyOptions,
+  PodMetadata,
+  ProcessCallOptions,
+  ProcessEvent,
+  ProcessOptions,
+  ProcessSignal,
+  PtySize,
+  RunOptions,
+  RuntimeCallOptions,
   SandboxClientOptions,
+  SandboxdConnectivity,
+  SandboxdOptions,
+  SandboxHealth,
+  SandboxMetadata,
+  SandboxStatus,
+  ShutdownPolicy,
+  StartOptions,
+  SuspendResumeOptions,
+  VolumeClaimTemplate,
+  WatchOptions,
+  WriteOptions,
 } from "./types.js";
+export { SandboxWatcher } from "./watcher.js";

@@ -20,14 +20,24 @@ command path, which requires generated stubs + the native grpcio extension.
 """
 
 import datetime
+import io
 import unittest
 from unittest.mock import MagicMock
 
+import requests
+
+from k8s_agent_sandbox import (
+    SandboxdInClusterConnectionConfig as PublicInClusterConfig,
+    SandboxNoServiceError,
+    SandboxServiceUnavailableError,
+)
 from k8s_agent_sandbox.exceptions import SandboxRequestError
 from k8s_agent_sandbox.files.filesystem import Filesystem
 from k8s_agent_sandbox.models import (
     FileEntry,
+    SandboxdInClusterConnectionConfig,
     SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
 )
 
 
@@ -61,6 +71,28 @@ class TestFileEntryParsing(unittest.TestCase):
 
 
 class TestSandboxdConfig(unittest.TestCase):
+    def test_router_config_defaults(self):
+        from k8s_agent_sandbox import SandboxdRouterTunnelConnectionConfig as PublicRouterConfig
+
+        self.assertIs(PublicRouterConfig, SandboxdRouterTunnelConnectionConfig)
+        config = SandboxdRouterTunnelConnectionConfig()
+        self.assertEqual((config.rest_port, config.grpc_port), (8080, 9090))
+        self.assertEqual(config.router_namespace, "agent-sandbox-system")
+        self.assertEqual(config.port_forward_ready_timeout, 30)
+        self.assertIsNone(config.router_auth_token)
+        self.assertFalse(config.pod_ip_routing)
+
+    def test_router_config_validation(self):
+        for values in (
+            {"rest_port": 0}, {"grpc_port": 65536},
+            {"rest_port": 9090}, {"port_forward_ready_timeout": 0},
+            {"router_namespace": ""}, {"router_namespace": "Invalid"},
+            {"router_namespace": "a" * 64}, {"router_namespace": "ns\n"},
+            {"router_auth_token": ""}, {"router_auth_token": "has space"},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                SandboxdRouterTunnelConnectionConfig(**values)
+
     def test_defaults(self):
         cfg = SandboxdPodTunnelConnectionConfig()
         self.assertEqual(cfg.rest_port, 8080)
@@ -69,6 +101,35 @@ class TestSandboxdConfig(unittest.TestCase):
     def test_invalid_port_rejected(self):
         with self.assertRaises(ValueError):
             SandboxdPodTunnelConnectionConfig(rest_port=70000)
+
+    def test_direct_in_cluster_requires_mode_and_has_two_ports(self):
+        self.assertIs(PublicInClusterConfig, SandboxdInClusterConnectionConfig)
+        self.assertTrue(issubclass(SandboxNoServiceError, RuntimeError))
+        self.assertIs(SandboxServiceUnavailableError, SandboxNoServiceError)
+        with self.assertRaises(ValueError):
+            SandboxdInClusterConnectionConfig()
+        config = SandboxdInClusterConnectionConfig(mode="in-cluster-service")
+        self.assertEqual((config.rest_port, config.grpc_port), (8080, 9090))
+
+    def test_direct_in_cluster_maps_deprecated_modes(self):
+        for old, new in (
+            ("service-dns", "in-cluster-service"),
+            ("pod-ip", "in-cluster-pod-ip"),
+        ):
+            with self.subTest(mode=old):
+                with self.assertWarns(DeprecationWarning):
+                    config = SandboxdInClusterConnectionConfig(mode=old)
+                self.assertEqual(config.mode, new)
+
+    def test_direct_in_cluster_rejects_invalid_mode_and_ports(self):
+        for values in (
+            {"mode": "auto"},
+            {"mode": "in-cluster-pod-ip", "rest_port": 0},
+            {"mode": "in-cluster-pod-ip", "grpc_port": 65536},
+            {"mode": "in-cluster-pod-ip", "rest_port": 9090, "grpc_port": 9090},
+        ):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                SandboxdInClusterConnectionConfig(**values)
 
 
 class TestSandboxdFilesystem(unittest.TestCase):
@@ -84,9 +145,38 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self._fs.write("dir/script.py", b"print(1)")
         args, kwargs = self._last_call()
         self.assertEqual(args[0], "PUT")
-        self.assertEqual(args[1], "v1/files/dir%2Fscript.py")
+        self.assertEqual(args[1], "v1/files/dir/script.py")
         self.assertEqual(kwargs["data"], b"print(1)")
         self.assertEqual(kwargs["headers"]["Content-Type"], "application/octet-stream")
+
+    def test_write_streams_raw_body_once(self):
+        source = io.BytesIO(b"skip-streamed payload")
+        source.seek(5)
+
+        self._fs.write("dir/data.bin", source)
+
+        args, kwargs = self._last_call()
+        self.assertEqual(args[0], "PUT")
+        self.assertEqual(b"".join(kwargs["data"]), b"streamed payload")
+        self.assertTrue(kwargs["_disable_retries"])
+        self.assertFalse(source.closed)
+
+    def test_write_append_and_create_only_are_not_retried(self):
+        self._fs.write("log.txt", b"x", append=True)
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/log.txt?append=true"))
+        self.assertTrue(kwargs["_disable_retries"])
+        self.assertNotIn("If-None-Match", kwargs["headers"])
+
+        self._fs.write("new.txt", b"x", create_only=True)
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/new.txt"))
+        self.assertEqual(kwargs["headers"]["If-None-Match"], "*")
+        self.assertTrue(kwargs["_disable_retries"])
+
+    def test_plain_write_stays_retryable(self):
+        self._fs.write("a.txt", b"x")
+        self.assertFalse(self._last_call().kwargs["_disable_retries"])
 
     def test_read_gets_files_endpoint(self):
         resp = MagicMock()
@@ -96,7 +186,7 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(data, b"hello")
         args, _ = self._last_call()
         self.assertEqual(args[0], "GET")
-        self.assertEqual(args[1], "v1/files/notes%2Fhello.txt")
+        self.assertEqual(args[1], "v1/files/notes/hello.txt?type=file")
 
     def test_list_unwraps_directory_listing(self):
         resp = MagicMock()
@@ -115,6 +205,30 @@ class TestSandboxdFilesystem(unittest.TestCase):
         self.assertEqual(entries[0].name, "a.txt")
         self.assertEqual(entries[0].mode, "0644")
         self.assertEqual(entries[1].type, "directory")
+
+    def test_list_recursive_sends_query(self):
+        resp = MagicMock()
+        resp.json.return_value = {"path": "/notes", "entries": []}
+        self._connector.send_request.return_value = resp
+        for kwargs, endpoint in (
+            ({}, "v1/files/notes"),
+            ({"recursive": True}, "v1/files/notes?recursive=true"),
+            ({"recursive": True, "max_depth": 2},
+             "v1/files/notes?recursive=true&max_depth=2"),
+            # max_depth has no effect without recursive.
+            ({"max_depth": 2}, "v1/files/notes"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                self._fs.list("notes", **kwargs)
+                args, _ = self._last_call()
+                self.assertEqual(args[:2], ("GET", endpoint))
+
+    def test_list_rejects_invalid_max_depth(self):
+        for depth in (0, -1, True, "2"):
+            with self.subTest(depth=depth), self.assertRaisesRegex(
+                    ValueError, "max_depth"):
+                self._fs.list("notes", recursive=True, max_depth=depth)
+        self._connector.send_request.assert_not_called()
 
     def test_exists_true_on_head_ok(self):
         resp = MagicMock()
@@ -157,14 +271,171 @@ class TestSandboxdFilesystem(unittest.TestCase):
             self._fs.delete("")
         self._connector.send_request.assert_not_called()
 
+    def test_mkdir_sends_directory_type(self):
+        self._fs.mkdir("a/b")
+        args, _ = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/a/b?type=directory"))
 
-class TestLegacyDeleteUnsupported(unittest.TestCase):
-    def test_delete_raises_on_legacy(self):
+    def test_mkdir_parents(self):
+        self._fs.mkdir("a/b", parents=True)
+        args, _ = self._last_call()
+        self.assertEqual(
+            args[:2], ("PUT", "v1/files/a/b?type=directory&parents=true"))
+
+    def test_move_and_copy_send_destination(self):
+        for op in ("move", "copy"):
+            with self.subTest(op=op):
+                getattr(self._fs, op)("src dir/a.txt", "dst/b.txt")
+                args, _ = self._last_call()
+                self.assertEqual(args[0], "POST")
+                self.assertEqual(
+                    args[1],
+                    f"v1/files/src%20dir/a.txt:{op}?destination=dst%2Fb.txt")
+
+    def test_move_overwrite(self):
+        self._fs.move("a", "b", overwrite=True)
+        args, _ = self._last_call()
+        self.assertEqual(
+            args[1], "v1/files/a:move?destination=b&overwrite=true")
+
+    def test_mkdir_move_copy_reject_empty_arguments(self):
+        for call in (
+            lambda: self._fs.mkdir(""),
+            lambda: self._fs.move("", "b"),
+            lambda: self._fs.copy("a", ""),
+        ):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "must not be empty"):
+                call()
+        self._connector.send_request.assert_not_called()
+
+    def test_extract_sends_tar_body(self):
+        self._fs.extract("src dir", b"tar-bytes")
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("PUT", "v1/files/src%20dir?extract=tar"))
+        self.assertEqual(kwargs["data"], b"tar-bytes")
+        self.assertFalse(kwargs["_disable_retries"])
+
+    def test_extract_streams_file_object_without_retries(self):
+        self._fs.extract("src", io.BytesIO(b"tar-bytes"))
+        _, kwargs = self._last_call()
+        self.assertEqual(b"".join(kwargs["data"]), b"tar-bytes")
+        self.assertTrue(kwargs["_disable_retries"])
+
+    def test_extract_accepts_the_sandbox_root(self):
+        for path in (".", "/"):
+            with self.subTest(path=path):
+                self._fs.extract(path, b"tar-bytes")
+                args, _ = self._last_call()
+                self.assertEqual(args[:2], ("PUT", "v1/files/?extract=tar"))
+
+    def test_other_ops_reject_the_sandbox_root(self):
+        for call in (
+            lambda: self._fs.mkdir("/"),
+            lambda: self._fs.move(".", "b"),
+            lambda: self._fs.copy("/", "b"),
+        ):
+            with self.subTest(), self.assertRaisesRegex(ValueError, "sandbox root"):
+                call()
+        self._connector.send_request.assert_not_called()
+
+    def test_extract_rejects_bad_arguments(self):
+        for call, error in (
+            (lambda: self._fs.extract("", b"x"), ValueError),
+            (lambda: self._fs.extract("src", io.StringIO("x")), TypeError),
+        ):
+            with self.subTest(), self.assertRaises(error):
+                call()
+        self._connector.send_request.assert_not_called()
+
+    def test_stat_returns_the_entry(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.json.return_value = {
+            "name": "notes.txt", "size": 11, "type": "file",
+            "modified_at": "2026-10-26T10:00:00.123456Z", "mode": "0644",
+        }
+        self._connector.send_request.return_value = resp
+
+        entry = self._fs.stat("my dir/notes.txt")
+
+        args, kwargs = self._last_call()
+        self.assertEqual(args[:2], ("GET", "v1/files/my%20dir/notes.txt?stat=true"))
+        self.assertTrue(kwargs["stream"])
+        resp.close.assert_called_once_with()
+        self.assertEqual(entry, FileEntry(
+            name="notes.txt", size=11, type="file", mode="0644",
+            modified=datetime.datetime(
+                2026, 10, 26, 10, 0, 0, 123456, tzinfo=datetime.timezone.utc),
+        ))
+
+    def test_stat_rejects_a_file_served_instead_of_its_entry(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/octet-stream"}
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "may not support stat"):
+            self._fs.stat("notes.txt")
+        # The body is the whole file, so stat must close the response unread.
+        self.assertEqual(
+            [name for name, _, _ in resp.method_calls], ["close"])
+
+    def test_stat_invalidates_the_transport_when_the_body_read_fails(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp._sandboxd_transport_token = token = object()
+        resp.json.side_effect = requests.exceptions.ChunkedEncodingError("lost")
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaises(requests.exceptions.ChunkedEncodingError):
+            self._fs.stat("notes.txt")
+        self._connector.invalidate_sandboxd_transport.assert_called_once_with(
+            None, transport_token=token)
+        resp.close.assert_called_once_with()
+
+    def test_stat_rejects_a_directory_listing(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json; charset=utf-8"}
+        resp.json.return_value = {"path": "/notes", "entries": []}
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "invalid file entry"):
+            self._fs.stat("notes")
+
+    def test_stat_rejects_malformed_json(self):
+        resp = MagicMock()
+        resp.headers = {"Content-Type": "application/json"}
+        resp.json.side_effect = ValueError("no JSON")
+        self._connector.send_request.return_value = resp
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to decode JSON"):
+            self._fs.stat("notes.txt")
+
+
+class TestLegacyFileOpsUnsupported(unittest.TestCase):
+    def test_sandboxd_only_ops_raise_on_legacy(self):
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = False
+        fs = Filesystem(connector, MagicMock(), trace_service_name="test")
+        for call in (
+            lambda: fs.delete("f.txt"),
+            lambda: fs.mkdir("d"),
+            lambda: fs.move("a", "b"),
+            lambda: fs.copy("a", "b"),
+            lambda: fs.extract("d", b"x"),
+            lambda: fs.stat("a"),
+            lambda: fs.write("a", b"x", append=True),
+            lambda: fs.write("a", b"x", create_only=True),
+        ):
+            with self.subTest(), self.assertRaises(NotImplementedError):
+                call()
+        connector.send_request.assert_not_called()
+
+    def test_recursive_list_raises_on_legacy(self):
         connector = MagicMock()
         connector.is_sandboxd.return_value = False
         fs = Filesystem(connector, MagicMock(), trace_service_name="test")
         with self.assertRaises(NotImplementedError):
-            fs.delete("f.txt")
+            fs.list("d", recursive=True)
         connector.send_request.assert_not_called()
 
 

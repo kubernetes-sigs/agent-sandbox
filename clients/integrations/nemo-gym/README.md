@@ -18,7 +18,8 @@ NeMo Gym discovers providers through the `nemo_gym.sandbox_providers` entry-poin
 `agent_sandbox` in that group, so:
 
 ```bash
-pip install nemo-gym-k8s-agent-sandbox   # alongside nemo-gym
+# Replace <tag> with a release tag from https://github.com/kubernetes-sigs/agent-sandbox/releases
+pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subdirectory=clients/integrations/nemo-gym"   # alongside nemo-gym
 ```
 
 is all it takes for `agent_sandbox` to become a valid provider name — no registration

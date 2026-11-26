@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -113,6 +114,226 @@ func baselinePoolFill(t *testing.T, tc *framework.TestContext, pool *extensionsv
 	d := time.Since(start)
 	t.Logf("[baseline] pool-%d filled in %.3fs", replicas, d.Seconds())
 	return d
+}
+
+const (
+	// vmBootsPerNode is the number of concurrent VM boots a single node can
+	// sustain without significant CPU/IO contention. Each QEMU boot consumes
+	// ~1 vCPU; at 2 concurrent boots the contention is mild, at 3+ individual
+	// boot times degrade due to memory bandwidth and disk IO saturation.
+	vmBootsPerNode = 2
+
+	// vmClaimWorkers is the default claim controller concurrency for VM runtimes.
+	// Claims are lightweight adoption operations (label swap on an existing
+	// sandbox), so high concurrency is safe regardless of runtime type.
+	vmClaimWorkers = 10
+
+	// vmPoolWorkers is the default pool controller concurrency for VM runtimes.
+	// Serializing pool reconciliation (1 worker) prevents replenishment boot
+	// storms when multiple pools need sandboxes simultaneously.
+	vmPoolWorkers = 1
+)
+
+type controllerWorkerConfig struct {
+	SandboxWorkers int
+	ClaimWorkers   int
+	PoolWorkers    int
+	MaxBatchSize   int
+	AutoReason     string // non-empty when auto-derived; describes the derivation
+}
+
+func (c controllerWorkerConfig) String() string {
+	return fmt.Sprintf("sandbox:%d,claim:%d,pool:%d,batch:%d",
+		c.SandboxWorkers, c.ClaimWorkers, c.PoolWorkers, c.MaxBatchSize)
+}
+
+// defaultVMWorkerConfig returns node-aware controller worker counts for VM
+// runtimes (kata). VM boot is a per-node operation — parallelism scales with
+// node count, not total cluster CPU. More nodes means more independent boot
+// lanes; extra CPUs on the same node give diminishing returns because VM boot
+// stages (BIOS, kernel, init) are largely sequential.
+func defaultVMWorkerConfig(nodeCount int) *controllerWorkerConfig {
+	sandboxWorkers := max(nodeCount*vmBootsPerNode, 2)
+	return &controllerWorkerConfig{
+		SandboxWorkers: sandboxWorkers,
+		ClaimWorkers:   vmClaimWorkers,
+		PoolWorkers:    vmPoolWorkers,
+		MaxBatchSize:   sandboxWorkers,
+		AutoReason:     fmt.Sprintf("auto(%d nodes × %d boots/node)", nodeCount, vmBootsPerNode),
+	}
+}
+
+// parseControllerWorkers parses SANDBOX_CONTROLLER_WORKERS.
+// Format: "sandbox:20,claim:10,pool:1,batch:10".
+func parseControllerWorkers() *controllerWorkerConfig {
+	v := os.Getenv("SANDBOX_CONTROLLER_WORKERS")
+	if v == "" {
+		return nil
+	}
+	cfg := &controllerWorkerConfig{}
+	for part := range strings.SplitSeq(v, ",") {
+		key, val, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(val))
+		if err != nil || n <= 0 {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "sandbox":
+			cfg.SandboxWorkers = n
+		case "claim":
+			cfg.ClaimWorkers = n
+		case "pool":
+			cfg.PoolWorkers = n
+		case "batch":
+			cfg.MaxBatchSize = n
+		}
+	}
+	if cfg.SandboxWorkers == 0 && cfg.ClaimWorkers == 0 && cfg.PoolWorkers == 0 && cfg.MaxBatchSize == 0 {
+		return nil
+	}
+	return cfg
+}
+
+// applyControllerWorkerTuning patches the agent-sandbox-controller deployment
+// with the worker counts from SANDBOX_CONTROLLER_WORKERS. For VM runtimes
+// (kata), auto-derives node-aware defaults when the env var is unset.
+// Returns the config (nil only for non-VM runtimes with no env var) and a
+// restore function that reverts to the original args.
+func applyControllerWorkerTuning(ctx context.Context, t *testing.T, cl *framework.ClusterClient, runtimeClass string, nodeCount int) (*controllerWorkerConfig, func()) {
+	cfg := parseControllerWorkers()
+	if cfg == nil && isVMRuntime(runtimeClass) {
+		cfg = defaultVMWorkerConfig(nodeCount)
+		t.Logf("[tuning] auto-derived VM worker config for %d nodes: %s", nodeCount, cfg)
+	}
+	if cfg == nil {
+		return nil, func() {}
+	}
+
+	key := types.NamespacedName{Name: "agent-sandbox-controller", Namespace: "agent-sandbox-system"}
+	var deploy appsv1.Deployment
+	require.NoError(t, cl.Get(ctx, key, &deploy))
+
+	originalArgs := make([]string, len(deploy.Spec.Template.Spec.Containers[0].Args))
+	copy(originalArgs, deploy.Spec.Template.Spec.Containers[0].Args)
+
+	overrides := map[string]int{}
+	if cfg.SandboxWorkers > 0 {
+		overrides["--sandbox-concurrent-workers"] = cfg.SandboxWorkers
+	}
+	if cfg.ClaimWorkers > 0 {
+		overrides["--sandbox-claim-concurrent-workers"] = cfg.ClaimWorkers
+	}
+	if cfg.PoolWorkers > 0 {
+		overrides["--sandbox-warm-pool-concurrent-workers"] = cfg.PoolWorkers
+	}
+	if cfg.MaxBatchSize > 0 {
+		overrides["--sandbox-warm-pool-max-batch-size"] = cfg.MaxBatchSize
+	}
+
+	newArgs := patchDeployArgs(deploy.Spec.Template.Spec.Containers[0].Args, overrides)
+	t.Logf("[tuning] patching controller args: %v", newArgs)
+
+	deploy.Spec.Template.Spec.Containers[0].Args = newArgs
+	require.NoError(t, cl.Update(ctx, &deploy))
+
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		// t.Cleanup runs after t.Context() is cancelled, so use a fresh
+		// context with its own timeout for the restore operations.
+		restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer restoreCancel()
+		var current appsv1.Deployment
+		if err := cl.Get(restoreCtx, key, &current); err != nil {
+			t.Logf("[tuning] restore: failed to get deployment: %v", err)
+			return
+		}
+		current.Spec.Template.Spec.Containers[0].Args = originalArgs
+		if err := cl.Update(restoreCtx, &current); err != nil {
+			t.Logf("[tuning] restore: failed to update deployment: %v", err)
+			return
+		}
+		waitForControllerRollout(restoreCtx, t, cl, key)
+		restored = true
+		t.Logf("[tuning] controller args restored")
+	}
+	t.Cleanup(restore)
+	waitForControllerRollout(ctx, t, cl, key)
+	return cfg, restore
+}
+
+func patchDeployArgs(args []string, overrides map[string]int) []string {
+	result := make([]string, 0, len(args)+len(overrides))
+	seen := make(map[string]bool)
+	for _, arg := range args {
+		flagName, _, _ := strings.Cut(arg, "=")
+		if v, ok := overrides[flagName]; ok {
+			result = append(result, fmt.Sprintf("%s=%d", flagName, v))
+			seen[flagName] = true
+		} else {
+			result = append(result, arg)
+		}
+	}
+	for flag, v := range overrides {
+		if !seen[flag] {
+			result = append(result, fmt.Sprintf("%s=%d", flag, v))
+		}
+	}
+	return result
+}
+
+// waitForControllerRollout blocks until the controller deployment has rolled out
+// all updated replicas and reports ready, or fails after 2 minutes.
+func waitForControllerRollout(ctx context.Context, t *testing.T, cl *framework.ClusterClient, key types.NamespacedName) {
+	t.Logf("[tuning] waiting for controller rollout...")
+	timeout := 2 * time.Minute
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		var deploy appsv1.Deployment
+		require.NoError(t, cl.Get(deadline, key, &deploy))
+		if deploy.Status.Replicas == *deploy.Spec.Replicas &&
+			deploy.Status.UpdatedReplicas == *deploy.Spec.Replicas &&
+			deploy.Status.ReadyReplicas == *deploy.Spec.Replicas &&
+			deploy.Status.ObservedGeneration >= deploy.Generation {
+			t.Logf("[tuning] controller rollout complete (ready=%d)", deploy.Status.ReadyReplicas)
+			return
+		}
+		select {
+		case <-deadline.Done():
+			t.Fatalf("[tuning] controller rollout timed out after %s", timeout)
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func controllerWorkerCSVHeaders(cfg *controllerWorkerConfig) [][]string {
+	if cfg == nil {
+		return [][]string{{"# controller_workers", "default"}}
+	}
+	var headers [][]string
+	headers = append(headers, []string{"# controller_workers", cfg.String()})
+	if cfg.AutoReason != "" {
+		headers = append(headers, []string{"# controller_workers_source", cfg.AutoReason})
+	}
+	if cfg.SandboxWorkers > 0 {
+		headers = append(headers, []string{"# sandbox_concurrent_workers", strconv.Itoa(cfg.SandboxWorkers)})
+	}
+	if cfg.ClaimWorkers > 0 {
+		headers = append(headers, []string{"# claim_concurrent_workers", strconv.Itoa(cfg.ClaimWorkers)})
+	}
+	if cfg.PoolWorkers > 0 {
+		headers = append(headers, []string{"# pool_concurrent_workers", strconv.Itoa(cfg.PoolWorkers)})
+	}
+	if cfg.MaxBatchSize > 0 {
+		headers = append(headers, []string{"# max_batch_size", strconv.Itoa(cfg.MaxBatchSize)})
+	}
+	return headers
 }
 
 func benchPoolSizes(cpuCapacity int64) ([]int, error) {

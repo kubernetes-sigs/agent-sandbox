@@ -16,6 +16,8 @@ clients/python/agentic-sandbox-client/VERSION
 tmp/
 temp/
 .tmp/
+# Leftover temp package from dev/tools/client-gen-go.sh if it is killed mid-run
+zz_client_openapi_work_*/
 
 # Python .venv (generated during 'make test-e2e')
 .venv

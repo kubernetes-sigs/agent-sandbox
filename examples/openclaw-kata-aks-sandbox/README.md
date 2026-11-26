@@ -36,7 +36,15 @@ The gateway takes a few seconds after the pod is Running before it starts listen
 kubectl port-forward openclaw-kata-aks-sandbox 18789:18789
 ```
 
-Then open `http://localhost:18789/#token=dummy-token-for-sandbox`. The token fragment is required — the gateway rejects a bare load. The token is set by `OPENCLAW_GATEWAY_TOKEN` in the manifest; change it for anything beyond a local demo.
+The init container generates a random gateway token when the Pod starts, so the manifest holds no token. Retrieve it from the Pod:
+
+```shell
+TOKEN="$(kubectl exec openclaw-kata-aks-sandbox -c openclaw -- \
+  node -p 'require(process.env.OPENCLAW_CONFIG_PATH).gateway.auth.token')"
+echo "http://localhost:18789/#token=${TOKEN}"
+```
+
+Open the printed URL. The gateway rejects a load without the token fragment. If the controller replaces the Pod, the new Pod generates a new token, so retrieve it again.
 
 ## Step 3: Add a provider API key (optional)
 

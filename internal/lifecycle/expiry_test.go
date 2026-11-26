@@ -29,6 +29,7 @@ func TestTimeLeft(t *testing.T) {
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second)),
 	}
+	shutdownElapsed := metav1.NewTime(now.Add(-5 * time.Second))
 	shutdownInFiveSeconds := metav1.NewTime(now.Add(5 * time.Second))
 	shutdownInFiveMinutes := metav1.NewTime(now.Add(5 * time.Minute))
 	zero := int32(0)
@@ -47,6 +48,14 @@ func TestTimeLeft(t *testing.T) {
 			shutdownTime:            nil,
 			ttlSecondsAfterFinished: nil,
 			finishedCondition:       nil,
+			wantExpired:             false,
+			wantRequeue:             0,
+		},
+		{
+			name:                    "finished without ttl or shutdown time is retained",
+			shutdownTime:            nil,
+			ttlSecondsAfterFinished: nil,
+			finishedCondition:       finishedCondition,
 			wantExpired:             false,
 			wantRequeue:             0,
 		},
@@ -75,6 +84,14 @@ func TestTimeLeft(t *testing.T) {
 			wantRequeue:             5 * time.Second,
 		},
 		{
+			name:                    "elapsed shutdown time expires before ttl",
+			shutdownTime:            &shutdownElapsed,
+			ttlSecondsAfterFinished: &twoMinutes,
+			finishedCondition:       finishedCondition,
+			wantExpired:             true,
+			wantRequeue:             0,
+		},
+		{
 			name:                    "later shutdown time loses to ttl",
 			shutdownTime:            &shutdownInFiveMinutes,
 			ttlSecondsAfterFinished: &twoMinutes,
@@ -91,4 +108,25 @@ func TestTimeLeft(t *testing.T) {
 			require.Equal(t, tc.wantRequeue, requeueAfter)
 		})
 	}
+}
+
+// TestFinishedCondition pins that only Finished=True starts ttlSecondsAfterFinished.
+// Finished is False after a Sandbox resumes, and False must not count as finished.
+func TestFinishedCondition(t *testing.T) {
+	testCases := []struct {
+		name   string
+		status metav1.ConditionStatus
+		want   bool
+	}{
+		{name: "true", status: metav1.ConditionTrue, want: true},
+		{name: "false", status: metav1.ConditionFalse},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			conditions := []metav1.Condition{{Type: "Finished", Status: tc.status}}
+			require.Equal(t, tc.want, FinishedCondition(conditions, "Finished") != nil)
+		})
+	}
+	require.Nil(t, FinishedCondition(nil, "Finished"), "a missing condition is not finished")
 }

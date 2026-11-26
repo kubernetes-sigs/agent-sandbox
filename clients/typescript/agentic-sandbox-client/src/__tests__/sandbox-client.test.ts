@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import * as k8s from "@kubernetes/client-node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------- hoisted mock fns (accessible inside vi.mock factories) ----------
@@ -67,18 +68,27 @@ import {
   CLAIM_API_VERSION,
   CLAIM_PLURAL_NAME,
   POD_NAME_ANNOTATION,
+  SANDBOX_API_GROUP,
+  SANDBOX_API_VERSION,
+  SANDBOX_PLURAL_NAME,
 } from "../constants.js";
 import {
   SandboxClaimFailedError,
   SandboxError,
+  SandboxMetadataError,
+  SandboxNoServiceError,
   SandboxNotFoundError,
   SandboxTemplateNotFoundError,
+  SandboxTimeoutError,
   SandboxWarmPoolNotFoundError,
 } from "../exceptions.js";
 import { Sandbox } from "../sandbox.js";
 import { SandboxClient } from "../sandbox-client.js";
 
 // ---------- helpers ----------
+
+/** The private method that auto-cleanup runs for each client. */
+type ExitCleanup = { releaseOnExit: () => Promise<void> };
 
 /**
  * Sets up two sequential Watch calls:
@@ -88,6 +98,8 @@ import { SandboxClient } from "../sandbox-client.js";
 function mockSandboxReadyFlow(
   sandboxName: string,
   podAnnotation?: string,
+  extraStatus: Record<string, unknown> = {},
+  claimMetadata?: Record<string, unknown>,
 ): void {
   // First watch: SandboxClaim resolves actual sandbox name
   mockWatchFn.mockImplementationOnce(
@@ -97,7 +109,10 @@ function mockSandboxReadyFlow(
       callback: (type: string, obj: Record<string, unknown>) => void,
       _done: (err: unknown) => void,
     ) => {
-      callback("MODIFIED", { status: { sandbox: { name: sandboxName } } });
+      callback("MODIFIED", {
+        ...(claimMetadata ? { metadata: claimMetadata } : {}),
+        status: { sandbox: { name: sandboxName } },
+      });
       return Promise.resolve(new AbortController());
     },
   );
@@ -113,11 +128,15 @@ function mockSandboxReadyFlow(
       callback("MODIFIED", {
         metadata: {
           name: sandboxName,
-          annotations: podAnnotation
-            ? { [POD_NAME_ANNOTATION]: podAnnotation }
-            : {},
+          annotations:
+            podAnnotation !== undefined
+              ? { [POD_NAME_ANNOTATION]: podAnnotation }
+              : {},
         },
-        status: { conditions: [{ type: "Ready", status: "True" }] },
+        status: {
+          conditions: [{ type: "Ready", status: "True" }],
+          ...extraStatus,
+        },
       });
       return Promise.resolve(new AbortController());
     },
@@ -183,6 +202,256 @@ describe("SandboxClient (registry)", () => {
 
     it("throws SandboxError for empty namespace", () => {
       expect(() => new SandboxClient({ namespace: "" })).toThrow(SandboxError);
+    });
+
+    it("accepts a fully-specified sandboxd options bag", () => {
+      expect(
+        () =>
+          new SandboxClient({
+            sandboxd: {
+              restPort: 8080,
+              grpcPort: 9090,
+              portForwardReadyTimeoutMs: 10_000,
+              maxDownloadSize: 1024,
+              maxUploadSize: 1024,
+              maxMetadataResponseSize: 1024,
+              maxCommandOutputSize: 1024,
+              authToken: "abc.DEF-123_~+/=",
+            },
+          }),
+      ).not.toThrow();
+    });
+
+    it("throws SandboxError for an unknown sandboxd.connectivity", () => {
+      expect(
+        () =>
+          new SandboxClient({
+            sandboxd: {
+              connectivity: "direct" as unknown as "port-forward",
+            },
+          }),
+      ).toThrow(/sandboxd\.connectivity must be one of/);
+    });
+
+    it.each([
+      ["restPort", 0],
+      ["restPort", 65536],
+      ["restPort", 1.5],
+      ["grpcPort", -1],
+      ["portForwardReadyTimeoutMs", 0],
+      ["portForwardReadyTimeoutMs", Number.NaN],
+      ["portForwardReadyTimeoutMs", Number.POSITIVE_INFINITY],
+      ["maxDownloadSize", 0],
+      ["maxUploadSize", -5],
+      ["maxMetadataResponseSize", 0],
+      ["maxCommandOutputSize", 0xffffffff + 1],
+      ["grpcPort", 8080], // equal to the default restPort
+    ] as const)("throws SandboxError for sandboxd.%s = %p", (key, value) => {
+      expect(() => new SandboxClient({ sandboxd: { [key]: value } })).toThrow(
+        SandboxError,
+      );
+    });
+
+    it.each([
+      "",
+      "has space",
+      "tab\there",
+      "new\nline",
+      "t\u00f6ken",
+      42 as unknown as string,
+    ])("throws SandboxError for sandboxd.authToken = %p without echoing it", (authToken) => {
+      const err = (() => {
+        try {
+          new SandboxClient({ sandboxd: { authToken } });
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as SandboxError).message).toMatch(/sandboxd\.authToken/);
+      if (typeof authToken === "string" && authToken !== "") {
+        expect((err as SandboxError).message).not.toContain(authToken);
+      }
+    });
+
+    it.each([
+      "",
+      "has space",
+      "tab\there",
+      "new\nline",
+      "t\u00f6ken",
+      42 as unknown as string,
+    ])("throws SandboxError for sandboxd.routerAuthToken = %p without echoing it", (routerAuthToken) => {
+      const err = (() => {
+        try {
+          new SandboxClient({ sandboxd: { routerAuthToken } });
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(SandboxError);
+      expect((err as SandboxError).message).toMatch(
+        /sandboxd\.routerAuthToken/,
+      );
+      if (typeof routerAuthToken === "string" && routerAuthToken !== "") {
+        expect((err as SandboxError).message).not.toContain(routerAuthToken);
+      }
+    });
+
+    it("accepts a router-port-forward sandboxd configuration", () => {
+      expect(
+        () =>
+          new SandboxClient({
+            sandboxd: {
+              connectivity: "router-port-forward",
+              routerNamespace: "agent-sandbox-system",
+              disablePodIPRouting: true,
+            },
+          }),
+      ).not.toThrow();
+    });
+
+    it.each([
+      "",
+      "Bad_NS",
+      "UPPER",
+      "-leading",
+      "trailing-",
+      "a".repeat(64),
+      42 as unknown as string,
+    ])("throws SandboxError for sandboxd.routerNamespace = %p", (routerNamespace) => {
+      expect(
+        () => new SandboxClient({ sandboxd: { routerNamespace } }),
+      ).toThrow(/sandboxd\.routerNamespace/);
+    });
+
+    it.each([
+      "yes",
+      1,
+      null,
+    ])("throws SandboxError for sandboxd.disablePodIPRouting = %p", (disablePodIPRouting) => {
+      expect(
+        () =>
+          new SandboxClient({
+            sandboxd: {
+              disablePodIPRouting: disablePodIPRouting as unknown as boolean,
+            },
+          }),
+      ).toThrow(/sandboxd\.disablePodIPRouting/);
+    });
+  });
+
+  // ===== in-cluster connectivity =====
+
+  describe("in-cluster connectivity", () => {
+    it("exposes podIP (IPv4 preferred) and serviceFQDN from the watched status", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sb-addr", undefined, {
+        podIPs: ["fd00::5", " 10.0.0.5 "],
+        serviceFQDN: "sb-addr.default.svc.cluster.local",
+      });
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("tpl");
+
+      expect(sandbox.podIP).toBe("10.0.0.5");
+      expect(sandbox.serviceFQDN).toBe("sb-addr.default.svc.cluster.local");
+    });
+
+    it("exposes podIP and serviceFQDN from the readiness GET", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        metadata: { name: "sb-get", annotations: {} },
+        status: {
+          sandbox: { name: "sb-get" },
+          conditions: [{ type: "Ready", status: "True" }],
+          podIPs: ["fd00::7"],
+          serviceFQDN: "sb-get.default.svc.cluster.local",
+        },
+      });
+
+      const client = new SandboxClient();
+      const sandbox = await client.getSandbox("claim-get");
+
+      expect(sandbox.podIP).toBe("fd00::7");
+      expect(sandbox.serviceFQDN).toBe("sb-get.default.svc.cluster.local");
+    });
+
+    it("defaults podIP and serviceFQDN to empty strings when status has neither", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sb-none");
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("tpl");
+
+      expect(sandbox.podIP).toBe("");
+      expect(sandbox.serviceFQDN).toBe("");
+    });
+
+    it("createSandbox fails with SandboxNoServiceError and deletes the claim when the Sandbox has no Service", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sb-nosvc", undefined, { podIPs: ["10.0.0.9"] });
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "in-cluster-service" },
+      });
+      const err = await client.createSandbox("tpl").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxNoServiceError);
+      expect(err.telemetryCode).toBe("no_service");
+      expect(err.message).toMatch(/spec\.service: true/);
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(client.listActiveSandboxes()).toHaveLength(0);
+    });
+
+    it("createSandbox fails with SandboxMetadataError (not NoService) when in-cluster-pod-ip has no pod IP", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sb-noip", undefined, {
+        serviceFQDN: "sb-noip.default.svc.cluster.local",
+      });
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "in-cluster-pod-ip" },
+      });
+      const err = await client.createSandbox("tpl").catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxMetadataError);
+      expect(err).not.toBeInstanceOf(SandboxNoServiceError);
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+    });
+
+    it("getSandbox fails with SandboxNoServiceError without deleting the claim", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue({
+        metadata: { name: "sb-get-nosvc", annotations: {} },
+        status: {
+          sandbox: { name: "sb-get-nosvc" },
+          conditions: [{ type: "Ready", status: "True" }],
+          podIPs: ["10.0.0.3"],
+        },
+      });
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "in-cluster-service" },
+      });
+
+      await expect(client.getSandbox("claim-nosvc")).rejects.toBeInstanceOf(
+        SandboxNoServiceError,
+      );
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("port-forward connectivity does not require a pod IP or Service", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sb-pf");
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "port-forward" },
+      });
+
+      await expect(client.createSandbox("tpl")).resolves.toBeInstanceOf(
+        Sandbox,
+      );
     });
   });
 
@@ -259,6 +528,197 @@ describe("SandboxClient (registry)", () => {
       });
     });
 
+    it("passes pod labels and annotations as additionalPodMetadata, apart from claim labels", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-pod-metadata");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        labels: { team: "infra" },
+        podLabels: { "sandbox.users.io/session": "abc" },
+        podAnnotations: { note: "hello" },
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.metadata.labels).toEqual({ team: "infra" });
+      expect(createArgs.body.spec).toEqual({
+        warmPoolRef: { name: "tpl" },
+        additionalPodMetadata: {
+          labels: { "sandbox.users.io/session": "abc" },
+          annotations: { note: "hello" },
+        },
+      });
+    });
+
+    it.each([
+      ["labels only", { podLabels: { app: "x" } }, { labels: { app: "x" } }],
+      [
+        "annotations only",
+        { podAnnotations: { note: "hi" } },
+        { annotations: { note: "hi" } },
+      ],
+      [
+        "empty labels beside annotations",
+        { podLabels: {}, podAnnotations: { note: "hi" } },
+        { annotations: { note: "hi" } },
+      ],
+    ])("sends only the pod metadata that was set (%s)", async (_label, opts, expected) => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-partial-pod-metadata");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", opts);
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec.additionalPodMetadata).toEqual(expected);
+    });
+
+    it("omits additionalPodMetadata when the pod maps are empty", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-empty-pod-metadata");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        podLabels: {},
+        podAnnotations: {},
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
+    });
+
+    it("rejects invalid pod labels before provisioning", async () => {
+      mockSandboxReadyFlow("sandbox-invalid-pod-label");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          podLabels: { "bad key!": "v" },
+        }),
+      ).rejects.toThrow("invalid characters");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("passes volumeClaimTemplates as spec.volumeClaimTemplates", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-with-volume");
+
+      const volumeClaimTemplates = [
+        {
+          metadata: { name: "my-volume" },
+          spec: {
+            accessModes: ["ReadWriteOnce"],
+            resources: { requests: { storage: "1Gi" } },
+          },
+        },
+      ];
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", { volumeClaimTemplates });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({
+        warmPoolRef: { name: "tpl" },
+        volumeClaimTemplates,
+      });
+    });
+
+    it("sends volumeClaimTemplates beside pod metadata and a deadline", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-combined-spec");
+
+      const volumeClaimTemplates = [
+        {
+          metadata: { name: "data" },
+          spec: { accessModes: ["ReadWriteOnce"] },
+        },
+      ];
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        podLabels: { app: "x" },
+        shutdownAfterSeconds: 60,
+        volumeClaimTemplates,
+      });
+
+      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+      expect(spec.volumeClaimTemplates).toEqual(volumeClaimTemplates);
+      expect(spec.additionalPodMetadata).toEqual({ labels: { app: "x" } });
+      expect(spec.lifecycle.shutdownPolicy).toBe("Delete");
+    });
+
+    it("omits volumeClaimTemplates when the list is empty", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-empty-volumes");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        volumeClaimTemplates: [],
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
+    });
+
+    it("passes env as the spec.env name/value list", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-with-env");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        env: { API_KEY: "secret", "my.var-1": "" },
+      });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({
+        warmPoolRef: { name: "tpl" },
+        env: [
+          { name: "API_KEY", value: "secret" },
+          { name: "my.var-1", value: "" },
+        ],
+      });
+    });
+
+    it("omits env when the map is empty", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-empty-env");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", { env: {} });
+
+      const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
+      expect(createArgs.body.spec).toEqual({ warmPoolRef: { name: "tpl" } });
+    });
+
+    it.each([
+      ["a leading digit", "1BAD"],
+      ["an empty name", ""],
+      ["an equals sign", "A=B"],
+      ["a dot-dot prefix", "..hidden"],
+      ["a lone dot", "."],
+    ])("rejects an env name with %s before provisioning", async (_why, name) => {
+      mockSandboxReadyFlow("sandbox-invalid-env");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { env: { [name]: "v" } }),
+      ).rejects.toThrow("Invalid environment variable name");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-string env value before provisioning", async () => {
+      mockSandboxReadyFlow("sandbox-bad-env-value");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          env: { PORT: 8080 as unknown as string },
+        }),
+      ).rejects.toThrow("must have a string value");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
     it("sets a deletion deadline from the create call, preserving namespace and labels", async () => {
       vi.useFakeTimers();
       try {
@@ -316,11 +776,118 @@ describe("SandboxClient (registry)", () => {
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
-    it("throws when warmpool is empty", async () => {
+    it("sends a shutdownPolicy given without a timer", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-policy-only");
+
       const client = new SandboxClient();
-      await expect(client.createSandbox("")).rejects.toThrow(
-        "Warmpool name cannot be empty.",
-      );
+      await client.createSandbox("tpl", "default", {
+        shutdownPolicy: "Retain",
+      });
+
+      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+      expect(spec.lifecycle).toEqual({ shutdownPolicy: "Retain" });
+    });
+
+    it.each([
+      ["zero", 0],
+      ["the int32 maximum", 2147483647],
+    ])("sends ttlSecondsAfterFinished (%s) and defaults the policy to Delete", async (_label, ttl) => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sandbox-ttl");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", {
+        ttlSecondsAfterFinished: ttl,
+      });
+
+      const spec = mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+      expect(spec.lifecycle).toEqual({
+        shutdownPolicy: "Delete",
+        ttlSecondsAfterFinished: ttl,
+      });
+    });
+
+    it("sends both timers and an explicit policy together", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-10T12:00:00.000Z"));
+        mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+        mockSandboxReadyFlow("sandbox-both-timers");
+
+        const client = new SandboxClient();
+        await client.createSandbox("tpl", "default", {
+          shutdownAfterSeconds: 60,
+          shutdownPolicy: "DeleteForeground",
+          ttlSecondsAfterFinished: 10,
+        });
+
+        const spec =
+          mockCreateNamespacedCustomObject.mock.calls[0][0].body.spec;
+        expect(spec.lifecycle).toEqual({
+          shutdownTime: "2026-09-10T12:01:00.000Z",
+          shutdownPolicy: "DeleteForeground",
+          ttlSecondsAfterFinished: 10,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ["wrong case", "delete"],
+      ["null", null],
+    ])("rejects invalid shutdownPolicy (%s) before provisioning", async (_label, policy) => {
+      mockSandboxReadyFlow("sandbox-invalid-policy");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          shutdownAfterSeconds: 60,
+          // JavaScript callers do not have TypeScript's input checks.
+          shutdownPolicy: policy as "Delete",
+        }),
+      ).rejects.toThrow(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["negative", -1],
+      ["fractional", 0.5],
+      ["beyond int32", 2147483648],
+      ["string", "60"],
+    ])("rejects invalid ttlSecondsAfterFinished (%s) before provisioning", async (_label, ttl) => {
+      mockSandboxReadyFlow("sandbox-invalid-finished-ttl");
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", {
+          // JavaScript callers do not have TypeScript's input checks.
+          ttlSecondsAfterFinished: ttl as number,
+        }),
+      ).rejects.toThrow(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("throws SandboxError when warmpool is empty", async () => {
+      const client = new SandboxClient();
+      const pending = client.createSandbox("");
+      await expect(pending).rejects.toThrow("Warmpool name cannot be empty.");
+      await expect(pending).rejects.toBeInstanceOf(SandboxError);
+    });
+
+    it("throws SandboxError for an invalid label, not a plain Error", async () => {
+      mockSandboxReadyFlow("sandbox-bad-label");
+
+      const client = new SandboxClient();
+      const pending = client.createSandbox("tpl", "default", {
+        labels: { "": "value" },
+      });
+      await expect(pending).rejects.toThrow("Label key cannot be empty.");
+      await expect(pending).rejects.toBeInstanceOf(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -382,9 +949,12 @@ describe("SandboxClient (registry)", () => {
       }
     });
 
-    it("falls back to sandboxName when pod annotation is absent", async () => {
+    it.each([
+      undefined,
+      "",
+    ])("falls back to sandboxName when pod annotation is %j", async (podAnnotation) => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
-      mockSandboxReadyFlow("sandbox-xyz"); // no podAnnotation
+      mockSandboxReadyFlow("sandbox-xyz", podAnnotation);
 
       const client = new SandboxClient();
       const sandbox = await client.createSandbox("tpl");
@@ -470,6 +1040,256 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.namespace).toBe("default");
       const createArgs = mockCreateNamespacedCustomObject.mock.calls[0][0];
       expect(createArgs.namespace).toBe("default");
+    });
+  });
+
+  // ===== createSandbox() with claimName =====
+
+  describe("createSandbox() with claimName", () => {
+    const claim = (extra: Record<string, unknown> = {}) => ({
+      metadata: { uid: "uid-1", resourceVersion: "1", ...extra },
+      spec: { warmPoolRef: { name: "tpl" } },
+    });
+    const conflict = () =>
+      Object.assign(new Error("AlreadyExists"), { code: 409 });
+    const named = { claimName: "my-claim", adoptExisting: true };
+
+    it("creates the claim under the given name", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("sb");
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("tpl", "default", {
+        claimName: "my.claim-1",
+      });
+
+      expect(sandbox.claimName).toBe("my.claim-1");
+      const body = mockCreateNamespacedCustomObject.mock.calls[0][0].body;
+      expect(body.metadata.name).toBe("my.claim-1");
+    });
+
+    it.each([
+      "",
+      "Upper",
+      "-lead",
+      "trail-",
+      "a_b",
+      "a..b",
+      "x".repeat(254),
+    ])("rejects the invalid claimName %j before provisioning", async (claimName) => {
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { claimName }),
+      ).rejects.toThrow(SandboxError);
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("rejects adoptExisting without claimName", async () => {
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { adoptExisting: true }),
+      ).rejects.toThrow("adoptExisting requires an explicit claimName");
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("keeps the claim when waiting for it fails", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          _callback: unknown,
+          done: (err: unknown) => void,
+        ) => {
+          done(new Error("watch failed"));
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { claimName: "my-claim" }),
+      ).rejects.toThrow("watch failed");
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("fails on a name conflict without adoptExisting", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", { claimName: "my-claim" }),
+      ).rejects.toThrow("AlreadyExists");
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("adopts the existing claim on a name conflict", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(claim());
+      mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-1" });
+
+      const client = new SandboxClient();
+      const sandbox = await client.createSandbox("tpl", "default", named);
+
+      expect(sandbox.claimName).toBe("my-claim");
+      expect(sandbox.sandboxName).toBe("sb");
+      expect(mockCreateNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockGetNamespacedCustomObject.mock.calls[0][0].name).toBe(
+        "my-claim",
+      );
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "terminating",
+        claim({ deletionTimestamp: "2026-01-01T00:00:00Z" }),
+        "terminating",
+      ],
+      [
+        "using another warm pool",
+        { ...claim(), spec: { warmPoolRef: { name: "other" } } },
+        "references warm pool 'other', not 'tpl'",
+      ],
+      [
+        "missing a UID",
+        { ...claim(), metadata: { resourceVersion: "1" } },
+        "has no metadata.uid",
+      ],
+    ])("refuses to adopt a claim that is %s", async (_label, existing, message) => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(existing);
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toThrow(message);
+      expect(mockWatchFn).not.toHaveBeenCalled();
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("fails when the conflicting claim is gone by the time it is read", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+    });
+
+    it("fails when the claim is replaced while waiting for it", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(claim())
+        .mockResolvedValueOnce(claim({ uid: "uid-2" }));
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("fails when a watch event is for a replacement claim", async () => {
+      mockCreateNamespacedCustomObject.mockRejectedValueOnce(conflict());
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(claim());
+      mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-2" });
+
+      const client = new SandboxClient();
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("returns the registered handle when the same claim is created again", async () => {
+      mockCreateNamespacedCustomObject
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(conflict());
+      mockSandboxReadyFlow("sb");
+      mockSandboxReadyFlow("sb", undefined, {}, { uid: "uid-1" });
+
+      const client = new SandboxClient();
+      const first = await client.createSandbox("tpl", "default", named);
+      mockGetNamespacedCustomObject.mockResolvedValueOnce(claim());
+      const second = await client.createSandbox("tpl", "default", named);
+
+      expect(second).toBe(first);
+      expect(first.isActive).toBe(true);
+      expect(client.listActiveSandboxes()).toHaveLength(1);
+    });
+
+    it("rejects a second create of the same claim while one is in flight", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValue({});
+      let claimWatchCallback:
+        | ((type: string, obj: Record<string, unknown>) => void)
+        | undefined;
+      mockWatchFn.mockImplementation(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          claimWatchCallback = callback;
+          return Promise.resolve(new AbortController());
+        },
+      );
+      mockDeleteNamespacedCustomObject.mockImplementation(() => {
+        claimWatchCallback?.("DELETED", {});
+        return Promise.resolve({});
+      });
+
+      const client = new SandboxClient();
+      const first = client.createSandbox("tpl", "default", named);
+      await vi.waitFor(() => expect(claimWatchCallback).toBeDefined());
+
+      await expect(
+        client.createSandbox("tpl", "default", named),
+      ).rejects.toThrow("already being created or attached");
+
+      await client.deleteAll();
+      await expect(first).rejects.toBeInstanceOf(SandboxError);
+    });
+
+    it("deleteAll() deletes a named claim", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+      mockSandboxReadyFlow("sb");
+
+      const client = new SandboxClient();
+      await client.createSandbox("tpl", "default", { claimName: "my-claim" });
+      await client.deleteAll();
+
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockDeleteNamespacedCustomObject.mock.calls[0][0].name).toBe(
+        "my-claim",
+      );
+    });
+
+    it("auto-cleanup releases a named claim but deletes a generated one", async () => {
+      mockCreateNamespacedCustomObject.mockResolvedValue({});
+      mockDeleteNamespacedCustomObject.mockResolvedValue({});
+      mockSandboxReadyFlow("sb-named");
+      mockSandboxReadyFlow("sb-generated");
+
+      const client = new SandboxClient();
+      const kept = await client.createSandbox("tpl", "default", {
+        claimName: "my-claim",
+      });
+      const dropped = await client.createSandbox("tpl", "default");
+
+      await (client as unknown as ExitCleanup).releaseOnExit();
+
+      expect(kept.isActive).toBe(false);
+      expect(dropped.isActive).toBe(false);
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockDeleteNamespacedCustomObject.mock.calls[0][0].name).toBe(
+        dropped.claimName,
+      );
     });
   });
 
@@ -634,6 +1454,154 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.isActive).toBe(true);
     });
 
+    it.each([
+      ["pod-pending", "pod-pending"],
+      ["", "sandbox-pending"],
+    ])("with waitForReady false, resolves pod annotation %j to %j before Ready", async (podAnnotation, expectedPodName) => {
+      // 1) claim verification, 2) resolveSandboxName, 3) Sandbox existence.
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: { sandbox: { name: "sandbox-pending" } },
+      });
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        metadata: {
+          name: "sandbox-pending",
+          annotations: { [POD_NAME_ANNOTATION]: podAnnotation },
+        },
+        status: {
+          conditions: [{ type: "Ready", status: "False" }],
+          podIPs: ["10.0.0.7"],
+        },
+      });
+
+      const client = new SandboxClient();
+      const sandbox = await client.getSandbox("claim-pending", undefined, {
+        waitForReady: false,
+      });
+
+      expect(sandbox.sandboxName).toBe("sandbox-pending");
+      expect(sandbox.podName).toBe(expectedPodName);
+      expect(sandbox.podIP).toBe("10.0.0.7");
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("with waitForReady false, throws SandboxNotFoundError when the Sandbox is gone", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        status: { sandbox: { name: "sandbox-gone" } },
+      });
+      mockGetNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("Not Found"), { code: 404 }),
+      );
+
+      const client = new SandboxClient();
+      await expect(
+        client.getSandbox("claim-gone", undefined, { waitForReady: false }),
+      ).rejects.toBeInstanceOf(SandboxNotFoundError);
+      expect(client.listActiveSandboxes()).toEqual([]);
+    });
+
+    it("replaces a handle attached before its in-cluster address existed", async () => {
+      const pending = {
+        metadata: { name: "sb-early", annotations: {} },
+        status: { conditions: [{ type: "Ready", status: "False" }] },
+      };
+      const resolved = { status: { sandbox: { name: "sb-early" } } };
+      // waitForReady: false attach: claim, resolve, Sandbox (no pod IP yet).
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending);
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "in-cluster-pod-ip" },
+      });
+      const early = await client.getSandbox("claim-early", undefined, {
+        waitForReady: false,
+      });
+      expect(early.podIP).toBe("");
+
+      // Cache-hit checks (claim, Sandbox), then a full re-attach that now
+      // sees the Ready Sandbox with its pod IP.
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce({
+          metadata: { name: "sb-early", annotations: {} },
+          status: {
+            conditions: [{ type: "Ready", status: "True" }],
+            podIPs: ["10.0.0.9"],
+          },
+        });
+
+      const ready = await client.getSandbox("claim-early");
+      expect(ready).not.toBe(early);
+      expect(ready.podIP).toBe("10.0.0.9");
+      expect(early.isActive).toBe(false);
+    });
+
+    it("reuses a router-port-forward handle that has no pod IP", async () => {
+      const pending = {
+        metadata: { name: "sb-router", annotations: {} },
+        status: { conditions: [{ type: "Ready", status: "False" }] },
+      };
+      const resolved = { status: { sandbox: { name: "sb-router" } } };
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending);
+
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "router-port-forward" },
+      });
+      const early = await client.getSandbox("claim-router", undefined, {
+        waitForReady: false,
+      });
+      expect(early.podIP).toBe("");
+
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce(resolved)
+        .mockResolvedValueOnce(pending);
+
+      const again = await client.getSandbox("claim-router", undefined, {
+        waitForReady: false,
+      });
+      expect(again).toBe(early);
+      expect(early.isActive).toBe(true);
+    });
+
+    it("bounds claim resolution by resolveTimeout instead of the ready timeout", async () => {
+      // The claim exists but never reports a Sandbox name.
+      mockGetNamespacedCustomObject.mockResolvedValue({ status: {} });
+      mockWatchFn.mockImplementation(() =>
+        Promise.resolve(new AbortController()),
+      );
+
+      const client = new SandboxClient({ sandboxReadyTimeout: 180 });
+      const start = Date.now();
+      await expect(
+        client.getSandbox("claim-unbound", undefined, { resolveTimeout: 0.2 }),
+      ).rejects.toThrow("did not resolve within");
+      expect(Date.now() - start).toBeLessThan(5_000);
+    });
+
+    it("rejects a non-positive or non-finite resolveTimeout", async () => {
+      const client = new SandboxClient();
+      for (const resolveTimeout of [
+        0,
+        -1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        await expect(
+          client.getSandbox("claim", undefined, { resolveTimeout }),
+        ).rejects.toBeInstanceOf(SandboxError);
+      }
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
     // empty namespace string should be normalized to defaultNamespace
     it("normalizes empty namespace string to default namespace", async () => {
       mockGetNamespacedCustomObject.mockRejectedValueOnce(
@@ -645,6 +1613,253 @@ describe("SandboxClient (registry)", () => {
 
       const callArgs = mockGetNamespacedCustomObject.mock.calls[0][0];
       expect(callArgs.namespace).toBe("default");
+    });
+  });
+
+  // ===== getSandboxByName =====
+
+  describe("getSandboxByName()", () => {
+    const sandboxObj = (
+      name: string,
+      ready: boolean,
+      extra: { annotations?: Record<string, string> } & Record<
+        string,
+        unknown
+      > = {},
+    ) => {
+      const { annotations = {}, ...status } = extra;
+      return {
+        metadata: { name, annotations },
+        status: {
+          conditions: [{ type: "Ready", status: ready ? "True" : "False" }],
+          ...status,
+        },
+      };
+    };
+
+    const notFound = () => Object.assign(new Error("Not Found"), { code: 404 });
+
+    it("returns an untracked handle without touching claims", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-direct", true, {
+          podIPs: ["10.0.0.4"],
+          serviceFQDN: "sb-direct.team.svc.cluster.local",
+        }),
+      );
+
+      const client = new SandboxClient();
+      const sandbox = await client.getSandboxByName("sb-direct", "team");
+
+      expect(sandbox).toBeInstanceOf(Sandbox);
+      expect(sandbox.claimName).toBe("");
+      expect(sandbox.sandboxName).toBe("sb-direct");
+      expect(sandbox.podName).toBe("sb-direct");
+      expect(sandbox.namespace).toBe("team");
+      expect(sandbox.podIP).toBe("10.0.0.4");
+      expect(sandbox.serviceFQDN).toBe("sb-direct.team.svc.cluster.local");
+      for (const [args] of mockGetNamespacedCustomObject.mock.calls) {
+        expect(args).toMatchObject({
+          group: SANDBOX_API_GROUP,
+          version: SANDBOX_API_VERSION,
+          plural: SANDBOX_PLURAL_NAME,
+          namespace: "team",
+          name: "sb-direct",
+        });
+      }
+      expect(mockCreateNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockWatchFn).not.toHaveBeenCalled();
+      expect(client.listActiveSandboxes()).toEqual([]);
+    });
+
+    it("uses the pod-name annotation for the pod", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-adopted", true, {
+          annotations: { [POD_NAME_ANNOTATION]: "pool-pod-1" },
+        }),
+      );
+
+      const sandbox = await new SandboxClient().getSandboxByName("sb-adopted");
+
+      expect(sandbox.sandboxName).toBe("sb-adopted");
+      expect(sandbox.podName).toBe("pool-pod-1");
+    });
+
+    it("waits for a Sandbox that is not Ready yet", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-wait", false),
+      );
+      mockWatchFn.mockImplementationOnce(
+        (
+          _path: string,
+          _query: unknown,
+          callback: (type: string, obj: Record<string, unknown>) => void,
+        ) => {
+          callback(
+            "MODIFIED",
+            sandboxObj("sb-wait", true, { podIPs: ["10.0.0.6"] }),
+          );
+          return Promise.resolve(new AbortController());
+        },
+      );
+
+      const sandbox = await new SandboxClient().getSandboxByName("sb-wait");
+
+      expect(sandbox.podIP).toBe("10.0.0.6");
+      expect(mockWatchFn.mock.calls[0][1]).toMatchObject({
+        fieldSelector: "metadata.name=sb-wait",
+      });
+    });
+
+    it("with waitForReady false, returns without waiting for Ready", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-pending", false),
+      );
+
+      const sandbox = await new SandboxClient().getSandboxByName(
+        "sb-pending",
+        undefined,
+        { waitForReady: false },
+      );
+
+      expect(sandbox.sandboxName).toBe("sb-pending");
+      expect(sandbox.podIP).toBe("");
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("throws SandboxNotFoundError at once when the Sandbox does not exist", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValue(notFound());
+
+      const client = new SandboxClient();
+      for (const opts of [undefined, { waitForReady: false }]) {
+        await expect(
+          client.getSandboxByName("sb-gone", undefined, opts),
+        ).rejects.toBeInstanceOf(SandboxNotFoundError);
+      }
+      expect(mockWatchFn).not.toHaveBeenCalled();
+    });
+
+    it("throws SandboxError, not SandboxNotFoundError, on other API errors", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValue(
+        Object.assign(new Error("boom"), { code: 500 }),
+      );
+
+      const err = await new SandboxClient()
+        .getSandboxByName("sb-err")
+        .catch((e) => e);
+
+      expect(err).toBeInstanceOf(SandboxError);
+      expect(err).not.toBeInstanceOf(SandboxNotFoundError);
+    });
+
+    it("throws SandboxTimeoutError when the Sandbox does not become Ready", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-slow", false),
+      );
+      mockWatchFn.mockImplementation(() =>
+        Promise.resolve(new AbortController()),
+      );
+
+      await expect(
+        new SandboxClient().getSandboxByName("sb-slow", undefined, {
+          sandboxReadyTimeout: 0.2,
+        }),
+      ).rejects.toBeInstanceOf(SandboxTimeoutError);
+    });
+
+    it("fails on a missing in-cluster address only when it waits for Ready", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-nosvc", true, { podIPs: ["10.0.0.3"] }),
+      );
+      const client = new SandboxClient({
+        sandboxd: { connectivity: "in-cluster-service" },
+      });
+
+      await expect(client.getSandboxByName("sb-nosvc")).rejects.toBeInstanceOf(
+        SandboxNoServiceError,
+      );
+      await expect(
+        client.getSandboxByName("sb-nosvc", undefined, { waitForReady: false }),
+      ).resolves.toBeInstanceOf(Sandbox);
+    });
+
+    it("close() releases the handle but deletes nothing", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-keep", true),
+      );
+
+      const sandbox = await new SandboxClient().getSandboxByName("sb-keep");
+      await sandbox.close();
+
+      expect(sandbox.isActive).toBe(false);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("leaves the handle open when the client deletes everything it tracks", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-own", true),
+      );
+
+      const client = new SandboxClient();
+      const sandbox = await client.getSandboxByName("sb-own");
+      await client.deleteAll();
+
+      expect(sandbox.isActive).toBe(true);
+      expect(mockDeleteNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("builds a separate handle for each call", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-twice", true),
+      );
+
+      const client = new SandboxClient();
+      const first = await client.getSandboxByName("sb-twice");
+      const second = await client.getSandboxByName("sb-twice");
+
+      expect(second).not.toBe(first);
+    });
+
+    it("uses the default namespace for an empty or omitted namespace", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValue(
+        sandboxObj("sb-ns", true),
+      );
+
+      const client = new SandboxClient({ namespace: "team-a" });
+      for (const ns of [undefined, ""]) {
+        const sandbox = await client.getSandboxByName("sb-ns", ns);
+        expect(sandbox.namespace).toBe("team-a");
+      }
+    });
+
+    it.each([
+      "",
+      "Has-Upper",
+      "has space",
+      "a=b,metadata.name=c",
+      "-leading-hyphen",
+      "x".repeat(254),
+    ])("rejects the invalid name %p before calling the API", async (name) => {
+      await expect(
+        new SandboxClient().getSandboxByName(name),
+      ).rejects.toBeInstanceOf(SandboxError);
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-positive or non-finite sandboxReadyTimeout", async () => {
+      const client = new SandboxClient();
+      for (const sandboxReadyTimeout of [
+        0,
+        -1,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        await expect(
+          client.getSandboxByName("sb-timeout", undefined, {
+            sandboxReadyTimeout,
+          }),
+        ).rejects.toThrow(/sandboxReadyTimeout must be a positive number/);
+      }
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
     });
   });
 
@@ -691,7 +1906,7 @@ describe("SandboxClient (registry)", () => {
       const names = await client.listAllSandboxes("default");
 
       expect(names).toEqual(["sandbox-claim-aaa", "sandbox-claim-bbb"]);
-      expect(mockListNamespacedCustomObject).toHaveBeenCalledWith({
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
         namespace: "default",
@@ -703,6 +1918,111 @@ describe("SandboxClient (registry)", () => {
       mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
       const client = new SandboxClient();
       expect(await client.listAllSandboxes()).toEqual([]);
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "default",
+        plural: CLAIM_PLURAL_NAME,
+      });
+    });
+
+    it.each([
+      "app=my-agent",
+      "env in (dev,test),!disabled",
+      "team",
+      "",
+    ])("passes label selector %j to Kubernetes unchanged", async (labelSelector) => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({
+        items: [{ metadata: { name: "sandbox-claim-aaa" } }],
+      });
+      const client = new SandboxClient({ namespace: "team-a" });
+
+      expect(await client.listAllSandboxes("team-b", labelSelector)).toEqual([
+        "sandbox-claim-aaa",
+      ]);
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "team-b",
+        plural: CLAIM_PLURAL_NAME,
+        labelSelector,
+      });
+    });
+
+    it("omits an undefined label selector", async () => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
+      const client = new SandboxClient();
+
+      await client.listAllSandboxes("team-a", undefined);
+
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "team-a",
+        plural: CLAIM_PLURAL_NAME,
+      });
+    });
+
+    it.each([
+      undefined,
+      "",
+    ])("uses the configured default namespace when namespace is %j", async (namespace) => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce({ items: [] });
+      const client = new SandboxClient({ namespace: "team-a" });
+
+      await client.listAllSandboxes(namespace, "app=my-agent");
+
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toStrictEqual({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: "team-a",
+        plural: CLAIM_PLURAL_NAME,
+        labelSelector: "app=my-agent",
+      });
+    });
+
+    it.each([
+      { response: { items: [] }, expected: [] },
+      { response: {}, expected: [] },
+      {
+        response: {
+          items: [
+            { metadata: { name: "sandbox-claim-bbb" } },
+            {},
+            { metadata: {} },
+            { metadata: { name: "" } },
+            { metadata: { name: "sandbox-claim-aaa" } },
+          ],
+        },
+        expected: ["sandbox-claim-bbb", "sandbox-claim-aaa"],
+      },
+    ])("extracts claim names from $response with a selector", async ({
+      response,
+      expected,
+    }) => {
+      mockListNamespacedCustomObject.mockResolvedValueOnce(response);
+      const client = new SandboxClient();
+
+      expect(await client.listAllSandboxes("default", "app=my-agent")).toEqual(
+        expected,
+      );
+      expect(mockListNamespacedCustomObject.mock.calls[0][0]).toHaveProperty(
+        "labelSelector",
+        "app=my-agent",
+      );
+    });
+
+    it("propagates the original Kubernetes error with a selector", async () => {
+      const error = new Error("Forbidden");
+      mockListNamespacedCustomObject.mockRejectedValueOnce(error);
+      const client = new SandboxClient();
+
+      await expect(
+        client.listAllSandboxes("default", "app=my-agent"),
+      ).rejects.toBe(error);
+      expect(mockListNamespacedCustomObject).toHaveBeenCalledOnce();
     });
   });
 
@@ -1410,6 +2730,45 @@ describe("SandboxClient (registry)", () => {
     });
   });
 
+  describe("injected kubeConfig", () => {
+    // Deliberately has no clusters: an injected config is used as given, so
+    // the ambient-config check must not reject it.
+    function injectedKubeConfig() {
+      return {
+        clusters: [],
+        makeApiClient: vi.fn().mockReturnValue({
+          createNamespacedCustomObject: mockCreateNamespacedCustomObject,
+          deleteNamespacedCustomObject: mockDeleteNamespacedCustomObject,
+          getNamespacedCustomObject: mockGetNamespacedCustomObject,
+          listNamespacedCustomObject: mockListNamespacedCustomObject,
+        }),
+      } as unknown as k8s.KubeConfig;
+    }
+
+    it("is used instead of loading the default configuration", () => {
+      const kubeConfig = injectedKubeConfig();
+
+      expect(() => new SandboxClient({ kubeConfig })).not.toThrow();
+
+      expect(MockKubeConfig).not.toHaveBeenCalled();
+      expect(kubeConfig.makeApiClient).toHaveBeenCalledWith(
+        k8s.CustomObjectsApi,
+      );
+    });
+
+    it("authenticates watches with the injected config", async () => {
+      const kubeConfig = injectedKubeConfig();
+      mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
+      mockSandboxReadyFlow("injected-sandbox");
+
+      const client = new SandboxClient({ kubeConfig });
+      await client.createSandbox("tpl", "default");
+
+      expect(k8s.Watch).toHaveBeenCalledWith(kubeConfig);
+      expect(MockKubeConfig).not.toHaveBeenCalled();
+    });
+  });
+
   // ===== option validation =====
 
   describe("namespace DNS label validation", () => {
@@ -1482,11 +2841,11 @@ describe("SandboxClient (registry)", () => {
       const cleanupA = new Promise<void>((resolve) => {
         releaseA = resolve;
       });
-      const deleteAllA = vi
-        .spyOn(clientA, "deleteAll")
+      const exitA = vi
+        .spyOn(clientA as unknown as ExitCleanup, "releaseOnExit")
         .mockImplementation(() => cleanupA);
-      const deleteAllB = vi
-        .spyOn(clientB, "deleteAll")
+      const exitB = vi
+        .spyOn(clientB as unknown as ExitCleanup, "releaseOnExit")
         .mockResolvedValue(undefined);
 
       const killSpy = vi
@@ -1502,8 +2861,8 @@ describe("SandboxClient (registry)", () => {
 
         process.emit("SIGINT", "SIGINT");
 
-        await vi.waitFor(() => expect(deleteAllB).toHaveBeenCalledTimes(1));
-        expect(deleteAllA).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(exitB).toHaveBeenCalledTimes(1));
+        expect(exitA).toHaveBeenCalledTimes(1);
         expect(killSpy).not.toHaveBeenCalled();
 
         releaseA?.();
@@ -1511,8 +2870,8 @@ describe("SandboxClient (registry)", () => {
         expect(killSpy).toHaveBeenCalledWith(process.pid, "SIGINT");
       } finally {
         killSpy.mockRestore();
-        deleteAllA.mockRestore();
-        deleteAllB.mockRestore();
+        exitA.mockRestore();
+        exitB.mockRestore();
         stopA();
         stopB();
       }
@@ -2002,7 +3361,15 @@ describe("SandboxClient (registry)", () => {
       expect(sandbox.sandboxName).toBe("sandbox-ok");
     });
 
-    it("GET path: throws SandboxClaimFailedError on a terminal Ready=False reason", async () => {
+    it.each([
+      ["VolumeClaimTemplatesError", "bad PVC template"],
+      [
+        "InvalidConfiguration",
+        "Service 'warmpool-bad' is invalid: must be no more than 63 characters",
+      ],
+      ["PodFailed", "Pod failed"],
+      ["PodSucceeded", "Pod completed successfully"],
+    ])("GET path: throws SandboxClaimFailedError on terminal reason %s", async (reason, message) => {
       mockCreateNamespacedCustomObject.mockResolvedValueOnce({});
       mockGetNamespacedCustomObject.mockResolvedValueOnce({
         status: {
@@ -2010,17 +3377,17 @@ describe("SandboxClient (registry)", () => {
             {
               type: "Ready",
               status: "False",
-              reason: "VolumeClaimTemplatesError",
-              message: "bad PVC template",
+              reason,
+              message,
             },
           ],
         },
       });
 
       const client = new SandboxClient();
-      await expect(
-        client.createSandbox("warmpool-bad-pvc"),
-      ).rejects.toBeInstanceOf(SandboxClaimFailedError);
+      await expect(client.createSandbox("warmpool-bad")).rejects.toBeInstanceOf(
+        SandboxClaimFailedError,
+      );
       expect(mockWatchFn).not.toHaveBeenCalled();
     });
 
@@ -2216,6 +3583,16 @@ describe("SandboxClient (registry)", () => {
       expect(callArgs.version).toBe(CLAIM_API_VERSION);
       expect(callArgs.plural).toBe(CLAIM_PLURAL_NAME);
       expect(callArgs.name).toBe("my-claim");
+    });
+
+    it("returns undefined for a claim without a warmPoolRef", async () => {
+      mockGetNamespacedCustomObject.mockResolvedValueOnce({
+        spec: { sandboxTemplateRef: { name: "my-template" } },
+      });
+
+      const client = new SandboxClient();
+      const name = await client.getSandboxClaimWarmpoolName("cold-claim");
+      expect(name).toBeUndefined();
     });
 
     it("uses provided namespace", async () => {

@@ -14,25 +14,68 @@
 
 """Utility functions for the Kubernetes Agent Sandbox Python client."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 import functools
+import inspect
 import ipaddress
+import json
+import os
+import tempfile
 import time
-from typing import Any
+from typing import Any, Callable, Literal, ParamSpec, TypeVar, cast
 
 from .constants import SANDBOX_NAME_HASH_LABEL
-from .models import SandboxClaimEnvVar
+from .models import (
+    SandboxClaimEnvVar,
+    SandboxConnectionConfig,
+    SandboxdInClusterConnectionConfig,
+    SandboxdPodTunnelConnectionConfig,
+    SandboxdRouterTunnelConnectionConfig,
+)
 
 
-def record_latency(metric):
+def sandboxd_auth_headers(config: SandboxConnectionConfig) -> dict[str, str]:
+    """Return the transport credential for REST headers and gRPC metadata."""
+    if isinstance(config, SandboxdRouterTunnelConnectionConfig):
+        headers = {}
+        if config.router_auth_token is not None:
+            headers["authorization"] = f"Bearer {config.router_auth_token.get_secret_value()}"
+        # The router strips Authorization, so sandboxd gets its token here.
+        if config.auth_token is not None:
+            headers["x-sandboxd-token"] = config.auth_token.get_secret_value()
+        return headers
+    if isinstance(config, (SandboxdPodTunnelConnectionConfig, SandboxdInClusterConnectionConfig)):
+        if config.auth_token is not None:
+            return {"authorization": f"Bearer {config.auth_token.get_secret_value()}"}
+    return {}
+
+
+def merge_headers(*layers: Mapping[str, str] | None) -> dict[str, str]:
+    """Merge header mappings case-insensitively; later layers win.
+
+    ``None`` layers are skipped. Returns a new dict.
+    """
+    merged: dict[str, tuple[str, str]] = {}
+    for layer in layers:
+        for name, value in (layer or {}).items():
+            merged[name.lower()] = (name, value)
+    return dict(merged.values())
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def record_latency(metric: Any) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorator to measure and record execution latency to a Prometheus metric.
 
     Does not record metrics if self._skip_latency_metric is set to True during execution.
     """
-    def decorator(func):
+    def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
+        def wrapper(self: Any, *args: P.args, **kwargs: P.kwargs) -> R:
             self._skip_latency_metric = False
             start_time = time.perf_counter()
             response = None
@@ -50,37 +93,53 @@ def record_latency(metric):
                     duration = (time.perf_counter() - start_time) * 1000.0
                     status = "success" if getattr(response, "success", False) else "failure"
                     metric.labels(status=status).observe(duration)
-        return wrapper
+        return cast(Callable[P, R], wrapper)
     return decorator
 
-def construct_sandbox_claim_lifecycle_spec(shutdown_after_seconds: int) -> dict[str, str]:
-    """Construct a SandboxClaim lifecycle spec dict from a TTL in seconds.
+def construct_sandbox_claim_lifecycle_spec(
+    shutdown_after_seconds: int | None = None,
+    *,
+    shutdown_policy: Literal["Delete", "DeleteForeground", "Retain"] | None = None,
+    ttl_seconds_after_finished: int | None = None,
+) -> dict[str, Any]:
+    """Construct spec.lifecycle from optional timers and shutdownPolicy.
 
-    Returns a dict suitable for inclusion as ``spec.lifecycle`` in a
-    SandboxClaim manifest, with ``shutdownTime`` set to *now + TTL* (UTC)
-    and ``shutdownPolicy`` set to ``"Delete"``.
-
-    Raises ``ValueError`` if the input is not a positive integer or is
-    too large for datetime arithmetic.
+    When a timer is set and no policy is given, the SDK sends Delete; the API's
+    own default for an omitted policy is Retain. Omitted options produce an
+    empty dict. Invalid policies or timer values raise ValueError.
     """
-    if type(shutdown_after_seconds) is not int:
-        raise ValueError(
-            f"shutdown_after_seconds must be an integer, got {type(shutdown_after_seconds).__name__}"
-        )
-    if shutdown_after_seconds <= 0:
-        raise ValueError(
-            f"shutdown_after_seconds must be positive, got {shutdown_after_seconds}"
-        )
-    try:
-        shutdown_time = datetime.now(timezone.utc) + timedelta(seconds=shutdown_after_seconds)
-    except OverflowError:
-        raise ValueError(
-            f"shutdown_after_seconds is too large: {shutdown_after_seconds}"
-        ) from None
-    return {
-        "shutdownTime": shutdown_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "shutdownPolicy": "Delete",
-    }
+    lifecycle: dict[str, Any] = {}
+    if shutdown_policy is not None:
+        if shutdown_policy not in ("Delete", "DeleteForeground", "Retain"):
+            raise ValueError(
+                f"shutdown_policy must be Delete, DeleteForeground, or Retain, got {shutdown_policy!r}"
+            )
+        lifecycle["shutdownPolicy"] = shutdown_policy
+    if ttl_seconds_after_finished is not None:
+        if not (type(ttl_seconds_after_finished) is int and 0 <= ttl_seconds_after_finished <= 2147483647):
+            raise ValueError(
+                f"ttl_seconds_after_finished must be a nonnegative 32-bit integer, got {ttl_seconds_after_finished!r}"
+            )
+        lifecycle["ttlSecondsAfterFinished"] = ttl_seconds_after_finished
+    if shutdown_after_seconds is not None:
+        if type(shutdown_after_seconds) is not int:
+            raise ValueError(
+                f"shutdown_after_seconds must be an integer, got {type(shutdown_after_seconds).__name__}"
+            )
+        if shutdown_after_seconds <= 0:
+            raise ValueError(
+                f"shutdown_after_seconds must be positive, got {shutdown_after_seconds}"
+            )
+        try:
+            shutdown_time = datetime.now(timezone.utc) + timedelta(seconds=shutdown_after_seconds)
+        except OverflowError:
+            raise ValueError(
+                f"shutdown_after_seconds is too large: {shutdown_after_seconds}"
+            ) from None
+        lifecycle["shutdownTime"] = shutdown_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if lifecycle:
+        lifecycle.setdefault("shutdownPolicy", "Delete")
+    return lifecycle
 
 
 def select_pod_ip(ips: Sequence[object] | None) -> str | None:
@@ -193,6 +252,26 @@ def extract_sandbox_name_hash(sandbox_object: dict[str, Any]) -> str | None:
     return None
 
 
+def current_not_ready(obj: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the object's Ready=False condition, or None if Ready is absent,
+    not False, or describes an older generation than the object's current spec.
+
+    A failure reported for an older generation may already be fixed by the
+    current spec, so it must not end a wait.
+    """
+    generation = (obj.get("metadata") or {}).get("generation")
+    for cond in (obj.get("status") or {}).get("conditions") or []:
+        if cond.get("type") != "Ready":
+            continue
+        if cond.get("status") != "False":
+            return None
+        observed = cond.get("observedGeneration")
+        if observed and generation is not None and observed < generation:
+            return None
+        return cast(Mapping[str, Any], cond)
+    return None
+
+
 def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[SandboxClaimEnvVar]:
     """Construct SandboxClaim env spec entries from a mapping of names to values."""
     if not env:
@@ -202,3 +281,121 @@ def construct_sandbox_claim_env_spec(env: Mapping[str, str] | None) -> list[Sand
         SandboxClaimEnvVar(name=name, value=value)
         for name, value in env.items()
     ]
+
+
+def kubeconfig_from_configuration(
+    configuration: Any,
+    authorization: str | None,
+    default_headers: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build a kubeconfig for the cluster a Kubernetes ``Configuration`` targets.
+
+    ``authorization`` is the resolved ``Authorization`` header value, falling
+    back to the ``Authorization`` in ``default_headers``. Only a bearer token is
+    carried over; basic auth is not. ``default_headers`` are the
+    ``ApiClient``'s; besides that token, only the impersonation user and group
+    are carried over.
+    """
+    cluster: dict[str, Any] = {"server": configuration.host}
+    # kubectl rejects a CA with insecure-skip-tls-verify. The Python clients
+    # ignore the CA when verify_ssl is off, so do the same.
+    if not configuration.verify_ssl:
+        cluster["insecure-skip-tls-verify"] = True
+    elif configuration.ssl_ca_cert:
+        cluster["certificate-authority"] = configuration.ssl_ca_cert
+    if getattr(configuration, "tls_server_name", None):
+        cluster["tls-server-name"] = configuration.tls_server_name
+    if getattr(configuration, "proxy", None):
+        cluster["proxy-url"] = configuration.proxy
+
+    user: dict[str, Any] = {}
+    if configuration.cert_file:
+        user["client-certificate"] = configuration.cert_file
+    if configuration.key_file:
+        user["client-key"] = configuration.key_file
+    headers = {k.lower(): v for k, v in (default_headers or {}).items()}
+    # An ApiClient built with header_name/header_value has no api_key token.
+    scheme, _, credential = (authorization or headers.get("authorization") or "").partition(" ")
+    if scheme.lower() == "bearer" and credential:
+        user["token"] = credential
+    if headers.get("impersonate-user"):
+        user["as"] = headers["impersonate-user"]
+    if headers.get("impersonate-group"):
+        user["as-groups"] = [headers["impersonate-group"]]
+
+    return {
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [{"name": "sandbox", "cluster": cluster}],
+        "users": [{"name": "sandbox", "user": user}],
+        "contexts": [
+            {"name": "sandbox", "context": {"cluster": "sandbox", "user": "sandbox"}}
+        ],
+        "current-context": "sandbox",
+    }
+
+
+# load_kube_config stores a token under BearerToken. Older kubernetes releases
+# and hand-built configurations use authorization.
+_AUTHORIZATION_KEYS = ("BearerToken", "authorization")
+
+
+@contextmanager
+def _temporary_kubeconfig(
+    api_client: Any, authorization: str | None
+) -> Iterator[list[str]]:
+    # mkstemp creates the file 0600, and it can hold a bearer token.
+    fd, path = tempfile.mkstemp(prefix="sandbox-kubeconfig-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(
+                kubeconfig_from_configuration(
+                    api_client.configuration, authorization, api_client.default_headers
+                ),
+                f,
+            )
+        yield ["--kubeconfig", path]
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(path)
+
+
+@contextmanager
+def kubectl_kubeconfig_args(api_client: Any | None) -> Iterator[list[str]]:
+    """Yield the ``kubectl`` flags that target an injected ``ApiClient``'s cluster.
+
+    ``kubectl`` otherwise uses the ambient kubeconfig, which may be a different
+    cluster than the one ``api_client`` talks to. Yields no flags when
+    ``api_client`` is None. The kubeconfig is deleted on exit, which is safe
+    once ``kubectl`` has started because it reads the file only at startup.
+    """
+    if api_client is None:
+        yield []
+        return
+    configuration = api_client.configuration
+    authorization = None
+    for key in _AUTHORIZATION_KEYS:
+        authorization = configuration.get_api_key_with_prefix(key)
+        if authorization:
+            break
+    with _temporary_kubeconfig(api_client, authorization) as args:
+        yield args
+
+
+@asynccontextmanager
+async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator[list[str]]:
+    """Async variant of :func:`kubectl_kubeconfig_args` for ``kubernetes_asyncio``."""
+    if api_client is None:
+        yield []
+        return
+    configuration = api_client.configuration
+    authorization = None
+    for key in _AUTHORIZATION_KEYS:
+        # kubernetes_asyncio runs a possibly async refresh hook here.
+        authorization = configuration.get_api_key_with_prefix(key)
+        if inspect.isawaitable(authorization):
+            authorization = await authorization
+        if authorization:
+            break
+    with _temporary_kubeconfig(api_client, authorization) as args:
+        yield args

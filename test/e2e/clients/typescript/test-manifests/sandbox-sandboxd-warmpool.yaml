@@ -1,0 +1,8 @@
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: ts-sdk-sandboxd-warmpool
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: ts-sdk-sandboxd-template

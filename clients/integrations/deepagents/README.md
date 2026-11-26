@@ -5,7 +5,8 @@ LangChain DeepAgents backend for Kubernetes `agent-sandbox`. This package allows
 ## Quick Install
 
 ```bash
-pip install deepagents-k8s-agent-sandbox
+# Replace <tag> with a release tag from https://github.com/kubernetes-sigs/agent-sandbox/releases
+pip install "git+https://github.com/kubernetes-sigs/agent-sandbox.git@<tag>#subdirectory=clients/integrations/deepagents"
 ```
 
 ## Basic Usage

@@ -14,16 +14,30 @@
 
 """Async handle for one running Sandbox and its local client resources."""
 
+import asyncio
 import logging
+import time
+from typing import Any, Callable, Literal
 
 from .async_connector import AsyncSandboxConnector
 from .async_k8s_helper import AsyncK8sHelper
 from .commands.async_command_executor import AsyncCommandExecutor
 from .constants import POD_NAME_ANNOTATION
+from .exceptions import SandboxError, SandboxNotFoundError
 from .files.async_filesystem import AsyncFilesystem
-from .models import SandboxConnectionConfig, SandboxTracerConfig
+from .models import (
+    SandboxConnectionConfig,
+    SandboxFileConfig,
+    SandboxHealth,
+    SandboxMetadata,
+    SandboxTracerConfig,
+)
 from .trace_manager import create_tracer_manager
+from .trace_manager import async_trace_span
 from .utils import select_pod_ip, extract_sandbox_name_hash
+from .watcher.async_file_watcher import AsyncFileWatcher
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncSandbox:
@@ -40,6 +54,10 @@ class AsyncSandbox:
     async client does not support ``SandboxLocalTunnelConnectionConfig``.
     """
 
+    # The client that tracks this handle sets this hook, so terminate() can drop the
+    # client's entry once the claim is gone.
+    _on_terminated: Callable[["AsyncSandbox"], None] | None = None
+
     def __init__(
         self,
         claim_name: str,
@@ -48,12 +66,15 @@ class AsyncSandbox:
         connection_config: SandboxConnectionConfig | None = None,
         tracer_config: SandboxTracerConfig | None = None,
         k8s_helper: AsyncK8sHelper | None = None,
+        *,
+        file_config: SandboxFileConfig | None = None,
     ) -> None:
         if connection_config is None:
             raise ValueError(
                 "connection_config is required for AsyncSandbox. "
                 "Use SandboxDirectConnectionConfig, SandboxGatewayConnectionConfig, "
-                "SandboxInClusterConnectionConfig, or SandboxdPodTunnelConnectionConfig."
+                "SandboxInClusterConnectionConfig, SandboxdPodTunnelConnectionConfig, "
+                "SandboxdRouterTunnelConnectionConfig, or SandboxdInClusterConnectionConfig."
             )
 
         self.claim_name: str | None = claim_name
@@ -63,14 +84,7 @@ class AsyncSandbox:
 
         self.k8s_helper = k8s_helper or AsyncK8sHelper()
 
-        self.connector = AsyncSandboxConnector(
-            sandbox_id=self.sandbox_id,
-            namespace=self.namespace,
-            connection_config=self.connection_config,
-            k8s_helper=self.k8s_helper,
-            get_pod_ip=self.get_pod_ip,
-            get_pod_name=self.get_pod_name,
-        )
+        self.connector = self._new_connector()
 
         self.tracer_config = tracer_config or SandboxTracerConfig()
         self.trace_service_name = self.tracer_config.trace_service_name
@@ -80,12 +94,98 @@ class AsyncSandbox:
             self.connector, self.tracer, self.trace_service_name
         )
         self._files: AsyncFilesystem | None = AsyncFilesystem(
+            self.connector, self.tracer, self.trace_service_name,
+            **({"file_config": file_config} if file_config is not None else {}),
+        )
+        self._watcher: AsyncFileWatcher | None = AsyncFileWatcher(
             self.connector, self.tracer, self.trace_service_name
         )
 
+        self._lifecycle_uid: str | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._is_closed = False
         self._pod_name: str | None = None
         self._sandbox_name_hash: str | None = None
+
+    async def suspend(self, *, timeout: int = 180) -> None:
+        """Suspend the Sandbox and wait for the controller to report `Suspended`.
+
+        This handle stays active. `timeout` covers the wait for the condition and
+        for another suspend or resume call on this handle to finish.
+        """
+        await self._change_operating_mode("Suspended", timeout)
+
+    async def resume(self, *, timeout: int = 180) -> None:
+        """Resume the Sandbox and wait for the controller to report `Ready`."""
+        await self._change_operating_mode("Running", timeout)
+
+    async def is_suspended(self) -> bool:
+        """Return whether the requested operating mode is `Suspended`."""
+        return (await self._read_lifecycle())[1] == "Suspended"
+
+    async def _read_lifecycle(self) -> tuple[dict[str, Any], str]:
+        """Return the Sandbox and its requested operating mode,
+        and raise if the Sandbox was replaced.
+        """
+        resource = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace)
+        if resource is None:
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' no longer exists")
+        uid = resource["metadata"]["uid"]
+        if self._lifecycle_uid not in (None, uid):
+            raise SandboxNotFoundError(f"Sandbox '{self.sandbox_id}' was replaced")
+        self._lifecycle_uid = uid
+        return resource, resource.get("spec", {}).get("operatingMode", "Running")
+
+    async def _change_operating_mode(self, mode: Literal["Running", "Suspended"], timeout: int) -> None:
+        if self._is_closed:
+            raise RuntimeError("Sandbox connection is closed")
+        start = time.monotonic()
+        try:
+            # A free lock avoids wait_for's zero-timeout failures and cancellation handling.
+            if self._lifecycle_lock.locked():
+                await asyncio.wait_for(self._lifecycle_lock.acquire(), timeout=timeout)
+            else:
+                await self._lifecycle_lock.acquire()
+        except TimeoutError:
+            raise TimeoutError("Timed out waiting for the lifecycle lock") from None
+        try:
+            resource, current_mode = await self._read_lifecycle()
+            if current_mode != mode:
+                resource = await self.k8s_helper.patch_sandbox_operating_mode(
+                    self.sandbox_id, self.namespace, mode, resource["metadata"]["uid"],
+                )
+            if "Suspended" in (mode, current_mode):
+                # AsyncSandboxConnector cannot be reused after close().
+                old_connector = self.connector
+                connector = self._new_connector()
+                connector.transfer_state_from(old_connector)
+                for owner in (self, self._commands, self._files, self._watcher):
+                    if owner is not None:
+                        owner.connector = connector
+                self._pod_name = None
+                await old_connector.close()
+            await self.k8s_helper.wait_for_sandbox_ready(
+                self.sandbox_id, self.namespace, max(0, timeout - int(time.monotonic() - start)),
+                condition="Suspended" if mode == "Suspended" else "Ready",
+                min_generation=resource["metadata"]["generation"],
+            )
+            if (await self._read_lifecycle())[1] != mode:
+                raise SandboxError(
+                    f"Sandbox '{self.sandbox_id}' changed operating mode while waiting for {mode}"
+                )
+        finally:
+            self._lifecycle_lock.release()
+
+    def _new_connector(self) -> AsyncSandboxConnector:
+        return AsyncSandboxConnector(
+            sandbox_id=self.sandbox_id,
+            namespace=self.namespace,
+            connection_config=self.connection_config,
+            k8s_helper=self.k8s_helper,
+            get_pod_ip=self.get_pod_ip,
+            get_pod_name=self.get_pod_name,
+            get_service_fqdn=self.get_service_fqdn,
+        )
 
     async def get_pod_name(self) -> str:
         """Fetches the Sandbox object from Kubernetes and retrieves its current pod name."""
@@ -128,6 +228,13 @@ class AsyncSandbox:
         pod_ips = status_data.get("podIPs", [])
         return select_pod_ip(pod_ips)
 
+    async def get_service_fqdn(self) -> str | None:
+        """Return the controller-reported Service FQDN, when available."""
+        sandbox_object = await self.k8s_helper.get_sandbox(self.sandbox_id, self.namespace) or {}
+        status_data = sandbox_object.get("status") or {}
+        fqdn = status_data.get("serviceFQDN")
+        return fqdn if isinstance(fqdn, str) and fqdn else None
+
     async def status(self) -> tuple[str, str]:
         """
         Retrieves the current status of the Sandbox by inspecting its Kubernetes conditions.
@@ -150,6 +257,39 @@ class AsyncSandbox:
 
         return "SandboxNotReady", "Unknown message"
 
+    @async_trace_span("health")
+    async def health(self, timeout: int = 60) -> SandboxHealth:
+        """Query sandboxd's /v1/health endpoint. sandboxd runtime only.
+
+        The legacy python-runtime has no equivalent endpoint and raises
+        ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "health() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = await self.connector.send_request(
+            "GET", "v1/health", timeout=timeout)
+        return SandboxHealth.from_sandboxd(response.json())
+
+    @async_trace_span("metadata")
+    async def metadata(self, timeout: int = 60) -> SandboxMetadata:
+        """Query sandboxd's /v1/metadata endpoint. sandboxd runtime only.
+
+        Returns orchestrator-injected, non-sensitive runtime configuration
+        (e.g. sandbox id, workspace path, env). The legacy python-runtime
+        has no equivalent endpoint and raises ``NotImplementedError``.
+        """
+        if not self.connector.is_sandboxd():
+            raise NotImplementedError(
+                "metadata() is only supported by the sandboxd runtime; the "
+                "legacy python-runtime has no equivalent endpoint"
+            )
+        response = await self.connector.send_request(
+            "GET", "v1/metadata", timeout=timeout)
+        return SandboxMetadata.from_sandboxd(response.json())
+
     @property
     def commands(self) -> AsyncCommandExecutor | None:
         """Return the command client while this handle is active."""
@@ -159,6 +299,11 @@ class AsyncSandbox:
     def files(self) -> AsyncFilesystem | None:
         """Return the filesystem client while this handle is active."""
         return self._files
+
+    @property
+    def watcher(self) -> AsyncFileWatcher | None:
+        """Filesystem event streaming interface (sandboxd runtime only)."""
+        return self._watcher
 
     @property
     def is_active(self) -> bool:
@@ -182,21 +327,23 @@ class AsyncSandbox:
 
         self._commands = None
         self._files = None
+        self._watcher = None
 
         if self.tracing_manager:
             try:
                 self.tracing_manager.end_lifecycle_span()
             except Exception as e:
-                logging.error(f"Failed to end tracing span: {e}")
+                logger.error(f"Failed to end tracing span: {e}")
 
         self._is_closed = True
-        logging.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
+        logger.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
 
     def _close_for_atexit(self) -> None:
         """Release local resources without touching the owning event loop."""
         self.connector._close_for_atexit()
         self._commands = None
         self._files = None
+        self._watcher = None
         self._is_closed = True
 
     async def terminate(self) -> None:
@@ -215,6 +362,13 @@ class AsyncSandbox:
             return
 
         await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+
+        # The client stops tracking the handle here because its claim is gone. Call
+        # _on_terminated before clearing claim_name, because that name is the client's key.
+        # Drop the hook afterwards, so a kept handle does not keep the client's registry alive.
+        if self._on_terminated is not None:
+            self._on_terminated(self)
+            self._on_terminated = None
 
         # Clear only after success so a failed delete can be retried.
         self.claim_name = None

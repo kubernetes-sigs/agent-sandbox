@@ -1,7 +1,7 @@
 {{ define "main" }}
 <div class="td-content">
-    <h3 class="display-6">{{ .Site.Title }}</h3>
-	<h1 class="display-1">{{ .Title }}</h1>
+    <h3>{{ .Site.Title }}</h3>
+	<h1>{{ .Title }}</h1>
   {{ with .Params.description }}<div class="lead">{{ . | markdownify }}</div>{{ end }}
 	<header class="article-meta">
 		{{ partial "taxonomy_terms_article_wrapper.html" . -}}

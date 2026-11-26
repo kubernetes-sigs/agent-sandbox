@@ -44,23 +44,13 @@ Use `jupyterlab-full.yaml` which contains everything in a single file.
 
 **Steps:**
 
-1. **Create the HuggingFace token secret:**
-
-    ```bash
-    kubectl create secret generic jupyter-hf-token \
-      --from-literal=token="<your-hf-token>" \
-      --namespace=default
-    ```
-
-    Get your token from: <https://huggingface.co/settings/tokens>
-
-2. **Deploy everything:**
+1. **Deploy everything:**
 
     ```bash
     kubectl apply -f jupyterlab-full.yaml
     ```
 
-3. **Skip to "Verify Installation" section below.**
+2. **Skip to "Verify Installation" section below.**
 
 
 ### Method B: Modular Deployment
@@ -69,17 +59,7 @@ Use `jupyterlab.yaml` + create ConfigMap from files. This keeps YAML clean.
 
 **Steps:**
 
-1. **Create the HuggingFace token secret:**
-
-    ```bash
-    kubectl create secret generic jupyter-hf-token \
-      --from-literal=token="your_actual_HF_token_here" \
-      --namespace=default
-    ```
-
-    Get your token from: <https://huggingface.co/settings/tokens>
-
-2. **Create the ConfigMap from files:**
+1. **Create the ConfigMap from files:**
 
     ```bash
     kubectl create configmap jupyter-init-files \
@@ -95,7 +75,7 @@ Use `jupyterlab.yaml` + create ConfigMap from files. This keeps YAML clean.
     kubectl get configmap jupyter-init-files -o yaml
     ```
 
-3. **Deploy the Sandbox:**
+2. **Deploy the Sandbox:**
 
     ```bash
     kubectl apply -f jupyterlab.yaml
@@ -163,12 +143,40 @@ kubectl port-forward --address 0.0.0.0 pod/jupyterlab-sandbox 8888:8888
 
 ### Resources
 
-1. **Secret** (`jupyter-hf-token`): Stores your HuggingFace token
-2. **ConfigMap** (`jupyter-init-files`): Contains Python scripts and notebooks
-3. **Sandbox** (`jupyterlab-sandbox`): Creates the JupyterLab environment with:
+1. **ConfigMap** (`jupyter-init-files`): Contains Python scripts and notebooks
+2. **Sandbox** (`jupyterlab-sandbox`): Creates the JupyterLab environment with:
    - Init container: Downloads models and installs dependencies
    - Main container: Runs JupyterLab server
    - PVC: 20Gi persistent storage
+
+## Optional: Gated or Private Models
+
+The default models are public, so no HuggingFace token is needed and the
+manifests do not reference one. If you add a gated or private model (see "Add
+More Models"), give the init container a token. Do not give it to the
+JupyterLab container, because notebook code can read that container's
+environment.
+
+1. Create the Secret (get a token from <https://huggingface.co/settings/tokens>):
+
+    ```bash
+    kubectl create secret generic jupyter-hf-token \
+      --from-literal=token="<your-hf-token>" \
+      --namespace=default
+    ```
+
+2. In the manifest, add this to the `env` list of the `setup-environment` init
+   container only:
+
+    ```yaml
+    - name: HF_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: jupyter-hf-token
+          key: token
+    ```
+
+3. Apply the manifest again and force re-init (see "Add More Python Packages").
 
 ## Customization
 
@@ -273,7 +281,7 @@ kubectl logs jupyterlab-sandbox -c setup-environment
 
 **Common issues:**
 
-1. **Invalid HuggingFace token** - 401 Unauthorized errors
+1. **Invalid HuggingFace token** - 401 Unauthorized errors (only if you added the optional token)
    - Solution: Verify your token at <https://huggingface.co/settings/tokens>
    - Update the secret:
 
@@ -317,9 +325,9 @@ kubectl logs jupyterlab-sandbox -c jupyterlab
 # Delete Sandbox (also deletes pod and PVC)
 kubectl delete sandbox jupyterlab-sandbox
 
-# Delete ConfigMap and Secret
+# Delete ConfigMap (and the Secret, only if you created the optional one)
 kubectl delete configmap jupyter-init-files
-kubectl delete secret jupyter-hf-token
+kubectl delete secret jupyter-hf-token --namespace=default --ignore-not-found
 ```
 
 ### Keep Data, Remove Deployment

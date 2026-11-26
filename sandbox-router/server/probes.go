@@ -17,13 +17,35 @@ package server
 import (
 	"net/http"
 	"sync/atomic"
+	"time"
 )
 
-// Probes serves /healthz and /readyz. Liveness (/healthz) is always 200.
-// Readiness (/readyz) flips to 503 once MarkUnready is called, which lets
-// load balancers drain the pod ahead of shutdown.
+// Probes serves /healthz and /readyz. Liveness (/healthz) returns 200 unless
+// startup has run past the deadline set by SetStartupDeadline. Readiness
+// (/readyz) flips to 503 once MarkUnready is called, which lets load
+// balancers drain the pod ahead of shutdown.
 type Probes struct {
-	ready atomic.Bool
+	// state holds a probeState. One atomic value keeps /healthz and /readyz
+	// from seeing a half-applied transition.
+	state atomic.Int32
+	// startupDeadline is Unix nanoseconds; zero means no deadline.
+	startupDeadline atomic.Int64
+}
+
+type probeState int32
+
+const (
+	// stateStarting is the state before the first MarkReady. Only this state
+	// is subject to the startup deadline.
+	stateStarting probeState = iota
+	stateReady
+	// stateDraining follows MarkUnready after startup, so shutdown does not
+	// turn liveness red.
+	stateDraining
+)
+
+func (p *Probes) isReady() bool {
+	return probeState(p.state.Load()) == stateReady
 }
 
 // NewProbes returns a Probes initialized to not-yet-ready. Call MarkReady
@@ -32,19 +54,34 @@ func NewProbes() *Probes {
 	return &Probes{}
 }
 
+// SetStartupDeadline makes /healthz return 503 if the pod has not been marked
+// ready by t. This bounds how long a startup step can hang before the kubelet
+// restarts the container.
+func (p *Probes) SetStartupDeadline(t time.Time) {
+	p.startupDeadline.Store(t.UnixNano())
+}
+
 // MarkReady advertises the pod as ready.
 func (p *Probes) MarkReady() {
-	p.ready.Store(true)
+	p.state.Store(int32(stateReady))
 }
 
-// MarkUnready forces /readyz to 503.
+// MarkUnready forces /readyz to 503. Before the first MarkReady it does
+// nothing, so the startup deadline still applies.
 func (p *Probes) MarkUnready() {
-	p.ready.Store(false)
+	p.state.CompareAndSwap(int32(stateReady), int32(stateDraining))
 }
 
-// Healthz always returns 200 OK with the Python-compatible JSON body so
-// tooling that parses {"status":"ok"} keeps working.
+// Healthz returns 200 OK with the Python-compatible JSON body so tooling that
+// parses {"status":"ok"} keeps working. It returns 503 only when startup has
+// missed its deadline.
 func (p *Probes) Healthz(w http.ResponseWriter, _ *http.Request) {
+	if deadline := p.startupDeadline.Load(); deadline != 0 &&
+		probeState(p.state.Load()) == stateStarting && time.Now().UnixNano() > deadline {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"startup timed out"}`))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -52,7 +89,7 @@ func (p *Probes) Healthz(w http.ResponseWriter, _ *http.Request) {
 
 // Readyz returns 200 if ready, 503 otherwise.
 func (p *Probes) Readyz(w http.ResponseWriter, _ *http.Request) {
-	if p.ready.Load() {
+	if p.isReady() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 		return

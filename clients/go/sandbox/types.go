@@ -18,7 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
+
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
 )
 
 const (
@@ -35,6 +41,7 @@ const (
 	headerSandboxPort      = "X-Sandbox-Port"
 	headerSandboxPodIP     = "X-Sandbox-Pod-IP"
 	headerSandboxTimeout   = "X-Sandbox-Timeout"
+	headerSandboxdToken    = "X-Sandboxd-Token"
 	headerRequestID        = "X-Request-ID"
 )
 
@@ -43,6 +50,8 @@ var (
 	ErrNotReady         = errors.New("sandbox is not ready")
 	ErrTimeout          = errors.New("operation timed out")
 	ErrClaimFailed      = errors.New("claim creation failed")
+	ErrWarmPoolNotFound = errors.New("sandbox warm pool not found")
+	ErrTemplateNotFound = errors.New("sandbox template not found")
 	ErrPortForwardDied  = errors.New("port-forward connection lost")
 	ErrNoSandboxService = errors.New("sandbox has no headless Service")
 	ErrAlreadyOpen      = errors.New("sandbox is already open; call Close first")
@@ -52,8 +61,13 @@ var (
 	ErrGatewayDeleted   = errors.New("gateway was deleted during address discovery")
 	ErrResponseTooLarge = errors.New("response exceeded 16 MB limit")
 	// ErrUnsupportedByRuntime is returned by operations the selected
-	// runtime cannot perform (e.g. Delete on the legacy python-runtime).
+	// runtime or connection cannot perform (e.g. Delete on the legacy
+	// python-runtime, or Run with RuntimeSandboxd and APIURL).
 	ErrUnsupportedByRuntime = errors.New("operation not supported by the sandbox runtime")
+	// ErrProcessProtocol indicates an invalid or incomplete process event stream.
+	ErrProcessProtocol = errors.New("invalid process event stream")
+	// ErrConcurrentRecv indicates that another Recv is already in progress.
+	ErrConcurrentRecv = errors.New("concurrent Recv on process handle")
 )
 
 // HTTPError represents a non-OK HTTP response from the sandbox.
@@ -77,10 +91,18 @@ type CallOption func(*callOptions)
 type callOptions struct {
 	timeout     time.Duration
 	maxAttempts int // 0 = use default (maxAttempts const); 1 = no retry
+	env         map[string]string
+	cwd         string
+	pty         *processv1.PTY
+	appendWrite bool
+	createOnly  bool
+	recursive   bool
+	maxDepth    int // 0 = unlimited
 }
 
-// WithTimeout sets the total timeout for a single operation, overriding
-// the default RequestTimeout for that call.
+// WithTimeout sets the total timeout for a single operation. HTTP operations
+// override their default RequestTimeout. For Commands.Start it covers the
+// entire stream, including startup; Start has no default timeout.
 func WithTimeout(d time.Duration) CallOption {
 	return func(o *callOptions) {
 		o.timeout = d
@@ -89,7 +111,8 @@ func WithTimeout(d time.Duration) CallOption {
 
 // WithMaxAttempts sets the maximum number of attempts for an operation.
 // Values ≤0 are ignored and the default is used (1 for Run, 6 for file
-// operations).
+// operations). Commands.Start rejects values greater than 1 because a
+// non-idempotent process creation cannot be safely replayed.
 //
 //	result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 func WithMaxAttempts(n int) CallOption {
@@ -97,6 +120,261 @@ func WithMaxAttempts(n int) CallOption {
 		if n > 0 {
 			o.maxAttempts = n
 		}
+	}
+}
+
+// WithEnv sets environment variables for a single Run or Commands.Start, merged over the
+// sandbox's own environment (a key given here wins). Repeated calls
+// accumulate. Both return ErrUnsupportedByRuntime on the legacy
+// python-runtime, which cannot carry them. Other operations ignore it.
+//
+//	result, err := client.Run(ctx, "echo $GREETING", sandbox.WithEnv(map[string]string{"GREETING": "hi"}))
+func WithEnv(env map[string]string) CallOption {
+	return func(o *callOptions) {
+		if o.env == nil {
+			o.env = make(map[string]string, len(env))
+		}
+		maps.Copy(o.env, env)
+	}
+}
+
+// WithWorkingDir sets the working directory for Run or Commands.Start, relative to the
+// sandbox root (the default). sandboxd rejects a directory that resolves
+// outside the root. Both return ErrUnsupportedByRuntime on the legacy
+// python-runtime. Other operations ignore it.
+func WithWorkingDir(dir string) CallOption {
+	return func(o *callOptions) {
+		o.cwd = dir
+	}
+}
+
+// WithPTY allocates a pseudo-terminal for Commands.Start and merges stderr into
+// stdout. Both dimensions must be in [1, 65535]. Run rejects the option; other
+// operations ignore it.
+func WithPTY(cols, rows uint32) CallOption {
+	return func(o *callOptions) {
+		o.pty = &processv1.PTY{Cols: cols, Rows: rows}
+	}
+}
+
+// WithAppend makes Files.Write or Files.WriteReader add to the end of the file
+// instead of replacing it. An append is not atomic, and the call does not retry
+// unless WithMaxAttempts is set, because a retry can add the content twice.
+// Other operations ignore it. It cannot be combined with WithCreateOnly.
+// Returns ErrUnsupportedByRuntime on the legacy python-runtime.
+func WithAppend() CallOption {
+	return func(o *callOptions) {
+		o.appendWrite = true
+	}
+}
+
+// WithCreateOnly makes Files.Write or Files.WriteReader fail with a 412
+// HTTPError if the path already exists. The call does not retry unless
+// WithMaxAttempts is set, because a retry after a lost response would fail
+// with 412. Other operations ignore it. It cannot be combined with WithAppend.
+// Returns ErrUnsupportedByRuntime on the legacy python-runtime.
+func WithCreateOnly() CallOption {
+	return func(o *callOptions) {
+		o.createOnly = true
+	}
+}
+
+// WithRecursive makes Files.List include nested entries. Entry names are then
+// paths relative to the listed directory. List returns ErrUnsupportedByRuntime
+// on the legacy python-runtime. Other operations ignore it.
+func WithRecursive() CallOption {
+	return func(o *callOptions) {
+		o.recursive = true
+	}
+}
+
+// WithMaxDepth limits how many directory levels a recursive Files.List
+// descends, where 1 lists only the directory's own entries. Values <= 0 are
+// ignored. It has no effect without WithRecursive.
+func WithMaxDepth(n int) CallOption {
+	return func(o *callOptions) {
+		if n > 0 {
+			o.maxDepth = n
+		}
+	}
+}
+
+// ListOption configures Client.ListAllSandboxes.
+type ListOption func(*listOptions)
+
+type listOptions struct {
+	labelSelector string
+}
+
+// WithLabelSelector restricts the listing to claims matching a Kubernetes
+// label selector, for example "app=agent,tier!=dev". Pair it with
+// Options.Labels, which stamps labels on the claims the client creates.
+func WithLabelSelector(selector string) ListOption {
+	return func(o *listOptions) {
+		o.labelSelector = selector
+	}
+}
+
+// CreateOption configures per-sandbox options for Client.CreateSandbox,
+// overriding or merging onto the Client's base Options for that call.
+type CreateOption func(*createOptions)
+
+// createOptions collects per-call overrides. It is unexported, like
+// callOptions and listOptions, so a CreateOption cannot reach the Client's
+// base Options.
+type createOptions struct {
+	claimLabels          map[string]string
+	podLabels            map[string]string
+	podAnnotations       map[string]string
+	env                  []extv1beta1.EnvVar
+	envSet               bool
+	volumeClaimTemplates []sandboxv1beta1.PersistentVolumeClaimTemplate
+	volumeClaimSet       bool
+	claimName            string
+	adoptExisting        bool
+	shutdownAfter        *time.Duration
+	shutdownPolicy       *extv1beta1.ShutdownPolicy
+	ttlAfterFinished     *int32
+	sandboxReadyTimeout  time.Duration
+}
+
+// apply layers the per-call overrides onto o, a shallow copy of the Client's
+// base Options. It must not write into o's maps or slices: unless overridden
+// they alias the Client's until New's setDefaults copies them.
+func (co *createOptions) apply(o *Options) {
+	o.Labels = mergeStringMap(o.Labels, co.claimLabels)
+	o.PodLabels = mergeStringMap(o.PodLabels, co.podLabels)
+	o.PodAnnotations = mergeStringMap(o.PodAnnotations, co.podAnnotations)
+	if co.envSet {
+		o.Env = co.env
+	}
+	if co.volumeClaimSet {
+		o.VolumeClaimTemplates = co.volumeClaimTemplates
+	}
+	o.ClaimName = co.claimName
+	o.AdoptExisting = co.adoptExisting
+	if co.shutdownAfter != nil {
+		o.ShutdownAfter = *co.shutdownAfter
+	}
+	if co.shutdownPolicy != nil {
+		o.ShutdownPolicy = *co.shutdownPolicy
+	}
+	if co.ttlAfterFinished != nil {
+		o.TTLSecondsAfterFinished = co.ttlAfterFinished
+	}
+	if co.sandboxReadyTimeout != 0 {
+		o.SandboxReadyTimeout = co.sandboxReadyTimeout
+	}
+}
+
+func mergeStringMap(base, override map[string]string) map[string]string {
+	if len(override) == 0 {
+		return base
+	}
+	merged := make(map[string]string, len(base)+len(override))
+	maps.Copy(merged, base)
+	maps.Copy(merged, override)
+	return merged
+}
+
+// WithClaimLabels merges labels onto the SandboxClaim metadata for a single
+// CreateSandbox call. Per-call keys override colliding Client-level Options.Labels
+// keys; the SDK's created-by label always wins. Repeated calls accumulate.
+func WithClaimLabels(labels map[string]string) CreateOption {
+	cloned := maps.Clone(labels)
+	return func(o *createOptions) {
+		o.claimLabels = mergeStringMap(o.claimLabels, cloned)
+	}
+}
+
+// WithPodLabels merges labels onto spec.additionalPodMetadata.labels for a
+// single CreateSandbox call. Per-call keys override colliding Client-level
+// Options.PodLabels keys. Repeated calls accumulate.
+func WithPodLabels(labels map[string]string) CreateOption {
+	cloned := maps.Clone(labels)
+	return func(o *createOptions) {
+		o.podLabels = mergeStringMap(o.podLabels, cloned)
+	}
+}
+
+// WithPodAnnotations merges annotations onto spec.additionalPodMetadata.annotations
+// for a single CreateSandbox call. Per-call keys override colliding Client-level
+// Options.PodAnnotations keys. Repeated calls accumulate.
+func WithPodAnnotations(annotations map[string]string) CreateOption {
+	cloned := maps.Clone(annotations)
+	return func(o *createOptions) {
+		o.podAnnotations = mergeStringMap(o.podAnnotations, cloned)
+	}
+}
+
+// WithClaimEnv sets the environment variables injected into the SandboxClaim
+// for a single CreateSandbox call, replacing Client-level Options.Env.
+func WithClaimEnv(env []extv1beta1.EnvVar) CreateOption {
+	cloned := slices.Clone(env)
+	return func(o *createOptions) {
+		o.env = cloned
+		o.envSet = true
+	}
+}
+
+// WithVolumeClaimTemplates sets spec.volumeClaimTemplates on the SandboxClaim
+// for a single CreateSandbox call, replacing Client-level Options.VolumeClaimTemplates.
+func WithVolumeClaimTemplates(templates []sandboxv1beta1.PersistentVolumeClaimTemplate) CreateOption {
+	cloned := cloneVolumeClaimTemplates(templates)
+	return func(o *createOptions) {
+		o.volumeClaimTemplates = cloned
+		o.volumeClaimSet = true
+	}
+}
+
+// WithShutdownAfter sets the claim lifetime for a single CreateSandbox call,
+// replacing Client-level Options.ShutdownAfter. Zero means no expiry.
+func WithShutdownAfter(d time.Duration) CreateOption {
+	return func(o *createOptions) {
+		o.shutdownAfter = &d
+	}
+}
+
+// WithShutdownPolicy sets spec.lifecycle.shutdownPolicy for a single
+// CreateSandbox call, replacing Client-level Options.ShutdownPolicy.
+func WithShutdownPolicy(p extv1beta1.ShutdownPolicy) CreateOption {
+	return func(o *createOptions) {
+		o.shutdownPolicy = &p
+	}
+}
+
+// WithTTLSecondsAfterFinished sets spec.lifecycle.ttlSecondsAfterFinished for a
+// single CreateSandbox call, replacing Client-level Options.TTLSecondsAfterFinished.
+func WithTTLSecondsAfterFinished(seconds int32) CreateOption {
+	return func(o *createOptions) {
+		o.ttlAfterFinished = &seconds
+	}
+}
+
+// WithSandboxReadyTimeout sets how long a single CreateSandbox call waits for
+// the sandbox to become ready, replacing Client-level Options.SandboxReadyTimeout.
+// Zero keeps the Client-level value.
+func WithSandboxReadyTimeout(d time.Duration) CreateOption {
+	return func(o *createOptions) {
+		o.sandboxReadyTimeout = d
+	}
+}
+
+// WithClaimName sets a deterministic SandboxClaim name for a single
+// CreateSandbox call. See Options.ClaimName.
+func WithClaimName(name string) CreateOption {
+	return func(o *createOptions) {
+		o.claimName = name
+	}
+}
+
+// WithAdoptExisting makes a single CreateSandbox call attach to an existing
+// SandboxClaim named by WithClaimName instead of failing when it already
+// exists. See Options.AdoptExisting for the checks applied to the existing
+// claim.
+func WithAdoptExisting() CreateOption {
+	return func(o *createOptions) {
+		o.adoptExisting = true
 	}
 }
 
@@ -133,6 +411,51 @@ type ExecutionResult struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+// ProcessEventType identifies an output or exit event from a streaming command.
+type ProcessEventType string
+
+const (
+	ProcessEventStdout ProcessEventType = "stdout"
+	ProcessEventStderr ProcessEventType = "stderr"
+	ProcessEventExit   ProcessEventType = "exit"
+)
+
+// ProcessEvent contains one raw output chunk or the command's exit code.
+// Output chunks need not be complete lines or valid UTF-8. Events from stdout
+// and stderr do not have a guaranteed global ordering.
+type ProcessEvent struct {
+	Type ProcessEventType
+	// Data is populated only for stdout/stderr and remains valid after Recv.
+	Data []byte
+	// ExitCode is populated only for exit events. A nonzero code is not an error.
+	ExitCode int
+}
+
+// ProcessSignal is a supported POSIX signal for a sandboxd process group.
+type ProcessSignal string
+
+const (
+	SignalSIGINT  ProcessSignal = "SIGINT"
+	SignalSIGTERM ProcessSignal = "SIGTERM"
+	SignalSIGKILL ProcessSignal = "SIGKILL"
+)
+
+// Health is the sandboxd runtime's report from GET /v1/health.
+type Health struct {
+	Status string `json:"status"`
+	// UptimeSeconds is how long sandboxd has been running.
+	UptimeSeconds int64 `json:"uptime_seconds"`
+}
+
+// Metadata is the non-sensitive, workload-scoped configuration sandboxd
+// serves from GET /v1/metadata.
+type Metadata struct {
+	// Env holds the environment variables sandboxd exposes: only names
+	// matching its --metadata-env-prefix, minus anything that looks like a
+	// credential. It is never nil.
+	Env map[string]string `json:"env"`
+}
+
 // FileType represents the type of a file entry.
 type FileType string
 
@@ -146,6 +469,8 @@ const (
 // float POSIX timestamp) and the sandboxd wire format (modified_at as an
 // RFC 3339 string, plus mode) into this one shape.
 type FileEntry struct {
+	// Name is the entry's base name, or its path relative to the listed
+	// directory after a WithRecursive listing.
 	Name    string
 	Size    int64
 	Type    FileType

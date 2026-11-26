@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Public clients, configuration models, and errors for Agent Sandbox."""
+
 from .sandbox_client import SandboxClient
+from .models import SandboxdInClusterConnectionConfig, SandboxdRouterTunnelConnectionConfig
 from .metrics_utils import get_metrics, print_metrics
 from .exceptions import (
     SandboxError,
@@ -20,9 +23,12 @@ from .exceptions import (
     SandboxTemplateNotFoundError,
     SandboxWarmPoolNotFoundError,
     SandboxNotReadyError,
+    SandboxNoServiceError,
+    SandboxServiceUnavailableError,
     SandboxClaimFailedError,
     SandboxPortForwardError,
     SandboxRequestError,
+    SandboxResponseTooLargeError,
 )
 
 

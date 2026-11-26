@@ -1,0 +1,64 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: grpc-router-demo
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: grpc-router
+  namespace: grpc-router-demo
+spec:
+  gatewayClassName: grpc-router-demo
+  listeners:
+  - name: grpc-tls
+    protocol: HTTPS
+    port: 443
+    hostname: grpc-router.local
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - kind: Secret
+        name: grpc-router-tls
+    allowedRoutes:
+      kinds:
+      - kind: GRPCRoute
+      namespaces:
+        from: Same
+---
+# No method/service match: the router remains a generic gRPC proxy.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: sandbox-router
+  namespace: grpc-router-demo
+spec:
+  parentRefs:
+  - name: grpc-router
+    sectionName: grpc-tls
+  hostnames:
+  - grpc-router.local
+  rules:
+  - backendRefs:
+    - name: sandbox-router-grpc
+      port: 8080
+---
+# Envoy Gateway v1.9.2: no hidden HTTP or stream cap. Clients still set
+# finite RPC deadlines. Deliberately no retries or request mirroring.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: sandbox-router-grpc
+  namespace: grpc-router-demo
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: GRPCRoute
+    name: sandbox-router
+  timeout:
+    http:
+      requestTimeout: 0s
+      maxStreamDuration: 0s
+      streamIdleTimeout: 0s

@@ -1,0 +1,87 @@
+{{- if .Values.networkPolicy.enabled }}
+# Egress is intentionally broad because the router dials arbitrary sandbox pods
+# in tenant namespaces: narrow it if your tenancy model constrains which
+# namespaces are valid targets.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-router
+  namespace: {{ include "sandbox-router.namespace" . }}
+  labels:
+    {{- include "sandbox-router.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "sandbox-router.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+  # Proxy traffic.
+  - from:
+    {{- toYaml .Values.networkPolicy.proxyIngressFrom | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: 8080
+    {{- if .Values.tls.enabled }}
+    - protocol: TCP
+      port: 8443
+    {{- end }}
+  # Metrics scrape.
+  - from:
+    {{- toYaml .Values.networkPolicy.metricsIngressFrom | nindent 4 }}
+    ports:
+    - protocol: TCP
+      port: 9090
+  # Kubelet probes hit the pod IP directly.
+  - ports:
+    - protocol: TCP
+      port: 8081
+  egress:
+  # DNS for resolving sandbox FQDNs.
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Forwarding to sandbox pods. The rule allows any TCP port, because
+  # X-Sandbox-Port accepts 1 to 65535 (8888 is only the default) and a port
+  # allow-list would block sandboxes that listen elsewhere. The router only dials
+  # TCP, so UDP and SCTP stay closed. The Pod selector matches any Pod that
+  # carries the label the controller sets on sandbox Pods, the same one the
+  # router's informer filters on. The chart does not reserve that label, so
+  # anyone who can create or label Pods in the cluster can make a Pod match.
+  # Reserve the label with admission control.
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchExpressions:
+        - key: agents.x-k8s.io/sandbox-name-hash
+          operator: Exists
+    ports:
+    - protocol: TCP
+  # OTel collector (if tracing or OTel metrics are enabled).
+  - to:
+    {{- with .Values.networkPolicy.otlpEgressTo }}
+    {{- toYaml . | nindent 4 }}
+    {{- else }}
+    - namespaceSelector: {}
+    {{- end }}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.networkPolicy.otlpPort }}
+  # Kubernetes API server, required by the Pod-IP cache and by
+  # --authz-mode=tokenreview. NetworkPolicy cannot name the apiserver, and a
+  # namespaceSelector only matches Pods, so this rule is port-only unless
+  # networkPolicy.apiServerCIDRs lists the apiserver endpoint CIDRs.
+  - ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443
+    {{- with .Values.networkPolicy.apiServerCIDRs }}
+    to:
+    {{- range . }}
+    - ipBlock:
+        cidr: {{ . | quote }}
+    {{- end }}
+    {{- end }}
+{{- end }}

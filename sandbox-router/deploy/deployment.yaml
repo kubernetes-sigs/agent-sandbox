@@ -2,8 +2,8 @@
 # resource requests for your tenant count and request rate — see the
 # "Scaling guidance" section of the package README.
 #
-# This example shows the plain-HTTP setup. For TLS, set --https-bind-address
-# and mount a Secret at /tls (see networkpolicy.yaml + the README's TLS section).
+# This example shows the plain-HTTP setup. For TLS, uncomment the TLS-related
+# arguments and volumes and see networkpolicy.yaml + the README's TLS section.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,8 +32,14 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
         prometheus.io/path: "/metrics"
+        # Uncomment when --metrics-secure-serving is enabled so scrapers
+        # use HTTPS. The scraper must trust the metrics serving certificate.
+        # prometheus.io/scheme: "https"
     spec:
       serviceAccountName: sandbox-router
+      # Mount only the bounded token projected below, so its lifetime is
+      # part of this Pod contract rather than an API server default.
+      automountServiceAccountToken: false
       # Spread replicas across nodes/zones so a single failure doesn't take
       # the router fleet offline.
       topologySpreadConstraints:
@@ -58,6 +64,11 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - --http-bind-address=:8080
+        # Uncomment to enable TLS:
+        # - --https-bind-address=:8443
+        # - --tls-cert-file=/tls/tls.crt
+        # - --tls-key-file=/tls/tls.key
+        # - --metrics-secure-serving
         - --metrics-bind-address=:9090
         - --health-probe-bind-address=:8081
         - --cluster-domain=cluster.local
@@ -74,12 +85,25 @@ spec:
         - name: proxy
           containerPort: 8080
           protocol: TCP
+        # Uncomment to enable TLS:
+        # - name: proxy-tls
+        #   containerPort: 8443
+        #   protocol: TCP
         - name: metrics
           containerPort: 9090
           protocol: TCP
         - name: healthz
           containerPort: 8081
           protocol: TCP
+        volumeMounts:
+        # client-go's in-cluster configuration reads this standard path.
+        - name: kubernetes-api-access
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+        # Uncomment to enable TLS mounts:
+        # - name: tls-certs
+        #   mountPath: /tls
+        #   readOnly: true
         livenessProbe:
           httpGet:
             path: /healthz
@@ -109,6 +133,33 @@ spec:
             drop: ["ALL"]
           seccompProfile:
             type: RuntimeDefault
+      volumes:
+      - name: kubernetes-api-access
+        projected:
+          defaultMode: 0444
+          sources:
+          - serviceAccountToken:
+              # No audience, so kubelet requests the API server's own. The
+              # implicit mount asks for 3607 seconds, which
+              # --service-account-extend-token-expiration stretches to a
+              # year; 3600 keeps this a genuine one-hour token.
+              expirationSeconds: 3600
+              path: token
+          - configMap:
+              name: kube-root-ca.crt
+              items:
+              - key: ca.crt
+                path: ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
+      # Uncomment to provide TLS certificates via Secret:
+      # - name: tls-certs
+      #   secret:
+      #     secretName: sandbox-router-tls
       # Give in-flight requests a chance to finish before the kubelet
       # delivers SIGKILL. The router's own --shutdown-timeout defaults to
       # 30s; keep this slightly larger.

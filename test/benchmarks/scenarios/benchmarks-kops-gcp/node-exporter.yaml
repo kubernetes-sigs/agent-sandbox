@@ -22,7 +22,11 @@
 # control-plane CPU starvation is precisely the condition this exists to
 # measure, so it must survive there: system-node-critical priority and a
 # small dedicated CPU request keep it scheduled and running on a saturated
-# node. Collectors are restricted to the cheap /proc + /sys ones we chart.
+# node. Restrict collectors to keep monitoring overhead low.
+#
+# Live and dying cgroup counts help distinguish workload growth from delayed
+# kernel cleanup. Correlating dying cgroups with node memory and pod startup
+# latency helps diagnose resource retention under pod churn.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -56,6 +60,8 @@ spec:
             - --collector.meminfo
             - --collector.diskstats
             - --collector.loadavg
+            - --collector.textfile
+            - --collector.textfile.directory=/textfile
           ports:
             - name: metrics
               containerPort: 9100
@@ -66,8 +72,8 @@ spec:
               memory: 32Mi
             limits:
               memory: 64Mi
-          # The enabled collectors only read world-readable /proc and /sys
-          # files, so run unprivileged (matching the upstream helm chart's
+          # The enabled collectors read world-readable host files and the sidecar's
+          # textfile output, so run unprivileged (matching the upstream Helm chart's
           # defaults).
           securityContext:
             allowPrivilegeEscalation: false
@@ -85,7 +91,56 @@ spec:
             - name: sys
               mountPath: /host/sys
               readOnly: true
+            - name: textfile
+              mountPath: /textfile
+              readOnly: true
+        # node-exporter does not expose cgroup.stat directly.
+        - name: cgroup-stat
+          image: quay.io/prometheus/node-exporter:v1.8.2
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              trap 'rm -f /textfile/cgroup_stat.prom /textfile/cgroup_stat.prom.tmp' EXIT
+              while true; do
+                if [ -r /host/sys/fs/cgroup/cgroup.stat ] &&
+                  awk '{ printf "# TYPE node_cgroup_stat_%s gauge\nnode_cgroup_stat_%s %s\n", $1, $1, $2 }' \
+                    /host/sys/fs/cgroup/cgroup.stat > /textfile/cgroup_stat.prom.tmp; then
+                  success=1
+                else
+                  success=0
+                  : > /textfile/cgroup_stat.prom.tmp
+                fi
+                printf '# HELP node_cgroup_stat_collection_success Whether the last cgroup.stat collection succeeded.\n# TYPE node_cgroup_stat_collection_success gauge\nnode_cgroup_stat_collection_success %s\n' \
+                  "$success" >> /textfile/cgroup_stat.prom.tmp
+                mv /textfile/cgroup_stat.prom.tmp /textfile/cgroup_stat.prom
+                sleep 15
+              done
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              memory: 16Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: textfile
+              mountPath: /textfile
       volumes:
+        - name: textfile
+          emptyDir: {}
         - name: proc
           hostPath:
             path: /proc

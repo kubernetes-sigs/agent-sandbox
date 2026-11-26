@@ -19,6 +19,7 @@ Two halves, matching the two defects: the pool name was hardcoded to
 invisible), and a miss fell silently through to the on-demand path.
 """
 
+import dataclasses
 import logging
 from unittest.mock import MagicMock
 
@@ -163,7 +164,27 @@ def test_discover_pools_finds_a_foreign_naming_scheme():
                       [_tmpl("r2e-img-aaa", IMG_A)])
   found = r.discover_pools()
   assert found == {IMG_A: DiscoveredPool("r2e-img-aaa-pool", "r2e-img-aaa",
-                                         IMG_A, 500)}
+                                         IMG_A, 500, constants.RUNTIME_CONTAINER)}
+
+
+def test_discover_pools_records_the_container_running_each_image():
+  r = _resources_with([_pool("p-a", "t-a", 1), _pool("p-b", "t-b", 1)],
+                      [_tmpl("t-a", IMG_A), _tmpl("t-b", "example.com/b:1", container="sandbox")])
+  found = r.discover_pools()
+  assert found[IMG_A].runtime_container == constants.RUNTIME_CONTAINER
+  assert found["example.com/b:1"].runtime_container == "sandbox"   # foreign naming
+
+
+def test_adopted_handle_targets_the_discovered_container(make_cluster):
+  c = make_cluster("solo")
+  f = _adopt_fleet(ClusterRegistry([c]))
+  _seed(c, f.config, IMG_A)
+  c.resources.discover_pools.return_value[IMG_A] = dataclasses.replace(
+      c.resources.discover_pools.return_value[IMG_A], runtime_container="sandbox")
+  f.load_tasks([IMG_A])
+  f.plan()
+  h = f.acquire(Task(id="t", image=IMG_A))
+  assert h.runtime_container == "sandbox"
 
 
 def test_discover_pools_skips_a_pool_whose_template_is_gone():
@@ -324,16 +345,21 @@ def test_adopt_teardown_keeps_the_pool_but_sweeps_claims(make_cluster):
   c.resources.delete_claim.assert_called_once_with("claim-1")
 
 
-def test_adopt_teardown_still_removes_unadopted_leftovers(make_cluster):
+def test_adopt_teardown_still_removes_this_runs_unadopted_leftovers(make_cluster):
+  # Teardown lists by THIS run's id, not the namespace-wide managed label — a
+  # concurrent tenant's pools are none of our business (#1736). An unadopted pool
+  # that does carry our run id is still swept; a crashed run's leftovers are the
+  # reaper's job.
   c = make_cluster("solo")
   f = _adopt_fleet(ClusterRegistry([c]))
   _seed(c, f.config, IMG_A)
   f.load_tasks([IMG_A])
   f.plan()
   c.resources.list_warmpools.return_value = [_fleet_style(f.config, IMG_A),
-                                             "stale-pool-from-a-crashed-run"]
+                                             "unadopted-leftover-of-this-run"]
   f.teardown()
-  c.resources.delete_warmpool.assert_called_once_with("stale-pool-from-a-crashed-run")
+  c.resources.list_warmpools.assert_called_with(label_selector=f.run_selector())
+  c.resources.delete_warmpool.assert_called_once_with("unadopted-leftover-of-this-run")
 
 
 # --- 5. the silent fallthrough ------------------------------------------- #

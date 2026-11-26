@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -45,10 +47,65 @@ def test_sdk_clients_are_lazy():
     c = _cluster(name="c")
     H.assert_not_called()
     helper = c.k8s_helper          # now it builds + injects
-    H.assert_called_once()
+    H.assert_called_once_with(api_client=c.api_client)
     assert helper.custom_objects_api is c.custom_api
     assert helper.core_v1_api is c.core_api
     assert c.k8s_helper is helper  # cached
+
+
+def test_concurrent_first_sandbox_client_builds_one_client():
+  # Slow construction widens the window in which every thread sees no client.
+  def slow_client(**kwargs):
+    time.sleep(0.05)
+    return MagicMock()
+
+  c = _cluster(name="c")
+  workers = 16
+  start = threading.Barrier(workers)
+  got = []
+
+  def first_acquire():
+    start.wait()
+    got.append(c.sandbox_client)
+
+  with patch("k8s_agent_sandbox.k8s_helper.K8sHelper"), \
+       patch("k8s_agent_sandbox.SandboxClient", side_effect=slow_client) as SC:
+    threads = [threading.Thread(target=first_acquire) for _ in range(workers)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+  SC.assert_called_once_with(api_client=c.api_client)
+  assert len(got) == workers
+  assert all(client is got[0] for client in got)
+  assert c._sandbox_client is got[0]
+
+
+def test_concurrent_first_k8s_helper_builds_one_helper():
+  # Slow construction widens the window in which every thread sees no helper.
+  def slow_helper(**kwargs):
+    time.sleep(0.05)
+    return MagicMock()
+
+  c = _cluster(name="c")
+  workers = 16
+  start = threading.Barrier(workers)
+  got = []
+
+  def first_read():
+    start.wait()
+    got.append(c.k8s_helper)
+
+  with patch("k8s_agent_sandbox.k8s_helper.K8sHelper", side_effect=slow_helper) as H:
+    threads = [threading.Thread(target=first_read) for _ in range(workers)]
+    for t in threads:
+      t.start()
+    for t in threads:
+      t.join()
+  H.assert_called_once_with(api_client=c.api_client)
+  assert len(got) == workers
+  assert all(helper is got[0] for helper in got)
+  assert c._k8s_helper is got[0]
 
 
 def test_template_spec_merges_cluster_overrides():

@@ -50,6 +50,22 @@ class FakeHandle:
 _CLEAN = ("PRISTINE=abc\nHEAD=abc\nDIRTY=0\nENV=e1\nCFG=g1\nPROCS=5")
 
 
+def test_prime_and_reset_run_in_the_runtime_container_not_the_target():
+  class Handle(FakeHandle):
+    runtime_container = "agent-runtime"
+    target_container = "eval"                  # the episode graded in a sidecar
+
+    def exec(self, command, **kw):
+      self.kwargs.append(kw)
+      return super().exec(command)
+
+  h = Handle([_CLEAN, _CLEAN])
+  h.kwargs = []
+  r = GitRestoreReset()
+  r.reset(h, r.prime(h))
+  assert h.kwargs == [{"container": "agent-runtime"}] * 2
+
+
 def test_prime_captures_baseline_and_disables_gc():
   h = FakeHandle([_CLEAN])
   base = GitRestoreReset().prime(h)
@@ -148,7 +164,7 @@ def _fleet(registry, **cfg):
 
 def _patch_clean_exec(monkeypatch):
   """Make every SandboxHandle.exec return a clean fingerprint (reset always OK)."""
-  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd: _CLEAN)
+  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd, **kw: _CLEAN)
 
 
 def test_reuse_one_claim_per_image(make_cluster, monkeypatch):
@@ -169,7 +185,7 @@ def test_reset_failure_triggers_quarantine(make_cluster, monkeypatch):
   # it regardless of env/config checks) -> quarantine each time
   drift = "PRISTINE=abc\nHEAD=abc\nDIRTY=7\nENV=e1\nCFG=g1\nPROCS=5"
 
-  def fake_exec(self, cmd):
+  def fake_exec(self, cmd, **kw):
     # prime issues `git tag -f pristine`; resets don't
     return _CLEAN if "tag -f pristine" in cmd[2] else drift
   monkeypatch.setattr(SandboxHandle, "exec", fake_exec)
@@ -239,7 +255,7 @@ def test_scale_on_hold_rewarms_on_quarantine(make_cluster, monkeypatch):
   # prime clean (recyclable) but every reset dirty -> quarantine -> re-claim each time
   drift = "PRISTINE=abc\nHEAD=abc\nDIRTY=7\nENV=e1\nCFG=g1\nPROCS=5"
   monkeypatch.setattr(SandboxHandle, "exec",
-                      lambda self, cmd: _CLEAN if "tag -f pristine" in cmd[2] else drift)
+                      lambda self, cmd, **kw: _CLEAN if "tag -f pristine" in cmd[2] else drift)
   c = make_cluster("solo")
   f = _fleet(ClusterRegistry([c]), max_concurrent=1)
   f.load_tasks(["img"] * 3)
@@ -255,7 +271,7 @@ def test_scale_on_hold_rewarms_on_quarantine(make_cluster, monkeypatch):
 def test_scale_on_hold_skips_non_recyclable(make_cluster, monkeypatch):
   # no pristine anchor -> not recyclable -> fresh-claim-per-task path keeps the pool
   empty = "PRISTINE=\nHEAD=\nDIRTY=0\nENV=e1\nCFG=g1\nPROCS=5"
-  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd: empty)
+  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd, **kw: empty)
   c = make_cluster("solo")
   f = _fleet(ClusterRegistry([c]), max_concurrent=1)
   f.load_tasks(["img"] * 3)
@@ -317,7 +333,7 @@ def test_reset_exec_error_quarantines_not_raises():
 def test_non_git_image_falls_back_to_fresh_per_task(make_cluster, monkeypatch):
   # empty pristine -> not recyclable -> fresh claim per task, no reset attempts
   empty = "PRISTINE=\nHEAD=\nDIRTY=0\nENV=e1\nCFG=g1\nPROCS=5"
-  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd: empty)
+  monkeypatch.setattr(SandboxHandle, "exec", lambda self, cmd, **kw: empty)
   c = make_cluster("solo")
   f = _fleet(ClusterRegistry([c]), max_concurrent=1)
   f.load_tasks(["img", "img", "img"])          # 3 tasks, 1 non-git image

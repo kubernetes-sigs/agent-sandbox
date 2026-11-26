@@ -36,7 +36,7 @@ Key features of the `Sandbox` CRD include:
 The `extensions` module provides additional CRDs and controllers that build on the core `Sandbox` API to provide more advanced features.
 
 *   `SandboxTemplate`: Provides a way to define reusable templates for creating Sandboxes, making it easier to manage large numbers of similar Sandboxes.
-*   `SandboxClaim`: Allows users to create Sandboxes from a `SandboxWarmPool`, abstracting away the details of the underlying Sandbox configuration.
+*   `SandboxClaim`: Allows users to create Sandboxes from a `SandboxWarmPool`, abstracting away the details of the underlying Sandbox configuration. See [SandboxClaim identity on Pods](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/configuration.md#sandboxclaim-identity-on-pods) for the Claim name and UID metadata exposed to external services.
 *   `SandboxWarmPool`: Manages a pool of pre-warmed Sandboxes that can be quickly allocated to users, reducing the time it takes to get a new Sandbox up and running.
 
 ## Architecture
@@ -85,6 +85,14 @@ flowchart LR
 ```
 
 ## Installation
+
+Agent Sandbox requires Kubernetes **1.25 or later** with [CRD CEL validation rules](https://kubernetes.io/blog/2022/09/23/crd-validation-rules-beta/) enabled. On Kubernetes 1.25 through 1.28, keep the `CustomResourceValidationExpressions` feature gate enabled. If the gate is disabled when CRDs are installed, the API server drops the CEL rules. Sandbox name validation and volume claim template immutability are then not enforced.
+
+**Kubernetes 1.29 or later is recommended** because CRD CEL validation is stable and cannot be disabled.
+
+Gateway-based client connections must also meet the Kubernetes version requirements of the installed Gateway API CRDs and controller. The full [Gateway API v1.5.0 CRD bundle](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.5.0) requires **Kubernetes 1.31 or later** because of its TLSRoute CEL validation.
+
+Each release is built against the latest Kubernetes libraries and tested with the newest Kubernetes release. Intermediate versions are expected to work but are not regularly tested.
 
 ### Standard Install (Core + Extensions)
 
@@ -188,9 +196,12 @@ kubectl delete -f https://github.com/kubernetes-sigs/agent-sandbox/releases/down
 
 For Helm-based installations, see the [Helm chart README](helm/README.md#uninstallation).
 
-## Configuration
+## Configuration & Performance Tuning
 
-For advanced scale and concurrency tuning (e.g., API QPS and worker counts), please see the [Configuration Guide](docs/configuration.md).
+For controller flags, high-throughput benchmark profiles, warm-pool refill shaping, and API Priority and Fairness (APF) insulation, see:
+*   [Configuration Guide](docs/configuration.md) — full CLI flag reference and deployment examples.
+*   [Performance Tuning Guide](docs/performance-tuning.md) — benchmark data, burst vs. sustained profiles, multi-pool sharding, and managed control-plane checklist.
+*   [APF Insulation Guide](docs/apf-insulation.md) — `FlowSchema` and `PriorityLevelConfiguration` manifests to protect claim adoption from bulk refill traffic.
 
 ## Getting Started
 

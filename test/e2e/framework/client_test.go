@@ -16,9 +16,16 @@ package framework
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -79,5 +86,157 @@ func TestMustUpdateObjectRetriesOnConflict(t *testing.T) {
 	}
 	if updated.Labels["test-key"] != "test-value" {
 		t.Errorf("label not persisted after conflict retry, got labels: %v", updated.Labels)
+	}
+}
+
+func fakePortForwardCmd(t *testing.T, script string) *exec.Cmd {
+	t.Helper()
+	return exec.CommandContext(t.Context(), "sh", "-c", script)
+}
+
+func TestStartPortForwardWaitsForReadyMarker(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	// Chatter before the banner widens the concurrent write/read window on stdout.
+	cmd := fakePortForwardCmd(t, `for i in $(seq 1 40); do echo "warming up $i"; done
+echo "Forwarding from 127.0.0.1:8080 -> 8080"
+exec sleep 30`)
+
+	if err := cl.startPortForward(cmd, portForwardReadyTimeout); err != nil {
+		t.Fatalf("startPortForward failed on a child that printed the ready marker: %v", err)
+	}
+}
+
+func TestStartPortForwardReportsExitBeforeReady(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	cmd := fakePortForwardCmd(t, `echo "error: unable to listen on port 8080" >&2
+exit 1`)
+
+	err := cl.startPortForward(cmd, portForwardReadyTimeout)
+	if err == nil {
+		t.Fatal("startPortForward succeeded for a child that exited without the ready marker")
+	}
+	if !strings.Contains(err.Error(), "unable to listen on port 8080") {
+		t.Errorf("error does not carry the captured stderr: %v", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Errorf("error does not carry the exit status: %v", err)
+	}
+}
+
+// Signalled children report Exited()=false, so ProcessState polling misses them.
+func TestStartPortForwardReportsSignalledChild(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	cmd := fakePortForwardCmd(t, `echo "warming up"
+kill -9 $$`)
+
+	const timeout = 10 * time.Second
+	start := time.Now()
+	err := cl.startPortForward(cmd, timeout)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("startPortForward succeeded for a signalled child")
+	}
+	if !strings.Contains(err.Error(), "signal: killed") {
+		t.Errorf("error does not identify the signal: %v", err)
+	}
+	if elapsed > timeout/5 {
+		t.Errorf("startPortForward took %s to observe a signalled child, close to the %s deadline", elapsed, timeout)
+	}
+}
+
+func TestStartPortForwardTimesOutWithoutReadyMarker(t *testing.T) {
+	cl := &ClusterClient{T: t}
+
+	cmd := fakePortForwardCmd(t, `echo "warming up"
+exec sleep 30`)
+
+	const timeout = 200 * time.Millisecond
+	start := time.Now()
+	err := cl.startPortForward(cmd, timeout)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("startPortForward succeeded for a child that never reported readiness")
+	}
+	if !strings.Contains(err.Error(), "did not report") {
+		t.Errorf("error does not identify the timeout: %v", err)
+	}
+	if !strings.Contains(err.Error(), "warming up") {
+		t.Errorf("error does not carry the output captured so far: %v", err)
+	}
+	if elapsed < timeout {
+		t.Errorf("startPortForward returned after %s, before the %s deadline", elapsed, timeout)
+	}
+}
+
+func TestStartPortForwardCleanupReapsChild(t *testing.T) {
+	var cmd *exec.Cmd
+	if !t.Run("forward", func(t *testing.T) {
+		cl := &ClusterClient{T: t}
+		cmd = fakePortForwardCmd(t, `echo "Forwarding from 127.0.0.1:8080 -> 8080"
+exec sleep 30`)
+		if err := cl.startPortForward(cmd, portForwardReadyTimeout); err != nil {
+			t.Fatalf("startPortForward failed on a child that printed the ready marker: %v", err)
+		}
+	}) {
+		return
+	}
+
+	// Signal reports ErrProcessDone only once Wait has reaped the child.
+	if err := cmd.Process.Signal(syscall.Signal(0)); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("port-forward outlived the test that started it: Signal(0) = %v, want %v", err, os.ErrProcessDone)
+	}
+}
+
+// fatalRecordingT records Fatalf instead of stopping the test, so code paths
+// that end in cl.Fatalf can be asserted on.
+type fatalRecordingT struct {
+	T
+	fatal string
+}
+
+func (f *fatalRecordingT) Fatalf(format string, args ...any) {
+	f.fatal = fmt.Sprintf(format, args...)
+}
+
+// Only kind:// means kind; every other cloud provider id is a real cluster,
+// and a cluster whose nodes carry no provider id at all cannot be classified.
+func TestIsKindCluster(t *testing.T) {
+	tests := []struct {
+		name       string
+		providerID string
+		wantKind   bool
+		wantFatal  bool
+	}{
+		{name: "kind", providerID: "kind://docker/agent-sandbox/agent-sandbox-control-plane", wantKind: true},
+		{name: "gce", providerID: "gce://my-project/us-central1-a/nodes-us-central1-a-abcd"},
+		{name: "aws", providerID: "aws:///us-east-1a/i-0123456789abcdef0"},
+		{name: "azure", providerID: "azure:///subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/nodes-eastus-1.example.k8s.local/virtualMachines/0"},
+		{name: "no provider id", providerID: "", wantFatal: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+				Spec:       corev1.NodeSpec{ProviderID: tt.providerID},
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(controllers.Scheme).
+				WithObjects(node).
+				Build()
+			recorder := &fatalRecordingT{T: t}
+			cl := &ClusterClient{T: recorder, client: fakeClient}
+
+			got := cl.IsKindCluster()
+
+			if got != tt.wantKind {
+				t.Errorf("IsKindCluster() = %v, want %v", got, tt.wantKind)
+			}
+			if gotFatal := recorder.fatal != ""; gotFatal != tt.wantFatal {
+				t.Errorf("IsKindCluster() fatal = %q, want fatal = %v", recorder.fatal, tt.wantFatal)
+			}
+		})
 	}
 }

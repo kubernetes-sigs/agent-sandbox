@@ -55,7 +55,11 @@ generate-python-docs: # Generate Python SDK reference documentation
 	.venv/bin/python -m pip install --upgrade pip
 	.venv/bin/python -m pip install pydoc-markdown==$(PYDOC_MARKDOWN_VERSION)
 	.venv/bin/pydoc-markdown -I ./clients/python/agentic-sandbox-client/ -m k8s_agent_sandbox.sandbox_client -m k8s_agent_sandbox.models > $(REF_PYTHON_PATH).tmp1
-	sed 's/^#/##/' < $(REF_PYTHON_PATH).tmp1 > $(REF_PYTHON_PATH)
+	# pydoc-markdown emits module=h1, class=h2, section=h3, member=h4. The
+	# reference page reserves h1 for the page title, so bump h1-h3 by one
+	# level but keep h4 members at h4 (directly under h3 classes). A naive
+	# `s/^#/##/` would push members to h5 and trigger markdownlint MD001.
+	sed -e 's/^### /#### /' -e 's/^## /### /' -e 's/^# /## /' < $(REF_PYTHON_PATH).tmp1 > $(REF_PYTHON_PATH)
 	rm $(REF_PYTHON_PATH).tmp1
 
 .PHONY: generate-metrics-docs
@@ -153,6 +157,10 @@ lint-api:
 fix-api:
 	./dev/tools/lint-api --fix
 
+.PHONY: lint-helm
+lint-helm:
+	./dev/tools/lint-helm
+
 .PHONY: verify-chart-version
 verify-chart-version:
 	./dev/tools/verify-chart-version
@@ -169,7 +177,7 @@ REMOTE_UPSTREAM ?= upstream
 REMOTE_FORK ?= origin
 
 # Gemini model for release notes generation
-GEMINI_MODEL ?= gemini-3.7-flash
+GEMINI_MODEL ?= gemini-4-neon
 
 # Promote all staging images to registry.k8s.io
 # Usage: make release-promote TAG=vX.Y.Z
@@ -179,7 +187,7 @@ release-promote:
 	./dev/tools/tag-promote-images --tag=${TAG} --k8s-io-dir=${K8S_IO_DIR} --upstream-remote=${REMOTE_UPSTREAM} --fork-remote=${REMOTE_FORK} $(if $(filter true,$(SKIP_TAGGING)),--skip-tagging) $(if $(filter true,$(ONLY_TAGGING)),--only-tagging)
 
 # Publish a draft release to GitHub
-# Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-3.7-flash
+# Usage: make release-publish TAG=vX.Y.Z GEMINI_MODEL=gemini-4-neon
 .PHONY: release-publish
 release-publish: install-gen-tools
 	@if [ -z "$(TAG)" ]; then echo "TAG is required (e.g., make release-publish TAG=vX.Y.Z)"; exit 1; fi

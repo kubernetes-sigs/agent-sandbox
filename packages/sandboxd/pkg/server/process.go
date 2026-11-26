@@ -23,8 +23,6 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -191,12 +189,18 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// it afterwards races with a child that reads the terminal size
 		// immediately (e.g. `stty size` would report 0 0).
 		if req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
-			ptyFile, err = pty.StartWithSize(cmd, &pty.Winsize{
-				Cols: uint16(req.GetPty().GetCols()),
-				Rows: uint16(req.GetPty().GetRows()),
+			err = s.registry.StartChild(cmd, func() (startErr error) {
+				ptyFile, startErr = pty.StartWithSize(cmd, &pty.Winsize{
+					Cols: uint16(req.GetPty().GetCols()),
+					Rows: uint16(req.GetPty().GetRows()),
+				})
+				return startErr
 			})
 		} else {
-			ptyFile, err = pty.Start(cmd)
+			err = s.registry.StartChild(cmd, func() (startErr error) {
+				ptyFile, startErr = pty.Start(cmd)
+				return startErr
+			})
 		}
 		if err != nil {
 			return mapCommandError(err, "failed to start command with PTY")
@@ -231,7 +235,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 			return status.FromContextError(err).Err()
 		}
 
-		if err := cmd.Start(); err != nil {
+		if err := s.registry.StartChild(cmd, cmd.Start); err != nil {
 			closeAll(stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW)
 			return mapCommandError(err, "failed to start command")
 		}
@@ -259,7 +263,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		closeAll(stdoutR, stderrR, stdinW)
 		go func() {
 			stopCancelKill()
-			_ = cmd.Wait()
+			_ = s.registry.WaitChild(cmd)
 			_ = proc.ClosePTY()
 			close(proc.Done)
 		}()
@@ -312,7 +316,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		waitForReaders(&streamWg, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
 		stopCancelKill()
-		waitErr = cmd.Wait()
+		waitErr = s.registry.WaitChild(cmd)
 	} else {
 		streamWg.Add(2)
 		go streamOutput(stdoutR, false)
@@ -322,7 +326,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
 		stopCancelKill()
-		waitErr = cmd.Wait()
+		waitErr = s.registry.WaitChild(cmd)
 	}
 
 	exitCode := int32(0)
@@ -506,7 +510,7 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 		defer timer.Stop()
 		timeExpired = timer.C
 	}
-	if err := cmd.Start(); err != nil {
+	if err := s.registry.StartChild(cmd, cmd.Start); err != nil {
 		return nil, mapCommandError(err, "failed to execute command")
 	}
 	stdoutBuf.collect()
@@ -556,7 +560,7 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 		waitForExit(run.cmd.Process.Pid)
 		close(exited)
 		<-release
-		runErr = run.cmd.Wait()
+		runErr = s.registry.WaitChild(run.cmd)
 		close(waitDone)
 	}()
 	var releaseOnce sync.Once
@@ -853,7 +857,7 @@ func (s *ProcessServer) killProcessTree(ctx context.Context, cmd *exec.Cmd) {
 // silently skipped. In runtimes like gVisor where PGID kill does not
 // propagate, this ensures grandchildren do not outlive the parent.
 func (s *ProcessServer) killDescendants(ctx context.Context, rootPID int) {
-	for _, cpid := range readProcChildren(ctx, rootPID) {
+	for _, cpid := range processmanager.ReadProcChildren(ctx, rootPID) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -865,40 +869,6 @@ func (s *ProcessServer) killDescendants(ctx context.Context, rootPID int) {
 			s.log.V(1).Info("failed to kill descendant process", "pid", cpid, "error", err)
 		}
 	}
-}
-
-// readProcChildren returns the direct children of pid by iterating every
-// thread's /proc/<pid>/task/<tid>/children (a Linux-specific interface
-// enabled by CONFIG_PROC_CHILDREN). Children forked by a non-main thread
-// only appear under that thread's TID, so scanning only the main PID
-// would miss grandchildren of multithreaded parents. Returns nil when the
-// directory is unavailable.
-func readProcChildren(ctx context.Context, pid int) []int {
-	taskDir := fmt.Sprintf("/proc/%d/task", pid)
-	entries, err := os.ReadDir(taskDir)
-	if err != nil {
-		return nil
-	}
-	seen := make(map[int]struct{})
-	var children []int
-	for _, entry := range entries {
-		if ctx.Err() != nil {
-			break
-		}
-		data, err := os.ReadFile(fmt.Sprintf("%s/%s/children", taskDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		for f := range strings.FieldsSeq(string(data)) {
-			if cpid, err := strconv.Atoi(f); err == nil && cpid > 0 {
-				if _, ok := seen[cpid]; !ok {
-					seen[cpid] = struct{}{}
-					children = append(children, cpid)
-				}
-			}
-		}
-	}
-	return children
 }
 
 // waitForReaders blocks until every output reader in wg has finished. Readers

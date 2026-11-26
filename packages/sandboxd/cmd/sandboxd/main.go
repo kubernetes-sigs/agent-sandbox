@@ -239,6 +239,12 @@ func run(cfg *config, log logr.Logger) error {
 		}
 		return nil
 	})
+	if os.Getpid() == 1 {
+		g.Go(func() error {
+			srv.RunReaper(gctx)
+			return nil
+		})
+	}
 	g.Go(func() error {
 		<-gctx.Done()
 		log.Info("shutting down")

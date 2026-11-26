@@ -157,6 +157,12 @@ func (s *Server) ShutdownProcesses(ctx context.Context) {
 	s.registry.SignalAll(syscall.SIGKILL)
 }
 
+// RunReaper collects orphaned grandchildren until ctx is done. Run it only when
+// sandboxd is PID 1, the one case where orphans are re-parented to it.
+func (s *Server) RunReaper(ctx context.Context) {
+	s.registry.RunReaper(ctx)
+}
+
 // ShutdownWatches ends all active WatchDir streams with a clean
 // end-of-stream, unblocking a subsequent grpc GracefulStop the same way
 // ShutdownProcesses does for the Start streams.

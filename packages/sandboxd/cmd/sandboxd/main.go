@@ -51,6 +51,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"sigs.k8s.io/agent-sandbox/internal/version"
+	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/processmanager"
 	"sigs.k8s.io/agent-sandbox/packages/sandboxd/pkg/server"
 )
 
@@ -240,6 +241,9 @@ func run(cfg *config, log logr.Logger) error {
 		return nil
 	})
 	if os.Getpid() == 1 {
+		if !processmanager.ProcChildrenAvailable() {
+			log.Info("orphaned processes will not be reaped: /proc/<pid>/task/<tid>/children is unavailable")
+		}
 		g.Go(func() error {
 			srv.RunReaper(gctx)
 			return nil

@@ -23,7 +23,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// reapInterval is how often RunReaper rescans without a SIGCHLD. A scan can
+// skip a zombie when its PID is briefly shared with a recorded child, or when
+// the kernel omits an entry while a sibling exits mid-read.
+const reapInterval = 10 * time.Second
 
 // StartChild runs start, which must start cmd, and records the child's OS PID
 // as one that sandboxd waits on itself. The registry holds its lock until the
@@ -77,6 +83,8 @@ func (r *ProcessRegistry) RunReaper(ctx context.Context) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGCHLD)
 	defer signal.Stop(sigCh)
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
 	r.ReapOrphans()
 	for {
 		select {
@@ -84,8 +92,17 @@ func (r *ProcessRegistry) RunReaper(ctx context.Context) {
 			return
 		case <-sigCh:
 			r.ReapOrphans()
+		case <-ticker.C:
+			r.ReapOrphans()
 		}
 	}
+}
+
+// ProcChildrenAvailable reports whether this kernel exposes the children file
+// that ReadProcChildren relies on. Without it ReapOrphans finds nothing.
+func ProcChildrenAvailable() bool {
+	_, err := os.Stat(fmt.Sprintf("/proc/self/task/%d/children", os.Getpid()))
+	return err == nil
 }
 
 // ReadProcChildren returns the direct children of pid by iterating every

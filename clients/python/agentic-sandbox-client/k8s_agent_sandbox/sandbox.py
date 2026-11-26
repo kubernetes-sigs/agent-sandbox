@@ -33,7 +33,7 @@ from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION
 from .exceptions import SandboxError, SandboxNotFoundError
-from .utils import select_pod_ip, extract_sandbox_name_hash
+from .utils import claim_uid, select_pod_ip, extract_sandbox_name_hash
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ class Sandbox:
         
         # Internal state tracking
         self._lifecycle_uid: str | None = None
+        self._claim_uid_to_delete: str | None = None
         self._lifecycle_lock = Lock()
         self._is_closed = False
         self._pod_name: str | None = None
@@ -343,7 +344,13 @@ class Sandbox:
             return
 
         if wait:
-            self.k8s_helper.delete_sandbox_claim_and_wait(self.claim_name, self.namespace, timeout)
+            # Remember the UID so a retry after a timeout cannot delete a same-name replacement.
+            if self._claim_uid_to_delete is None:
+                claim = self.k8s_helper.get_sandbox_claim(self.claim_name, self.namespace, timeout)
+                self._claim_uid_to_delete = claim_uid(claim)
+            if self._claim_uid_to_delete is not None:
+                self.k8s_helper.delete_sandbox_claim_and_wait(
+                    self.claim_name, self.namespace, timeout, self._claim_uid_to_delete)
         else:
             self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 

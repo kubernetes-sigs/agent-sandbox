@@ -628,22 +628,38 @@ class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
 
     async def test_terminate_wait_uses_the_waiting_delete(self):
         sandbox, helper = self._build_sandbox()
+        helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {"uid": "u1"}})
         helper.delete_sandbox_claim_and_wait = AsyncMock()
 
         await sandbox.terminate(wait=True, timeout=7)
 
-        helper.delete_sandbox_claim_and_wait.assert_awaited_once_with("my-claim", "demo", 7)
+        helper.delete_sandbox_claim_and_wait.assert_awaited_once_with("my-claim", "demo", 7, "u1")
         helper.delete_sandbox_claim.assert_not_awaited()
         self.assertIsNone(sandbox.claim_name)
 
-    async def test_terminate_wait_timeout_preserves_claim_name_for_retry(self):
+    async def test_terminate_wait_skips_delete_when_claim_is_gone(self):
         sandbox, helper = self._build_sandbox()
-        helper.delete_sandbox_claim_and_wait = AsyncMock(side_effect=TimeoutError("still there"))
+        helper.get_sandbox_claim = AsyncMock(return_value=None)
+        helper.delete_sandbox_claim_and_wait = AsyncMock()
+
+        await sandbox.terminate(wait=True)
+
+        helper.delete_sandbox_claim_and_wait.assert_not_awaited()
+        self.assertIsNone(sandbox.claim_name)
+
+    async def test_terminate_wait_retry_keeps_the_first_claim_uid(self):
+        sandbox, helper = self._build_sandbox()
+        helper.get_sandbox_claim = AsyncMock(side_effect=[{"metadata": {"uid": "u1"}}, {"metadata": {"uid": "u2"}}])
+        helper.delete_sandbox_claim_and_wait = AsyncMock(side_effect=[TimeoutError("still there"), None])
 
         with self.assertRaises(TimeoutError):
             await sandbox.terminate(wait=True)
-
         self.assertEqual(sandbox.claim_name, "my-claim")
+        await sandbox.terminate(wait=True)
+
+        self.assertEqual(helper.get_sandbox_claim.await_count, 1)
+        self.assertEqual(
+            [c.args[3] for c in helper.delete_sandbox_claim_and_wait.await_args_list], ["u1", "u1"])
 
     async def test_failed_terminate_preserves_claim_name_for_retry(self):
         sandbox, helper = self._build_sandbox()

@@ -414,28 +414,37 @@ class K8sHelper:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
-    def delete_sandbox_claim_and_wait(self, name: str, namespace: str, timeout: float) -> None:
-        """Deletes a SandboxClaim in the foreground and waits until it is gone.
+    def delete_sandbox_claim_and_wait(
+        self, name: str, namespace: str, timeout: float, expected_uid: str,
+    ) -> None:
+        """Deletes the SandboxClaim with ``expected_uid`` in the foreground and waits until it is gone.
 
         Raises ``TimeoutError`` if the Claim still exists after ``timeout``
-        seconds. The Claim stays in place so the caller can retry.
+        seconds, including the time spent in each API request. The Claim stays
+        in place so the caller can retry.
         """
         deadline = time.monotonic() + timeout
-        claim = self.get_sandbox_claim(name, namespace)
-        uid = claim_uid(claim)
-        if uid is None:
-            return
-        try:
-            self.delete_sandbox_claim(name, namespace, expected_uid=uid, foreground=True)
-        except client.ApiException as e:
-            if e.status == 409:
-                # The UID precondition failed, so a new Claim replaced the one we meant to delete.
-                return
-            raise
-        while claim_uid(self.get_sandbox_claim(name, namespace)) == uid:
-            if time.monotonic() >= deadline:
+
+        def remaining() -> float:
+            left = deadline - time.monotonic()
+            if left <= 0:
                 raise TimeoutError(f"SandboxClaim '{name}' was not deleted within {timeout} seconds.")
-            time.sleep(CLAIM_DELETE_POLL_INTERVAL)
+            return left
+
+        try:
+            try:
+                self.delete_sandbox_claim(name, namespace, remaining(), expected_uid=expected_uid, foreground=True)
+            except client.ApiException as e:
+                # A webhook can also reject the delete with a 409, so confirm the Claim was replaced.
+                if e.status == 409 and claim_uid(self.get_sandbox_claim(name, namespace, remaining())) != expected_uid:
+                    return
+                raise
+            while claim_uid(self.get_sandbox_claim(name, namespace, remaining())) == expected_uid:
+                time.sleep(min(CLAIM_DELETE_POLL_INTERVAL, remaining()))
+        except urllib3.exceptions.HTTPError as e:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"SandboxClaim '{name}' was not deleted within {timeout} seconds.") from e
+            raise
 
     def patch_sandbox_operating_mode(
         self, name: str, namespace: str, mode: str, uid: str,
@@ -481,7 +490,9 @@ class K8sHelper:
             body=body
         ))
 
-    def get_sandbox_claim(self, name: str, namespace: str) -> dict[str, Any] | None:
+    def get_sandbox_claim(
+        self, name: str, namespace: str, _request_timeout: float | tuple[float, float] | None = None,
+    ) -> dict[str, Any] | None:
         """Gets a SandboxClaim custom resource (or ``None`` if it doesn't exist)."""
         try:
             return cast(dict[str, Any], self.custom_objects_api.get_namespaced_custom_object(
@@ -489,7 +500,8 @@ class K8sHelper:
                 version=CLAIM_API_VERSION,
                 namespace=namespace,
                 plural=CLAIM_PLURAL_NAME,
-                name=name
+                name=name,
+                _request_timeout=_request_timeout,
             ))
         except client.ApiException as e:
             if e.status == 404:

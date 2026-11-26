@@ -34,7 +34,7 @@ from .models import (
 )
 from .trace_manager import create_tracer_manager
 from .trace_manager import async_trace_span
-from .utils import select_pod_ip, extract_sandbox_name_hash
+from .utils import claim_uid, select_pod_ip, extract_sandbox_name_hash
 from .watcher.async_file_watcher import AsyncFileWatcher
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,7 @@ class AsyncSandbox:
         )
 
         self._lifecycle_uid: str | None = None
+        self._claim_uid_to_delete: str | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._is_closed = False
         self._pod_name: str | None = None
@@ -368,7 +369,14 @@ class AsyncSandbox:
             return
 
         if wait:
-            await self.k8s_helper.delete_sandbox_claim_and_wait(self.claim_name, self.namespace, timeout)
+            # Remember the UID so a retry after a timeout cannot delete a same-name replacement.
+            if self._claim_uid_to_delete is None:
+                async with asyncio.timeout(timeout):
+                    claim = await self.k8s_helper.get_sandbox_claim(self.claim_name, self.namespace)
+                self._claim_uid_to_delete = claim_uid(claim)
+            if self._claim_uid_to_delete is not None:
+                await self.k8s_helper.delete_sandbox_claim_and_wait(
+                    self.claim_name, self.namespace, timeout, self._claim_uid_to_delete)
         else:
             await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 

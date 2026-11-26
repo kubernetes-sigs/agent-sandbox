@@ -136,3 +136,85 @@ func TestGetCandidateSkipsMemberWhosePodIsEnding(t *testing.T) {
 		}
 	}
 }
+
+// With only an ending member in the pool, the claim must not adopt it and must
+// not wait on it as a pending-network candidate, so it cold-starts instead of
+// binding to a Pod that is going away. The member keeps its pool ownership.
+func TestAdoptSandboxFromCandidatesSkipsOnlyMemberWhosePodIsEnding(t *testing.T) {
+	for _, reason := range []string{
+		sandboxv1beta1.SandboxReasonPodTerminating,
+		sandboxv1beta1.SandboxReasonPodSucceeded,
+		sandboxv1beta1.SandboxReasonPodFailed,
+		sandboxv1beta1.SandboxReasonExpired,
+	} {
+		t.Run(reason, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := newScheme(t)
+			poolName := "test-pool"
+			template := &extensionsv1beta1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+				Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "workspace", Image: "workspace:latest"}},
+					}},
+				}},
+			}
+			warmPool := &extensionsv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: "default", UID: "pool-uid"},
+				Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: template.Name}},
+			}
+			key := queue.SandboxKey{Namespace: "default", Name: "dying-sb", NodeName: "node-a"}
+			dying := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      key.Name,
+					Namespace: key.Namespace,
+					Labels: map[string]string{
+						warmPoolSandboxLabel:   sandboxcontrollers.NameHash(poolName),
+						sandboxTemplateRefHash: sandboxcontrollers.NameHash("test-template"),
+					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: extensionsv1beta1.GroupVersion.String(),
+						Kind:       extensionsv1beta1.SandboxWarmPoolKind,
+						Name:       poolName,
+						UID:        types.UID("pool-uid"),
+						Controller: new(true),
+					}},
+				},
+				Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+					PodTemplate: template.Spec.PodTemplate,
+				}},
+				Status: sandboxv1beta1.SandboxStatus{
+					NodeName: "node-a",
+					PodIPs:   []string{"10.0.0.7"},
+					Conditions: []metav1.Condition{{
+						Type:   string(sandboxv1beta1.SandboxConditionReady),
+						Status: metav1.ConditionFalse,
+						Reason: reason,
+					}},
+				},
+			}
+			claim := &extensionsv1beta1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: key.Namespace, UID: types.UID("claim-uid")},
+				Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: poolName}},
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, warmPool, claim, dying).Build()
+			warmSandboxQueue := queue.NewSimpleSandboxQueue()
+			warmSandboxQueue.Add(queue.GetNamespacedWarmPoolName(key.Namespace, poolName), key)
+			reconciler := &SandboxClaimReconciler{
+				Client:           c,
+				Scheme:           scheme,
+				WarmSandboxQueue: warmSandboxQueue,
+				Tracer:           asmetrics.NewNoOp(),
+			}
+
+			adopted, pending, err := reconciler.adoptSandboxFromCandidates(ctx, claim)
+			require.NoError(t, err)
+			require.Nil(t, adopted, "the claim must not adopt a member whose Ready reason is %s", reason)
+			require.Zero(t, pending, "a member whose Ready reason is %s must not hold the claim as a pending-network candidate", reason)
+
+			live := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(dying), live))
+			require.False(t, metav1.IsControlledBy(live, claim), "the member must keep its pool ownership")
+		})
+	}
+}

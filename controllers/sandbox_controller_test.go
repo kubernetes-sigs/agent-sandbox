@@ -974,9 +974,9 @@ func TestComputeConditions(t *testing.T) {
 			},
 		},
 		{
-			name:    "35. Container restarted once by its startup probe is reported",
+			name:    "35. Container restarted twice by its startup probe is reported",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
-			pod:     ownedPod(podWithContainerState(corev1.PodRunning, false, probeKilledContainer(1, "Completed", 0, 8*time.Second, notStarted))),
+			pod:     ownedPod(podWithContainerState(corev1.PodRunning, false, probeKilledContainer(2, "Completed", 0, 8*time.Second, notStarted))),
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
@@ -1019,6 +1019,19 @@ func TestComputeConditions(t *testing.T) {
 			name:    "39. Container without a started field adds no detail",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			pod:     ownedPod(podWithContainerState(corev1.PodRunning, false, probeKilledContainer(3, "Error", 1, 5*time.Second, nil))),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready"},
+			},
+		},
+		{
+			// One exit (a transient error, a node reboot) gets no backoff from the
+			// kubelet, so a container back inside its startup-probe window is not
+			// yet in a loop.
+			name:    "40. Container restarted once and inside its startup probe adds no detail",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod:     ownedPod(podWithContainerState(corev1.PodRunning, false, probeKilledContainer(1, "Completed", 0, 8*time.Second, notStarted))),
 			expectedConditions: []metav1.Condition{
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},

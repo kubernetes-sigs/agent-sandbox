@@ -932,14 +932,18 @@ func restartingExit(cs corev1.ContainerStatus, restartOnFailure, restartOnSucces
 	return terminated
 }
 
-// restartedBeforeStarting reports a container that is running again after a
-// restart but has not passed its startup probe, and whose previous run ended
-// before the kubelet would have reset its restart backoff: a startup probe
-// that never passes kills it at the end of every run. A container without a
-// startup probe is started as soon as it runs, so it never matches.
+// restartedBeforeStarting reports a container that is running again after
+// two or more restarts but has not passed its startup probe, and whose previous
+// run ended before the kubelet would have reset its restart backoff: a startup
+// probe that never passes kills it at the end of every run. A container without
+// a startup probe is started as soon as it runs, so it never matches.
+//
+// As in restartingExit, the first exit is not reported: the kubelet restarts
+// it without a backoff. A running container's RestartCount counts its exits
+// so far, so one restart means one exit.
 func restartedBeforeStarting(cs corev1.ContainerStatus) bool {
 	last := cs.LastTerminationState.Terminated
-	if cs.State.Running == nil || cs.Started == nil || *cs.Started || cs.RestartCount == 0 || last == nil {
+	if cs.State.Running == nil || cs.Started == nil || *cs.Started || cs.RestartCount < 2 || last == nil {
 		return false
 	}
 	// As in restartingExit: a StartError run says nothing about a backoff reset.

@@ -43,7 +43,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
-from .utils import construct_sandbox_claim_lifecycle_spec
+from .utils import construct_sandbox_claim_lifecycle_spec, exit_on_sigterm
 from .exceptions import SandboxMetadataError, SandboxNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,7 @@ class SandboxClient(Generic[T]):
             atexit.register(functools.partial(
                 SandboxClient._delete_automatic_sandboxes, self._active_connection_sandboxes, self._explicit_claims
             ))
+            exit_on_sigterm()
 
     def __enter__(self) -> Self:
         return self

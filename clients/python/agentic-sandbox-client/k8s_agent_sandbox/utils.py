@@ -22,7 +22,10 @@ import inspect
 import ipaddress
 import json
 import os
+import signal
+import sys
 import tempfile
+import threading
 import time
 from typing import Any, Callable, Literal, ParamSpec, TypeVar, cast
 
@@ -399,3 +402,16 @@ async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator
             break
     with _temporary_kubeconfig(api_client, authorization) as args:
         yield args
+
+
+def exit_on_sigterm() -> None:
+    """Runs atexit cleanup on SIGTERM unless the application handles SIGTERM itself."""
+    # signal.signal() only works on the main thread.
+    if threading.current_thread() is not threading.main_thread():
+        return
+    if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
+
+
+def _exit_on_sigterm(signum: int, frame: Any) -> None:
+    sys.exit(128 + signum)

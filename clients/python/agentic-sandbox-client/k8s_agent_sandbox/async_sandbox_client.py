@@ -41,7 +41,7 @@ from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
-from .utils import construct_sandbox_claim_lifecycle_spec
+from .utils import construct_sandbox_claim_lifecycle_spec, exit_on_sigterm
 from .models import AdditionalPodMetadata, SandboxConnectionConfig, SandboxFileConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
@@ -207,6 +207,7 @@ class AsyncSandboxClient(Generic[T]):
             atexit.register(functools.partial(
                 AsyncSandboxClient._atexit_cleanup, self._active_connection_sandboxes, self._explicit_claims, api_client
             ))
+            exit_on_sigterm()
 
     async def __aenter__(self) -> Self:
         return self

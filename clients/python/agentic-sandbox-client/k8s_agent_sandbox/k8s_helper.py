@@ -428,7 +428,7 @@ class K8sHelper:
         def remaining() -> float:
             left = deadline - time.monotonic()
             if left <= 0:
-                raise TimeoutError(f"SandboxClaim '{name}' was not deleted within {timeout} seconds.")
+                raise TimeoutError(f"SandboxClaim '{name}' was not deleted before the timeout.")
             return left
 
         try:
@@ -443,7 +443,7 @@ class K8sHelper:
                 time.sleep(min(CLAIM_DELETE_POLL_INTERVAL, remaining()))
         except urllib3.exceptions.HTTPError as e:
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"SandboxClaim '{name}' was not deleted within {timeout} seconds.") from e
+                raise TimeoutError(f"SandboxClaim '{name}' was not deleted before the timeout.") from e
             raise
 
     def patch_sandbox_operating_mode(

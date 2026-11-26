@@ -631,8 +631,10 @@ class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
         helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {"uid": "u1"}})
         helper.delete_sandbox_claim_and_wait = AsyncMock()
 
-        await sandbox.terminate(wait=True, timeout=7)
+        with patch("k8s_agent_sandbox.async_sandbox.time", MagicMock(monotonic=MagicMock(side_effect=[0, 3]))):
+            await sandbox.terminate(wait=True, timeout=10)
 
+        # The initial GET spends part of the budget, so the wait gets the rest.
         helper.delete_sandbox_claim_and_wait.assert_awaited_once_with("my-claim", "demo", 7, "u1")
         helper.delete_sandbox_claim.assert_not_awaited()
         self.assertIsNone(sandbox.claim_name)
@@ -660,6 +662,18 @@ class TestAsyncSandboxTerminateIdempotent(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(helper.get_sandbox_claim.await_count, 1)
         self.assertEqual(
             [c.args[3] for c in helper.delete_sandbox_claim_and_wait.await_args_list], ["u1", "u1"])
+
+    async def test_terminate_retry_without_wait_keeps_the_first_claim_uid(self):
+        sandbox, helper = self._build_sandbox()
+        helper.get_sandbox_claim = AsyncMock(return_value={"metadata": {"uid": "u1"}})
+        helper.delete_sandbox_claim_and_wait = AsyncMock(side_effect=TimeoutError("still there"))
+
+        with self.assertRaises(TimeoutError):
+            await sandbox.terminate(wait=True)
+        await sandbox.terminate()
+
+        helper.delete_sandbox_claim.assert_awaited_once_with("my-claim", "demo", expected_uid="u1")
+        self.assertIsNone(sandbox.claim_name)
 
     async def test_failed_terminate_preserves_claim_name_for_retry(self):
         sandbox, helper = self._build_sandbox()

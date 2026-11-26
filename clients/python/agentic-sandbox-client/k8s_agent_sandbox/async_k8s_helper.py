@@ -472,7 +472,7 @@ class AsyncK8sHelper:
                 while claim_uid(await self.get_sandbox_claim(name, namespace)) == expected_uid:
                     await asyncio.sleep(CLAIM_DELETE_POLL_INTERVAL)
         except TimeoutError as e:
-            raise TimeoutError(f"SandboxClaim '{name}' was not deleted within {timeout} seconds.") from e
+            raise TimeoutError(f"SandboxClaim '{name}' was not deleted before the timeout.") from e
 
     async def patch_sandbox_operating_mode(
         self, name: str, namespace: str, mode: str, uid: str,

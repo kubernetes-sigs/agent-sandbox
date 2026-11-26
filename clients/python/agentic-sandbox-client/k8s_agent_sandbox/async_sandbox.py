@@ -369,6 +369,7 @@ class AsyncSandbox:
             return
 
         if wait:
+            deadline = time.monotonic() + timeout
             # Remember the UID so a retry after a timeout cannot delete a same-name replacement.
             if self._claim_uid_to_delete is None:
                 async with asyncio.timeout(timeout):
@@ -376,9 +377,12 @@ class AsyncSandbox:
                 self._claim_uid_to_delete = claim_uid(claim)
             if self._claim_uid_to_delete is not None:
                 await self.k8s_helper.delete_sandbox_claim_and_wait(
-                    self.claim_name, self.namespace, timeout, self._claim_uid_to_delete)
+                    self.claim_name, self.namespace, max(deadline - time.monotonic(), 0),
+                    self._claim_uid_to_delete)
         else:
-            await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+            # After a timed-out wait=True, keep deleting only that Claim.
+            pinned = {"expected_uid": self._claim_uid_to_delete} if self._claim_uid_to_delete else {}
+            await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace, **pinned)
 
         # The client stops tracking the handle here because its claim is gone. Call
         # _on_terminated before clearing claim_name, because that name is the client's key.

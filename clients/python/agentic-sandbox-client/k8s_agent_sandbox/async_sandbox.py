@@ -381,7 +381,7 @@ class AsyncSandbox:
                     self._claim_uid_to_delete)
         else:
             # After a timed-out wait=True, keep deleting only that Claim.
-            pinned = {"expected_uid": self._claim_uid_to_delete} if self._claim_uid_to_delete else {}
+            pinned: dict[str, Any] = {"expected_uid": self._claim_uid_to_delete} if self._claim_uid_to_delete else {}
             await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace, **pinned)
 
         # The client stops tracking the handle here because its claim is gone. Call

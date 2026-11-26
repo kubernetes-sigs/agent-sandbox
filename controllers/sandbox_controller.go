@@ -878,6 +878,12 @@ func podContainerIssue(pod *corev1.Pod) string {
 // would cost a status write each time.
 func containerIssue(kind string, statuses []corev1.ContainerStatus, restartOnFailure, restartOnSuccess bool) string {
 	for _, cs := range statuses {
+		// A container its startup probe keeps killing is running, not
+		// terminated or waiting, for almost all of each cycle. It gets the
+		// same message.
+		if restartedBeforeStarting(cs) {
+			return crashLoopIssue(kind, cs.Name, cs.LastTerminationState.Terminated.Reason)
+		}
 		// A crash-looping container spends most of each backoff in the
 		// terminated state, and is only reported as waiting/CrashLoopBackOff
 		// for part of it. Both states yield the same message, so the
@@ -926,8 +932,26 @@ func restartingExit(cs corev1.ContainerStatus, restartOnFailure, restartOnSucces
 	return terminated
 }
 
+// restartedBeforeStarting reports a container that is running again after a
+// restart but has not passed its startup probe, and whose previous run ended
+// before the kubelet would have reset its restart backoff: a startup probe
+// that never passes kills it at the end of every run. A container without a
+// startup probe is started as soon as it runs, so it never matches.
+func restartedBeforeStarting(cs corev1.ContainerStatus) bool {
+	last := cs.LastTerminationState.Terminated
+	if cs.State.Running == nil || cs.Started == nil || *cs.Started || cs.RestartCount == 0 || last == nil {
+		return false
+	}
+	// As in restartingExit: a StartError run says nothing about a backoff reset.
+	if started := last.StartedAt; started.Unix() > 0 && last.FinishedAt.Sub(started.Time) >= crashLoopBackOffResetPeriod {
+		return false
+	}
+	return true
+}
+
 // crashLoopIssue is the message for a crash-looping container, shared by the
-// terminated and waiting states so alternating between them changes nothing.
+// running, terminated and waiting states so alternating between them changes
+// nothing.
 func crashLoopIssue(kind, name, lastExit string) string {
 	if lastExit != "" {
 		return fmt.Sprintf("%s %q is in CrashLoopBackOff (last exit: %s)", kind, name, lastExit)

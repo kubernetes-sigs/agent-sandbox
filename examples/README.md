@@ -49,6 +49,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**python-sdk-quickstart**](./python-sdk-quickstart): A quickstart for the Python SDK: create a sandbox, run commands, and manage files without Kubernetes primitives.
 - [**quickstart**](./quickstart): An end-to-end getting-started walkthrough — controller install, warm pool, router, and SDK test client — plus gVisor and Kata isolation variants.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.
+- [**sandbox-headlamp-plugin**](./sandbox-headlamp-plugin): Inspect Agent Sandbox resources in Headlamp with a read-only plugin.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
 - [**sandboxd-sandbox**](./sandboxd-sandbox): An example of running the sandboxd runtime daemon inside a sandbox for command execution and file I/O.
 - [**sandboxed-tools**](./sandboxed-tools): An example of an agent executing its tools inside a sandbox via the Go SDK.

@@ -73,7 +73,6 @@ kubectl delete pod kata-test
 **Next:** Return to the [main quickstart guide — Step 3](README.md#step-3-install-agent-sandbox-controller) to continue setup. Remember to:
 
 - Uncomment the `runtimeClassName: kata-qemu` line in `python-sandbox-template.yaml` before applying in Step 4
-- Use `minikube image load` instead of `kind load` when loading the router image in Step 7
 - Use `minikube delete -p agent-sandbox-kata` instead of `kind delete cluster` for cleanup in Step 10
 
 ## Appendix: Kata-Specific Validation

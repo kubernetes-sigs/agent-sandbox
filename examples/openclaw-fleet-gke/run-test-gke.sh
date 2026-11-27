@@ -22,6 +22,7 @@
 #   [4] template update -> pool refresh -> per-employee rebuild w/ downtime
 #   [5] late-bound per-employee Filestore workspace (persistence proven)
 #   [6] stable per-employee URL through Gateway + sandbox-router
+#   [9] per-employee gateway token: persistent, and rejected by other gateways
 # Pod-snapshot (memory) hibernation is a manual runbook: 60-snapshots/.
 #
 # Requires: kubectl context on the PoC cluster; docker + push access to
@@ -40,6 +41,31 @@ EMP="emp-e2e-$(date +%s | tail -c 5)"
 
 log()  { echo; echo "### $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Prints the gateway token that the startup script keeps in the workspace
+# of the employee whose Pod is $1.
+gateway_token() {
+  kubectl -n "${NS}" exec "$1" -c openclaw -- cat /workspace/.openclaw/gateway-token
+}
+
+# Prints the HTTP status that the gateway in Pod $1 returns for a tool call
+# that carries the token on stdin. The request goes from the fleet portal Pod
+# straight to the Pod IP, which the NetworkPolicy allows. It cannot go through
+# the sandbox-router, because the router strips the Authorization header.
+gateway_status() {
+  local ip
+  ip=$(kubectl -n "${NS}" get pod "$1" -o jsonpath='{.status.podIP}')
+  kubectl -n "${NS}" exec -i deploy/fleet-portal -c portal -- python3 -c '
+import sys
+import requests
+response = requests.post(
+    "http://%s:18789/tools/invoke" % sys.argv[1],
+    headers={"Authorization": "Bearer " + sys.stdin.read().strip()},
+    json={"tool": "agents_list", "args": {}},
+    timeout=10,
+)
+print(response.status_code)' "${ip}"
+}
 
 log "0. Prereqs: secrets, storage, template, pool"
 kubectl apply -f 00-prereqs.yaml
@@ -121,6 +147,8 @@ kubectl -n "${NS}" exec "${POD}" -c openclaw -- \
   sh -c 'echo "poc-marker-$(hostname)" > /workspace/.openclaw/poc-marker.txt'
 kubectl -n "${NS}" exec "${POD}" -c openclaw -- test -f /workspace/.openclaw/poc-marker.txt
 echo "PASS [5]: workspace bound and writable at /workspace/.openclaw"
+# [9] compares against this after the suspend, wake, and rebuild below.
+GATEWAY_TOKEN=$(gateway_token "${POD}")
 
 log "3. Sleep & wake: suspend releases the pod, wake restores state"
 curl -fsS -X POST "${PORTAL}/employees/${EMP}/suspend" \
@@ -239,6 +267,29 @@ POD_CFG=$(kubectl -n "${NS}" get pod -l sandbox.users.io/employee="${EMP_CFG}" \
 kubectl -n "${NS}" exec "${POD_CFG}" -c openclaw -- \
   grep -q "mutated-by-user" /workspace/.openclaw/settings.json \
   || fail "rebuild clobbered user state (seed must be create-if-absent)"
+
+log "9. Gateway token: one per employee, kept across suspend, wake, and rebuild"
+# Both employees are running here, so each gateway can be tried with the
+# other employee's token.
+POD=$(kubectl -n "${NS}" get pod -l sandbox.users.io/employee="${EMP}" \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+token_emp=$(gateway_token "${POD}")
+token_cfg=$(gateway_token "${POD_CFG}")
+[ "${token_emp}" = "${GATEWAY_TOKEN}" ] \
+  || fail "gateway token of ${EMP} changed across suspend, wake, and rebuild"
+[ "${token_emp}" != "${token_cfg}" ] || fail "${EMP} and ${EMP_CFG} share a gateway token"
+status=$(printf '%s' "${token_cfg}" | gateway_status "${POD_CFG}")
+[ "${status}" = "200" ] || fail "gateway of ${EMP_CFG} rejected its own token (HTTP ${status})"
+status=$(printf '%s' "${token_emp}" | gateway_status "${POD_CFG}")
+[ "${status}" = "401" ] \
+  || fail "gateway of ${EMP_CFG} did not reject the token of ${EMP} (HTTP ${status})"
+status=$(printf '%s' "${token_emp}" | gateway_status "${POD}")
+[ "${status}" = "200" ] || fail "gateway of ${EMP} rejected its own token (HTTP ${status})"
+status=$(printf '%s' "${token_cfg}" | gateway_status "${POD}")
+[ "${status}" = "401" ] \
+  || fail "gateway of ${EMP} did not reject the token of ${EMP_CFG} (HTTP ${status})"
+echo "PASS [9]: gateway tokens are per-employee and persistent"
+
 curl -fsS -X DELETE "${PORTAL}/employees/${EMP_CFG}?purge=true" \
   -H "Authorization: Bearer ${TOKEN_CFG}" >/dev/null
 echo "PASS [7]: config seeded pre-bind (seed_ms=${seed_ms}), warm claim kept (${adopted_cfg_ms}ms), merge + hygiene + no-clobber verified"

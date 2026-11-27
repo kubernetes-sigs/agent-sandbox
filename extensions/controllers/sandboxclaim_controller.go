@@ -414,7 +414,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Update Status & Events
-	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
+	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired, originalClaimStatus)
 	postExpiration, postTimeLeft := r.checkExpiration(claim)
 	if postExpiration && !hasClaimExpiredCondition(claim.Status.Conditions) {
 		meta.SetStatusCondition(&claim.Status.Conditions, r.computeReadyCondition(claim, sandbox, reconcileErr, true))
@@ -681,10 +681,33 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			return nil, nil
 		case err != nil:
 			logger.V(1).Info("Fresh claim read before cold create failed; creating anyway", "claim", claim.Name, "error", err)
-		case fresh.UID != claim.UID || fresh.Status.SandboxStatus.Name != "" ||
+		case fresh.UID != claim.UID ||
 			fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] != "":
 			logger.V(1).Info("Cached claim is behind the API server; skipping cold create", "claim", claim.Name)
 			return nil, fmt.Errorf("%w: claim %s is already assigned", errSandboxAlreadyExists, claim.Name)
+		case fresh.Status.SandboxStatus.Name != "":
+			// A status name alone only blocks the create while that Sandbox is
+			// alive. If it was deleted, creating a replacement is the recovery
+			// path; blocking on the stale name livelocks the claim (#2379).
+			named := &v1beta1.Sandbox{}
+			getErr := r.authoritativeReader().Get(ctx, client.ObjectKey{Namespace: fresh.Namespace, Name: fresh.Status.SandboxStatus.Name}, named)
+			switch {
+			case getErr == nil:
+				logger.V(1).Info("Cached claim is behind the API server; skipping cold create", "claim", claim.Name)
+				// Adopt the fresh status as a whole, so computeAndSetStatus
+				// leaves the live binding untouched and never pairs it with
+				// conditions from the stale cached view.
+				fresh.Status.DeepCopyInto(&claim.Status)
+				return nil, fmt.Errorf("%w: claim %s is already assigned", errSandboxAlreadyExists, claim.Name)
+			case k8errors.IsNotFound(getErr):
+				logger.V(1).Info("Sandbox named by fresh claim status is gone; proceeding with cold create", "claim", claim.Name, "sandbox", fresh.Status.SandboxStatus.Name)
+			default:
+				// Existence unknown: do not create (the binding may be alive
+				// under another name), and keep the fresh status so this pass
+				// does not persist an empty identity.
+				fresh.Status.DeepCopyInto(&claim.Status)
+				return nil, fmt.Errorf("failed to check sandbox %q named by fresh claim status: %w", fresh.Status.SandboxStatus.Name, getErr)
+			}
 		}
 	}
 
@@ -1103,11 +1126,20 @@ func (r *SandboxClaimReconciler) computeReadyCondition(claim *extensionsv1beta1.
 	}
 }
 
-func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool) {
-	// Cache-lag retry is a benign look-again: if status already records a
-	// sandbox Name, leave it and the conditions untouched instead of wiping them.
-	if sandbox == nil && errors.Is(err, errSandboxAlreadyExists) && claim.Status.SandboxStatus.Name != "" {
-		return
+// computeAndSetStatus computes the claim's conditions and mirrors the bound
+// Sandbox's identity into the claim status. originalStatus is the pass-start
+// status, used to restore a binding cleared after a lagging 404 when
+// AlreadyExists proves the Sandbox exists (#2379).
+func (r *SandboxClaimReconciler) computeAndSetStatus(claim *extensionsv1beta1.SandboxClaim, sandbox *v1beta1.Sandbox, err error, isClaimExpired bool, originalStatus *extensionsv1beta1.SandboxClaimStatus) {
+	// Cache-lag retry is a benign look-again: leave the recorded binding and
+	// the conditions untouched instead of wiping them.
+	if sandbox == nil && errors.Is(err, errSandboxAlreadyExists) {
+		if claim.Status.SandboxStatus.Name == "" {
+			claim.Status.SandboxStatus = originalStatus.SandboxStatus
+		}
+		if claim.Status.SandboxStatus.Name != "" {
+			return
+		}
 	}
 	readyCondition := r.computeReadyCondition(claim, sandbox, err, isClaimExpired)
 	meta.SetStatusCondition(&claim.Status.Conditions, readyCondition)
@@ -2270,7 +2302,16 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
 		logger.V(4).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
+		key := client.ObjectKey{Namespace: claim.Namespace, Name: statusName}
+		err := r.Get(ctx, key, sandbox)
+		if k8errors.IsNotFound(err) {
+			// A cached 404 can lag the create event of a just-assigned
+			// Sandbox. Confirm on an authoritative read before dropping the
+			// binding (#2379).
+			err = r.authoritativeReader().Get(ctx, key, sandbox)
+		}
+		switch {
+		case err == nil:
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 				launchType := v1beta1.SandboxLaunchTypeCold
@@ -2284,7 +2325,13 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 				}
 				return sandbox, nil
 			}
-		} else if !k8errors.IsNotFound(err) {
+		case k8errors.IsNotFound(err):
+			// The bound Sandbox is gone. Clear the binding in memory so this
+			// pass can adopt or create a replacement, and so the end-of-pass
+			// status write stops mirroring the deleted Sandbox (#2379).
+			logger.Info("Sandbox recorded in claim status not found, clearing stale binding", "claim", claim.Name, "sandbox", statusName)
+			claim.Status.SandboxStatus = extensionsv1beta1.SandboxStatus{}
+		default:
 			return nil, fmt.Errorf("failed to get sandbox %q from status: %w", statusName, err)
 		}
 	}

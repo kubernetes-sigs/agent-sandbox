@@ -23,6 +23,15 @@ spec:
 
   podTemplate:
     spec:
+      # The Hermes image is published for amd64 and arm64 only.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: ["amd64", "arm64"]
       # runc (kind / default runtime). Production runs
       # runtimeClassName: gvisor on GKE Sandbox nodes for kernel-syscall
       # isolation; this demo stays on runc because kubectl port-forward

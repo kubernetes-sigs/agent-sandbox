@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/controllers"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -75,7 +76,7 @@ func TestSandboxVolumeClaimTemplates(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
-	nameHash := NameHash(sandboxObj.Name)
+	nameHash := controllers.NameHash(sandboxObj.Name)
 
 	// Wait for the sandbox to become ready
 	p := []predicates.ObjectPredicate{

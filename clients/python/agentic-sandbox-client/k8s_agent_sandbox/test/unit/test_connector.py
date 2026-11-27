@@ -593,6 +593,38 @@ class TestPortForwardCleanup(unittest.TestCase):
         popen.assert_not_called()
         self.assertIs(strategy.port_forward_process, process)
 
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    def test_sandboxd_tunnel_start_error_includes_pod_context(self, popen):
+        popen.side_effect = FileNotFoundError("kubectl not found")
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(),
+            get_pod_name=lambda: "sandbox-1",
+        )
+
+        with self.assertRaisesRegex(
+            SandboxPortForwardError, "sandbox-1.*agents|agents.*sandbox-1"
+        ):
+            strategy.connect()
+
+    @patch("k8s_agent_sandbox.connector.subprocess.Popen")
+    def test_sandboxd_tunnel_timeout_uses_port_forward_error(self, popen):
+        process = MagicMock()
+        process.poll.return_value = None
+        popen.return_value = process
+        strategy = SandboxdPodTunnelStrategy(
+            sandbox_id="sandbox-1",
+            namespace="agents",
+            config=SandboxdPodTunnelConnectionConfig(port_forward_ready_timeout=0),
+            get_pod_name=lambda: "sandbox-1",
+        )
+
+        with self.assertRaisesRegex(
+            SandboxPortForwardError, "sandbox-1.*agents|agents.*sandbox-1"
+        ):
+            strategy.connect()
+
 
 class TestSandboxConnectorStrategySelection(unittest.TestCase):
     def _make_connector(self, config):
@@ -1356,7 +1388,7 @@ class TestTunnelKubectlOutput(unittest.TestCase):
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
         self.assertNotEqual(kwargs["stderr"], subprocess.PIPE)
 
-    def _closed_when_kubectl_fails_to_start(self, strategy):
+    def _closed_when_kubectl_fails_to_start(self, strategy, expected_error):
         opened = []
         real_temporary_file = tempfile.TemporaryFile
 
@@ -1369,7 +1401,7 @@ class TestTunnelKubectlOutput(unittest.TestCase):
             "k8s_agent_sandbox.connector.tempfile.TemporaryFile",
             side_effect=track_open,
         ):
-            with self.assertRaises(OSError):
+            with self.assertRaises(expected_error):
                 strategy.connect()
 
         self.assertEqual(len(opened), 1)
@@ -1383,7 +1415,8 @@ class TestTunnelKubectlOutput(unittest.TestCase):
         self._closed_when_kubectl_fails_to_start(
             LocalTunnelConnectionStrategy(
                 "sb", "ns", SandboxLocalTunnelConnectionConfig()
-            )
+            ),
+            OSError,
         )
 
     @patch("subprocess.Popen", side_effect=OSError("kubectl not found"))
@@ -1392,7 +1425,8 @@ class TestTunnelKubectlOutput(unittest.TestCase):
             SandboxdPodTunnelStrategy(
                 "sb", "ns", SandboxdPodTunnelConnectionConfig(),
                 get_pod_name=lambda: "sb-pod",
-            )
+            ),
+            SandboxPortForwardError,
         )
 
 
@@ -1490,6 +1524,8 @@ class TestTunnelKubectlStderr(unittest.TestCase):
         self.assertIn('services "sandbox-router-svc" not found', message)
         self.assertIn("router_namespace", message)
         self.assertLess(len(message), 64 * 1024)
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy._stderr_log)
 
     def test_sandboxd_tunnel_crash_reports_kubectl_final_error(self):
         os.environ["FAKE_KUBECTL_EXIT_ERROR"] = "error: lost connection to pod"
@@ -1501,6 +1537,8 @@ class TestTunnelKubectlStderr(unittest.TestCase):
         message = str(ctx.exception)
         self.assertIn("error: lost connection to pod", message)
         self.assertLess(len(message), 64 * 1024)
+        self.assertIsNone(strategy.port_forward_process)
+        self.assertIsNone(strategy._stderr_log)
 
 
 class TestTunnelTargetsInjectedApiClient(unittest.TestCase):

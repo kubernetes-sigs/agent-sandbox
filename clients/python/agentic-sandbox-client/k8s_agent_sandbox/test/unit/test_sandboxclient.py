@@ -116,6 +116,17 @@ class TestSandboxClient(unittest.TestCase):
             # Ensure delete_sandbox_claim is called to cleanup orphan claim on failure
             self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
 
+    @patch('uuid.uuid4')
+    def test_create_sandbox_interrupt_cleanup(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = KeyboardInterrupt()
+
+        with patch.object(self.client, '_create_claim'):
+            with self.assertRaises(KeyboardInterrupt):
+                self.client.create_sandbox("test-warmpool", "test-namespace")
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
+
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True

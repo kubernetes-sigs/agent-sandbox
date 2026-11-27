@@ -26,6 +26,9 @@ description: >
 
 * [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) CLI tool.
 
+* [Git](https://git-scm.com/downloads). `kubectl kustomize` uses it to fetch the
+  `sandbox-router` manifests from GitHub.
+
 * For KinD cluster you need:
     * [docker](https://docs.docker.com/engine/install/) or [podman](https://podman.io/docs/installation) installed.
     * [kind](https://kubernetes.io/docs/tasks/tools/#kind) CLI tool.
@@ -61,13 +64,13 @@ description: >
 3. Before using the client, you must deploy the `sandbox-router`. Follow these steps:
 
    > [!WARNING]
-   > The command below disables router authentication. Use only for local testing.
+   > The command below runs the router with `--authz-mode=allow-all`, which accepts requests without credentials. Use only for local testing.
 
    ```sh
-   curl -sSL https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/refs/tags/${VERSION}/clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml | sed 's|${ROUTER_IMAGE}|us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router:latest-main|g' | sed '/ALLOW_UNAUTHENTICATED_ROUTER/{n;s/value: "false"/value: "true"/}' | kubectl -n agent-sandbox-system apply -f -
+   kubectl kustomize "https://github.com/kubernetes-sigs/agent-sandbox//sandbox-router/deploy?ref=${VERSION}" | sed "s|registry.k8s.io/agent-sandbox/sandbox-router-go:latest|registry.k8s.io/agent-sandbox/sandbox-router-go:${VERSION}|" | kubectl apply -f -
 
    # Wait until all router pods are running:
-   kubectl -n agent-sandbox-system rollout status deployment/sandbox-router-deployment --timeout=90s
+   kubectl -n agent-sandbox-system rollout status deployment/sandbox-router --timeout=90s
    ```
 
 4. Create a Sandbox Template. For example the `python-runtime-sandbox`. More information about this runtime can be found [here](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/examples/python-runtime-sandbox/).

@@ -8,9 +8,8 @@ each resource is available in every selected cluster.
 
 ## Try the plugin
 
-1. Check out [Headlamp plugins PR #1573](https://github.com/headlamp-k8s/plugins/pull/1573)
-   and follow the build and startup instructions in `agent-sandbox/README.md`
-   in that checkout.
+1. Build and load the plugin using the
+   [Headlamp plugin setup instructions](https://github.com/headlamp-k8s/plugins/blob/main/agent-sandbox/README.md).
 2. Connect Headlamp to a cluster with [Agent Sandbox installed](../../README.md#installation).
 3. In the Headlamp sidebar, select **Agent Sandbox** and open **Sandboxes**.
 

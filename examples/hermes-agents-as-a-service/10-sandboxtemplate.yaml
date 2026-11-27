@@ -23,10 +23,6 @@ spec:
 
   podTemplate:
     spec:
-      # The Hermes image is amd64-only: pin scheduling so warm spares never
-      # land on arm64 nodes in a mixed-architecture cluster.
-      nodeSelector:
-        kubernetes.io/arch: amd64
       # runc (kind / default runtime). Production runs
       # runtimeClassName: gvisor on GKE Sandbox nodes for kernel-syscall
       # isolation; this demo stays on runc because kubectl port-forward
@@ -60,7 +56,7 @@ spec:
               mountPath: /opt/data
       containers:
         - name: hermes
-          image: nousresearch/hermes-agent:v2026.7.7.2 # amd64-only
+          image: nousresearch/hermes-agent:v2026.7.7.2
           imagePullPolicy: IfNotPresent
           args: ["sleep", "infinity"] # s6-supervised services carry the workload
           ports:

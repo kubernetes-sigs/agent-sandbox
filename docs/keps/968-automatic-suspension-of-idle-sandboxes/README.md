@@ -64,7 +64,7 @@ This KEP prefers to leave an idle Sandbox running rather than suspend one that s
 
 **The router reports, and only the controller writes** (#1160: "who updates it"). The router sends reports to an endpoint on the controller, and the controller writes `status.lastActivityTime`. The router gets no write access to Sandboxes, and a report can only refresh that time. The router does gain a read-only watch on Sandboxes, to learn each Sandbox's `busyProbe` and whether the Sandbox is suspended. Today the router reads only Pods. The endpoint is off by default. Where the CNI does not enforce NetworkPolicies, a NetworkPolicy alone would let any Pod send reports. The router presents a ServiceAccount token that names the controller as its audience and lasts 10 minutes. The controller checks it with a TokenReview and then a SubjectAccessReview for `create` on `sandboxes/activity` in the Sandbox's namespace. Only the router's ServiceAccount gets that permission. The endpoint requires TLS.
 
-**The controller writes at most once per half of the timeout** (#1160: "how often it's written"). Updating status on every request would send one API server write per request. The controller keeps the newest activity time from reports in memory and counts the deadline from it. It writes that time to status only when it is at least half a timeout newer than the stored one, so the probe rate does not change the number of writes. The controller waits the timeout plus a half, so that a controller restart or a short stall in the workload's busy answers does not suspend a Sandbox that is in use.
+**The controller writes at most once per half of the timeout** (#1160: "how often it's written"). Updating status on every request would send one API server write per request. The controller keeps the newest activity time from reports in memory and counts the deadline from it. It writes that time to status only when it is at least half a timeout newer than the stored one, so the probe rate does not change the number of writes. The controller suspends a Sandbox one timeout after that time. After a controller restart it has only the stored time, which can be up to half a timeout old. Until a new report arrives for the Sandbox, the controller waits the timeout plus a half from the stored time.
 
 **The controller keeps the idle timer.** The timer starts when a new Pod for the Sandbox becomes Ready, or, for a Sandbox taken from a warm pool, when the SandboxClaim controller sets `autoSuspension` on it. The controller sets a new condition, `AutoSuspensionActive`, on each Sandbox that sets `autoSuspension`. It is `True` while the router reports. While no router is reporting, it is `False` and the controller suspends nothing.
 
@@ -98,10 +98,9 @@ type BusyProbe struct {
 
 // AutoSuspension configures automatic suspension of an idle Sandbox.
 type AutoSuspension struct {
-	// inactivityTimeoutSeconds is how long the Sandbox must go without activity
-	// before the controller may suspend it. The controller suspends it 1.5 times
-	// this long after the last activity it recorded. A Sandbox must set it, and
-	// a SandboxClaim may omit it when its SandboxTemplate sets it.
+	// inactivityTimeoutSeconds is how long the Sandbox may go without activity
+	// before the controller suspends it. A Sandbox must set it, and a
+	// SandboxClaim may omit it when its SandboxTemplate sets it.
 	// +kubebuilder:validation:Minimum=300
 	// +optional
 	InactivityTimeoutSeconds *int32 `json:"inactivityTimeoutSeconds,omitempty"`

@@ -403,7 +403,7 @@ async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator
         yield args
 
 
-_sigterm_cleanups: list[Callable[[], None]] = []
+_sigterm_cleanups: list[tuple[int, Callable[[], None]]] = []
 
 
 def run_cleanup_on_sigterm(cleanup: Callable[[], None]) -> None:
@@ -411,7 +411,7 @@ def run_cleanup_on_sigterm(cleanup: Callable[[], None]) -> None:
 
     An application's own SIGTERM handler, or an ignored SIGTERM, is left alone.
     """
-    _sigterm_cleanups.append(cleanup)
+    _sigterm_cleanups.append((os.getpid(), cleanup))
     # signal.signal() only works on the main thread.
     if threading.current_thread() is not threading.main_thread():
         return
@@ -423,6 +423,11 @@ def _on_sigterm(signum: int, frame: Any) -> None:
     # Clean up here rather than raising SystemExit: interpreter exit waits for
     # non-daemon threads before atexit runs, so it may never get there.
     signal.signal(signum, signal.SIG_DFL)
-    for cleanup in _sigterm_cleanups:
-        cleanup()
-    os.kill(os.getpid(), signum)
+    pid = os.getpid()
+    for owner, cleanup in _sigterm_cleanups:
+        # A forked child must not delete sandboxes its parent still uses.
+        if owner == pid:
+            cleanup()
+    os.kill(pid, signum)
+    # PID 1 does not get the default SIGTERM action, so exit explicitly.
+    os._exit(128 + signum)

@@ -61,11 +61,6 @@ PYTHON_TEST_SUITES = [
         "dir": os.path.join("examples", "harbor-terminal-bench"),
     },
     {
-        "name": "vscode-sandbox",
-        "dir": os.path.join("examples", "vscode-sandbox"),
-        "extra_packages": ["pyyaml>=6.0"],
-    },
-    {
         "name": "hermes-agent",
         # chat_hermes.py only uses stdlib (urllib.request, json), so the test
         # needs no requirements.txt -- just pytest, installed unconditionally

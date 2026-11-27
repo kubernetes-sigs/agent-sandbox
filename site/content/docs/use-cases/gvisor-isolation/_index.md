@@ -48,9 +48,6 @@ Apply the kustomize overlay to create a sandbox with `runtimeClassName: gvisor`:
 kubectl apply -k examples/vscode-sandbox/overlays/gvisor
 ```
 
-If the Sandbox already exists, [recreate its Pod]({{< ref "/docs/use-cases/examples/vscode-sandbox#change-the-runtime-of-an-existing-sandbox" >}})
-to apply the new runtime and keep the workspace PVC.
-
 ### 3. Verify gVisor is active
 
 ```shell

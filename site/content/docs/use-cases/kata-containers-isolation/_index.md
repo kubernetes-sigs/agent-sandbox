@@ -59,9 +59,6 @@ Follow the [Kata Containers Installation Guide](https://github.com/kata-containe
 kubectl apply -k examples/vscode-sandbox/overlays/kata
 ```
 
-If the Sandbox already exists, [recreate its Pod]({{< ref "/docs/use-cases/examples/vscode-sandbox#change-the-runtime-of-an-existing-sandbox" >}})
-to apply the new runtime and keep the workspace PVC.
-
 ### 4. Verify Kata is active
 
 ```shell

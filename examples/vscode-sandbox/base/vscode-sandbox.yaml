@@ -28,23 +28,15 @@ spec:
               value: "examples/vscode-sandbox"
             - name: ENVBUILDER_GIT_CLONE_SINGLE_BRANCH
               value: "true"
-            # Envbuilder reuses the checkout on the workspace PVC between Pods.
             - name: ENVBUILDER_INIT_SCRIPT
-              value: "bash /sandbox-init/entrypoint.sh"
+              value: "examples/vscode-sandbox/entrypoint.sh"
             - name: AGENT_PROMPT
               value: "You are an expert kubernetes developer who is helping with code reviews. Please look at the most recent commit and provide a review feedback. Dont make any code changes. Would you approve it ?"
             - name: ENVBUILDER_IGNORE_PATHS
-              value: "/var/run,/product_uuid,/product_name,/tokens,/sandbox-init"
+              value: "/var/run,/product_uuid,/product_name,/tokens"
           volumeMounts:
             - mountPath: /workspaces
               name: workspaces-pvc
-            - mountPath: /sandbox-init
-              name: entrypoint
-              readOnly: true
-      volumes:
-        - name: entrypoint
-          configMap:
-            name: vscode-sandbox-entrypoint
   volumeClaimTemplates:
     - metadata:
         name: workspaces-pvc

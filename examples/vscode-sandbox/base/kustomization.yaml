@@ -3,11 +3,3 @@ kind: Kustomization
 
 resources:
 - vscode-sandbox.yaml
-
-configMapGenerator:
-- name: vscode-sandbox-entrypoint
-  files:
-  - entrypoint.sh
-  options:
-    # Kustomize does not rewrite ConfigMap references inside Sandbox pod templates.
-    disableNameSuffixHash: true

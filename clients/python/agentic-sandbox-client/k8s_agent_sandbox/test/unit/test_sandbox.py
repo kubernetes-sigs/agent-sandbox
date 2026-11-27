@@ -538,20 +538,20 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
 
     def test_terminate_wait_uses_the_waiting_delete(self):
         sandbox, helper = self._build_sandbox()
-        helper.get_sandbox_claim.return_value = {"metadata": {"uid": "u1"}}
+        helper.get_sandbox_claim_uid.return_value = "u1"
 
         with patch("k8s_agent_sandbox.sandbox.time", MagicMock(monotonic=MagicMock(side_effect=[0, 3]))):
             sandbox.terminate(wait=True, timeout=10)
 
         # The initial GET spends part of the budget, so the wait gets the rest.
-        helper.get_sandbox_claim.assert_called_once_with("my-claim", "demo", 10)
+        helper.get_sandbox_claim_uid.assert_called_once_with("my-claim", "demo", 10)
         helper.delete_sandbox_claim_and_wait.assert_called_once_with("my-claim", "demo", 7, "u1")
         helper.delete_sandbox_claim.assert_not_called()
         self.assertIsNone(sandbox.claim_name)
 
     def test_terminate_wait_skips_delete_when_claim_is_gone(self):
         sandbox, helper = self._build_sandbox()
-        helper.get_sandbox_claim.return_value = None
+        helper.get_sandbox_claim_uid.return_value = None
 
         sandbox.terminate(wait=True)
 
@@ -560,7 +560,7 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
 
     def test_terminate_wait_retry_keeps_the_first_claim_uid(self):
         sandbox, helper = self._build_sandbox()
-        helper.get_sandbox_claim.side_effect = [{"metadata": {"uid": "u1"}}, {"metadata": {"uid": "u2"}}]
+        helper.get_sandbox_claim_uid.side_effect = ["u1", "u2"]
         helper.delete_sandbox_claim_and_wait.side_effect = [TimeoutError("still there"), None]
 
         with self.assertRaises(TimeoutError):
@@ -568,20 +568,21 @@ class TestSandboxTerminateIdempotent(unittest.TestCase):
         self.assertEqual(sandbox.claim_name, "my-claim")
         sandbox.terminate(wait=True)
 
-        self.assertEqual(helper.get_sandbox_claim.call_count, 1)
+        self.assertEqual(helper.get_sandbox_claim_uid.call_count, 1)
         self.assertEqual(
             [c.args[3] for c in helper.delete_sandbox_claim_and_wait.call_args_list], ["u1", "u1"])
 
     def test_terminate_retry_without_wait_keeps_the_first_claim_uid(self):
         sandbox, helper = self._build_sandbox()
-        helper.get_sandbox_claim.return_value = {"metadata": {"uid": "u1"}}
+        helper.get_sandbox_claim_uid.return_value = "u1"
         helper.delete_sandbox_claim_and_wait.side_effect = TimeoutError("still there")
 
         with self.assertRaises(TimeoutError):
             sandbox.terminate(wait=True)
         sandbox.terminate()
 
-        helper.delete_sandbox_claim.assert_called_once_with("my-claim", "demo", expected_uid="u1")
+        helper.delete_pinned_sandbox_claim.assert_called_once_with("my-claim", "demo", "u1")
+        helper.delete_sandbox_claim.assert_not_called()
         self.assertIsNone(sandbox.claim_name)
 
     def test_failed_terminate_preserves_claim_name_for_retry(self):

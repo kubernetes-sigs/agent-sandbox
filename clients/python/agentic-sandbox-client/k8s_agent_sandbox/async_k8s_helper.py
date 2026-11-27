@@ -451,6 +451,23 @@ class AsyncK8sHelper:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
 
+    async def _delete_unless_replaced(
+        self, name: str, namespace: str, expected_uid: str, foreground: bool,
+    ) -> bool:
+        """Deletes the Claim and returns True if a different Claim now has the name."""
+        try:
+            await self.delete_sandbox_claim(name, namespace, expected_uid=expected_uid, foreground=foreground)
+        except client.ApiException as e:
+            # A webhook can also reject the delete with a 409, so confirm the Claim was replaced.
+            if e.status == 409 and claim_uid(await self.get_sandbox_claim(name, namespace)) != expected_uid:
+                return True
+            raise
+        return False
+
+    async def delete_pinned_sandbox_claim(self, name: str, namespace: str, expected_uid: str) -> None:
+        """Deletes the SandboxClaim with ``expected_uid``. Returns normally if a different Claim now has the name."""
+        await self._delete_unless_replaced(name, namespace, expected_uid, False)
+
     async def delete_sandbox_claim_and_wait(
         self, name: str, namespace: str, timeout: float, expected_uid: str,
     ) -> None:
@@ -462,13 +479,8 @@ class AsyncK8sHelper:
         """
         try:
             async with asyncio.timeout(timeout):
-                try:
-                    await self.delete_sandbox_claim(name, namespace, expected_uid=expected_uid, foreground=True)
-                except client.ApiException as e:
-                    # A webhook can also reject the delete with a 409, so confirm the Claim was replaced.
-                    if e.status == 409 and claim_uid(await self.get_sandbox_claim(name, namespace)) != expected_uid:
-                        return
-                    raise
+                if await self._delete_unless_replaced(name, namespace, expected_uid, True):
+                    return
                 while claim_uid(await self.get_sandbox_claim(name, namespace)) == expected_uid:
                     await asyncio.sleep(CLAIM_DELETE_POLL_INTERVAL)
         except TimeoutError as e:

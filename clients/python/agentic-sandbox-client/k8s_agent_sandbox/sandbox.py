@@ -347,16 +347,17 @@ class Sandbox:
             deadline = time.monotonic() + timeout
             # Remember the UID so a retry after a timeout cannot delete a same-name replacement.
             if self._claim_uid_to_delete is None:
-                claim = self.k8s_helper.get_sandbox_claim(self.claim_name, self.namespace, timeout)
-                self._claim_uid_to_delete = claim_uid(claim)
+                self._claim_uid_to_delete = self.k8s_helper.get_sandbox_claim_uid(
+                    self.claim_name, self.namespace, timeout)
             if self._claim_uid_to_delete is not None:
                 self.k8s_helper.delete_sandbox_claim_and_wait(
                     self.claim_name, self.namespace, max(deadline - time.monotonic(), 0),
                     self._claim_uid_to_delete)
-        else:
+        elif self._claim_uid_to_delete:
             # After a timed-out wait=True, keep deleting only that Claim.
-            pinned: dict[str, Any] = {"expected_uid": self._claim_uid_to_delete} if self._claim_uid_to_delete else {}
-            self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace, **pinned)
+            self.k8s_helper.delete_pinned_sandbox_claim(self.claim_name, self.namespace, self._claim_uid_to_delete)
+        else:
+            self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
         # The client stops tracking the handle here because its claim is gone. Call
         # _on_terminated before clearing claim_name, because that name is the client's key.

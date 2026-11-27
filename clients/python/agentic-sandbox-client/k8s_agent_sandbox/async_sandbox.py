@@ -379,10 +379,12 @@ class AsyncSandbox:
                 await self.k8s_helper.delete_sandbox_claim_and_wait(
                     self.claim_name, self.namespace, max(deadline - time.monotonic(), 0),
                     self._claim_uid_to_delete)
-        else:
+        elif self._claim_uid_to_delete:
             # After a timed-out wait=True, keep deleting only that Claim.
-            pinned: dict[str, Any] = {"expected_uid": self._claim_uid_to_delete} if self._claim_uid_to_delete else {}
-            await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace, **pinned)
+            await self.k8s_helper.delete_pinned_sandbox_claim(
+                self.claim_name, self.namespace, self._claim_uid_to_delete)
+        else:
+            await self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
         # The client stops tracking the handle here because its claim is gone. Call
         # _on_terminated before clearing claim_name, because that name is the client's key.

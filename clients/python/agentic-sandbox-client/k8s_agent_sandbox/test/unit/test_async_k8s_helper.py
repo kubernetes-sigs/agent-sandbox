@@ -627,6 +627,17 @@ class TestAsyncK8sHelperDeleteSandboxClaimAndWait(unittest.IsolatedAsyncioTestCa
         with self.assertRaises(TimeoutError):
             await self.helper.delete_sandbox_claim_and_wait("claim", "default", 0.05, "u1")
 
+    async def test_delete_pinned_treats_a_replaced_claim_as_success(self):
+        self._gets({"metadata": {"uid": "u2"}})
+        self.helper.custom_objects_api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        await self.helper.delete_pinned_sandbox_claim("claim", "default", "u1")
+
+    async def test_delete_pinned_raises_a_conflict_with_the_same_claim(self):
+        self._gets({"metadata": {"uid": "u1"}})
+        self.helper.custom_objects_api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        with self.assertRaises(client.ApiException):
+            await self.helper.delete_pinned_sandbox_claim("claim", "default", "u1")
+
     async def test_stalled_request_is_bounded_by_the_deadline(self):
         async def stall(**kwargs):
             await asyncio.sleep(10)

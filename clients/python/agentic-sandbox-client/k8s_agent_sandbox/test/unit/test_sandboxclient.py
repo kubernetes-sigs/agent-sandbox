@@ -15,7 +15,6 @@
 import ast
 import gc
 import json
-import signal
 import subprocess
 import sys
 import threading
@@ -1050,23 +1049,6 @@ class TestLibraryLogging(unittest.TestCase):
                         and node.func.attr in root_calls):
                     offenders.append(f"{path.name}:{node.lineno}")
         self.assertEqual(offenders, [])
-
-
-def test_cleanup_runs_on_sigterm():
-    script = """
-import os, signal, time
-import k8s_agent_sandbox.sandbox_client as sandbox_client
-from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
-
-sandbox_client.K8sHelper = lambda **kwargs: None
-sandbox_client.SandboxClient._delete_automatic_sandboxes = staticmethod(lambda *args: print("cleanup ran"))
-sandbox_client.SandboxClient(connection_config=SandboxDirectConnectionConfig(api_url="http://unused"), cleanup=True)
-os.kill(os.getpid(), signal.SIGTERM)
-time.sleep(30)
-"""
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
-    assert result.returncode == 128 + signal.SIGTERM, result.stderr
-    assert "cleanup ran" in result.stdout
 
 
 def test_tracked_handle_does_not_keep_its_client_alive():

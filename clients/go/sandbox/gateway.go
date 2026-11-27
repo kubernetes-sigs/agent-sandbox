@@ -93,7 +93,9 @@ func (g *gatewayStrategy) Connect(ctx context.Context) (string, error) {
 		watcher, err := g.dynamicClient.Resource(gatewayGVR).Namespace(g.gatewayNamespace).Watch(ctx, listOpts)
 		if err != nil {
 			if ctx.Err() != nil {
-				retErr := fmt.Errorf("%w: gateway %s did not get an address within %s", ErrTimeout, g.gatewayName, g.timeout)
+				// Wrapping the observed cause lets callers tell a
+				// cancellation from a deadline with errors.Is.
+				retErr := fmt.Errorf("%w: gateway %s did not get an address within %s: %w", ErrTimeout, g.gatewayName, g.timeout, ctx.Err())
 				recordError(span, retErr)
 				return "", retErr
 			}
@@ -133,7 +135,7 @@ func (g *gatewayStrategy) drainWatch(ctx context.Context, watcher watch.Interfac
 	for {
 		select {
 		case <-ctx.Done():
-			return "", false, fmt.Errorf("%w: gateway %s did not get an address within %s", ErrTimeout, g.gatewayName, g.timeout)
+			return "", false, fmt.Errorf("%w: gateway %s did not get an address within %s: %w", ErrTimeout, g.gatewayName, g.timeout, ctx.Err())
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
 				return "", false, nil

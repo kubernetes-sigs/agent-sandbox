@@ -404,6 +404,56 @@ All options are documented on the `Options` struct in
 - `GatewayName`: set to enable Gateway mode.
 - `APIURL`: set for Direct URL mode (takes precedence over `GatewayName`).
 - `TracerProvider`: OpenTelemetry integration.
+- `MeterProvider`: OpenTelemetry metrics integration. See
+  [Metrics](#metrics).
+
+## Metrics
+
+The client records three latency histograms, in seconds:
+
+- `sandbox.client.discovery.latency` measures how long connecting to a
+  sandbox takes. It covers every connectivity mode and both the initial
+  connect and reconnects. Each observation carries a `mode` attribute
+  (`gateway`, `port_forward`, `sandboxd_pod_tunnel`, `in_cluster_pod_ip`,
+  `in_cluster_service`, `direct`, or `unknown` for a caller-supplied
+  strategy) and a `status` attribute (`success` or `failure`). The
+  `gateway`, `port_forward`, and `sandboxd_pod_tunnel` values match the
+  Python SDK's spellings; both router port-forward transports record
+  `port_forward`, as in the Python SDK. The remaining values are Go-only:
+  the Python SDK does not record those transports.
+- `sandbox.client.suspend.latency` measures how long `Suspend` takes,
+  including the wait for the sandbox to reach the Suspended condition. Each
+  observation carries a `status` attribute (`success` or `failure`).
+- `sandbox.client.resume.latency` measures how long `Resume` takes,
+  including the readiness wait and the reconnect. Each observation carries
+  a `status` attribute (`success` or `failure`).
+
+A canceled operation records no sample: the client stops at an arbitrary
+point, so its duration would skew the histogram. Timeouts run to their full
+budget and are recorded as `status=failure`.
+
+The OTel Prometheus exporter renders these histograms as
+`sandbox_client_discovery_latency_seconds`,
+`sandbox_client_suspend_latency_seconds`, and
+`sandbox_client_resume_latency_seconds`. The Python SDK still exports
+millisecond histograms named `sandbox_client_*_latency_ms`; the rename to
+seconds is tracked in
+[#2340](https://github.com/kubernetes-sigs/agent-sandbox/issues/2340),
+so one dashboard query does not cover both SDKs yet. The Python SDK's
+snapshot restore metric has no Go counterpart because the Go SDK does not
+support snapshots.
+
+Unless `MeterProvider` is set, the histograms are recorded through the
+global OpenTelemetry meter provider (`otel.GetMeterProvider()`), which is a
+noop until the application configures a real provider. Set `MeterProvider`
+to record through a provider the client controls:
+
+```go
+client, err := sandbox.NewClient(ctx, sandbox.Options{
+    WarmPoolName:  "my-pool",
+    MeterProvider: sdkmetric.NewMeterProvider(/* readers, views */),
+})
+```
 
 Operations accept `WithTimeout` for a total operation timeout. HTTP operations
 override their default request timeout; sandboxd gRPC commands use the caller

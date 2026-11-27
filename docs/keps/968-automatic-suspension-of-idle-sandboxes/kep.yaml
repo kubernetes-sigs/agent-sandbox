@@ -1,0 +1,13 @@
+title: Automatic Suspension of Idle Sandboxes
+kep-number: 968
+authors:
+  - "@thuongvu"
+status: implementable
+creation-date: "2026-11-19"
+reviewers:
+  - TBD
+approvers:
+  - TBD
+see-also:
+  - "https://github.com/kubernetes-sigs/agent-sandbox/issues/968"
+  - "/keps/694-kep-for-suspend-and-resume-for-beta"

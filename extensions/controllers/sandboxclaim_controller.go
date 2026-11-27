@@ -2304,7 +2304,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	logger.V(4).Info("Executing getOrCreateSandbox", "claim", claim.Name)
 
 	// Check if a previously adopted sandbox is recorded in claim status
-	clearedStaleStatus := false
+	clearedStaleName := ""
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
 		logger.V(4).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
@@ -2318,7 +2318,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 				// end-of-pass status write persists the clear and cold create can run.
 				logger.Info("Sandbox recorded in claim status not found, clearing stale binding", "claim", claim.Name, "sandbox", statusName)
 				claim.Status.SandboxStatus = extensionsv1beta1.SandboxStatus{}
-				clearedStaleStatus = true
+				clearedStaleName = statusName
 			}
 		}
 		if err == nil {
@@ -2450,7 +2450,7 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	}
 
 	// A claim Patch above reloads the stale status from the server.
-	if clearedStaleStatus {
+	if clearedStaleName != "" && claim.Status.SandboxStatus.Name == clearedStaleName {
 		claim.Status.SandboxStatus = extensionsv1beta1.SandboxStatus{}
 	}
 

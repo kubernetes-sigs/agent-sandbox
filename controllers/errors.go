@@ -15,6 +15,7 @@
 package controllers
 
 import (
+	"errors"
 	"slices"
 
 	corev1 "k8s.io/api/core/v1"
@@ -50,7 +51,23 @@ func isNamespaceTerminatingError(err error) bool {
 	})
 }
 
-// isForbiddenError reports whether err or any joined error is Forbidden.
-func isForbiddenError(err error) bool {
-	return anyJoined(err, k8serrors.IsForbidden)
+// createError marks an error returned by a child resource create, so a
+// refused create can be told apart from a Forbidden on a get or list, which
+// means the controller lacks RBAC.
+type createError struct{ error }
+
+func (e createError) Unwrap() error { return e.error }
+
+func markCreate(err error) error {
+	return createError{err}
+}
+
+// isRefusedCreate reports whether err or any joined error is a create that the
+// API server refused with Forbidden. A terminating namespace also answers with
+// Forbidden, but that is teardown and not a refusal of the Sandbox.
+func isRefusedCreate(err error) bool {
+	return anyJoined(err, func(e error) bool {
+		var ce createError
+		return errors.As(e, &ce) && k8serrors.IsForbidden(e) && !k8serrors.HasStatusCause(e, corev1.NamespaceTerminatingCause)
+	})
 }

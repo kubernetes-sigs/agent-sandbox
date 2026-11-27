@@ -108,7 +108,7 @@ func TestIsNamespaceTerminatingError(t *testing.T) {
 	}
 }
 
-func TestIsForbiddenError(t *testing.T) {
+func TestIsRefusedCreate(t *testing.T) {
 	forbidden := k8serrors.NewForbidden(corev1.Resource("pods"), "p", errors.New("exceeded quota"))
 	conflict := k8serrors.NewConflict(corev1.Resource("persistentvolumeclaims"), "c", errors.New("conflict"))
 
@@ -119,15 +119,17 @@ func TestIsForbiddenError(t *testing.T) {
 	}{
 		{name: "nil error", err: nil, expected: false},
 		{name: "generic error", err: errors.New("generic"), expected: false},
-		{name: "forbidden", err: forbidden, expected: true},
-		{name: "wrapped forbidden", err: fmt.Errorf("create pod: %w", forbidden), expected: true},
-		{name: "forbidden after conflict", err: errors.Join(conflict, forbidden), expected: true},
-		{name: "conflict only", err: errors.Join(conflict, errors.New("other")), expected: false},
+		{name: "forbidden create", err: markCreate(forbidden), expected: true},
+		{name: "wrapped forbidden create", err: fmt.Errorf("pod: %w", markCreate(forbidden)), expected: true},
+		{name: "forbidden create after conflict", err: errors.Join(conflict, markCreate(forbidden)), expected: true},
+		{name: "forbidden get or list", err: forbidden, expected: false},
+		{name: "create conflict", err: markCreate(conflict), expected: false},
+		{name: "namespace terminating", err: markCreate(newNamespaceTerminatingError("ns")), expected: false},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isForbiddenError(tc.err); got != tc.expected {
+			if got := isRefusedCreate(tc.err); got != tc.expected {
 				t.Errorf("got %v, want %v", got, tc.expected)
 			}
 		})

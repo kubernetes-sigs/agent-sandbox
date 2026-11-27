@@ -218,6 +218,7 @@ spec:
       containers:
       - name: my-container
         image: <IMAGE>
+  service: true
 ```
 
 This will create a new Sandbox named `my-sandbox` running the image you specify. You can then access the Sandbox using its stable hostname, `my-sandbox`.

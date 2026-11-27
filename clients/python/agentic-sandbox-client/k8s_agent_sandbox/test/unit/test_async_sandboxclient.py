@@ -2471,11 +2471,17 @@ users:
 
     def _run_atexit_script(self, kubeconfig_path: str, tmpdir: str | None = None, sigterm: bool = False) -> None:
         """Runs a client that never closes, so only its atexit hook can delete the claim."""
-        send_sigterm = "    os.kill(os.getpid(), signal.SIGTERM)\n    await asyncio.sleep(30)\n" if sigterm else ""
+        # A live non-daemon thread would block a SystemExit-based shutdown before atexit runs.
+        send_sigterm = (
+            "    threading.Thread(target=threading.Event().wait).start()\n"
+            "    os.kill(os.getpid(), signal.SIGTERM)\n"
+            "    await asyncio.sleep(30)\n"
+        ) if sigterm else ""
         script = f"""
 import asyncio
 import os
 import signal
+import threading
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 
@@ -2511,7 +2517,7 @@ asyncio.run(main())
             env=env,
         )
 
-        self.assertEqual(result.returncode, 128 + signal.SIGTERM if sigterm else 0, result.stderr)
+        self.assertEqual(result.returncode, -signal.SIGTERM if sigterm else 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr, result.stderr)
 
     def test_atexit_cleanup_deletes_claim_on_sigterm(self):

@@ -23,7 +23,6 @@ import ipaddress
 import json
 import os
 import signal
-import sys
 import tempfile
 import threading
 import time
@@ -404,14 +403,26 @@ async def async_kubectl_kubeconfig_args(api_client: Any | None) -> AsyncIterator
         yield args
 
 
-def exit_on_sigterm() -> None:
-    """Runs atexit cleanup on SIGTERM unless the application handles SIGTERM itself."""
+_sigterm_cleanups: list[Callable[[], None]] = []
+
+
+def run_cleanup_on_sigterm(cleanup: Callable[[], None]) -> None:
+    """Runs cleanup on SIGTERM, then terminates the process as SIGTERM normally would.
+
+    An application's own SIGTERM handler, or an ignored SIGTERM, is left alone.
+    """
+    _sigterm_cleanups.append(cleanup)
     # signal.signal() only works on the main thread.
     if threading.current_thread() is not threading.main_thread():
         return
     if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
-        signal.signal(signal.SIGTERM, _exit_on_sigterm)
+        signal.signal(signal.SIGTERM, _on_sigterm)
 
 
-def _exit_on_sigterm(signum: int, frame: Any) -> None:
-    sys.exit(128 + signum)
+def _on_sigterm(signum: int, frame: Any) -> None:
+    # Clean up here rather than raising SystemExit: interpreter exit waits for
+    # non-daemon threads before atexit runs, so it may never get there.
+    signal.signal(signum, signal.SIG_DFL)
+    for cleanup in _sigterm_cleanups:
+        cleanup()
+    os.kill(os.getpid(), signum)

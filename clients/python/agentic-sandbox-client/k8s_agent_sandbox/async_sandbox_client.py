@@ -41,7 +41,7 @@ from .async_sandbox import AsyncSandbox
 from .exceptions import SandboxNotFoundError
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
-from .utils import construct_sandbox_claim_lifecycle_spec, exit_on_sigterm
+from .utils import construct_sandbox_claim_lifecycle_spec, run_cleanup_on_sigterm
 from .models import AdditionalPodMetadata, SandboxConnectionConfig, SandboxFileConfig, SandboxTracerConfig
 from .trace_manager import async_trace_span, create_tracer_manager, initialize_tracer, trace
 
@@ -204,10 +204,11 @@ class AsyncSandboxClient(Generic[T]):
             # Register a static method bound to the cleanup data with functools.partial, so the hook
             # never keeps the client alive. A bound method of the client would keep it alive until exit.
             # Pass the api_client itself, not a copy, so exit cleanup reads its settings as they are at exit.
-            atexit.register(functools.partial(
+            cleanup_hook = functools.partial(
                 AsyncSandboxClient._atexit_cleanup, self._active_connection_sandboxes, self._explicit_claims, api_client
-            ))
-            exit_on_sigterm()
+            )
+            atexit.register(cleanup_hook)
+            run_cleanup_on_sigterm(cleanup_hook)
 
     async def __aenter__(self) -> Self:
         return self

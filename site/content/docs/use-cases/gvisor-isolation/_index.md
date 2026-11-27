@@ -48,6 +48,9 @@ Apply the kustomize overlay to create a sandbox with `runtimeClassName: gvisor`:
 kubectl apply -k examples/vscode-sandbox/overlays/gvisor
 ```
 
+If the Sandbox already exists, [recreate its Pod]({{< ref "/docs/use-cases/examples/vscode-sandbox#change-the-runtime-of-an-existing-sandbox" >}})
+to apply the new runtime and keep the workspace PVC.
+
 ### 3. Verify gVisor is active
 
 ```shell
@@ -59,21 +62,8 @@ The output should show `sandbox-example: gvisor`.
 
 ### 4. Access the sandbox
 
-With gVisor or Kata runtimes, direct pod port-forwarding is not compatible. Use the [Sandbox Router](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/sandbox-router) instead — a lightweight reverse proxy that acts as a single entry point for all sandbox traffic and routes requests to the correct sandbox pod based on an `X-Sandbox-ID` header:
-
-```bash
-# Deploy the router
-kubectl apply -f sandbox-router/deploy/serviceaccount.yaml \
-  -f sandbox-router/deploy/rbac.yaml \
-  -f sandbox-router/deploy/deployment.yaml \
-  -f sandbox-router/deploy/service.yaml
-
-# Port-forward to the router service
-kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system
-
-# Access the sandbox through the router with routing headers
-curl -H "X-Sandbox-ID: sandbox-example" -H "X-Sandbox-Port: 13337" http://localhost:8080
-```
+[Wait for VSCode to start]({{< ref "/docs/use-cases/examples/vscode-sandbox#1-wait-for-vscode-to-start" >}}),
+then retrieve the editor password and connect through the Go Sandbox Router.
 
 ## When to Use gVisor
 

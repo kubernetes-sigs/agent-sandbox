@@ -18,7 +18,7 @@ spec:
               ephemeral-storage: "8Gi"
             limits:
               # envbuilder stores image layers and build caches in the container filesystem.
-              ephemeral-storage: "16Gi"
+              ephemeral-storage: "8Gi"
           env:
             # URL to the repository where the .devcontainer folder we want to load is located
             # for a branch append "#refs/heads/branch-name"
@@ -28,15 +28,23 @@ spec:
               value: "examples/vscode-sandbox"
             - name: ENVBUILDER_GIT_CLONE_SINGLE_BRANCH
               value: "true"
+            # Envbuilder reuses the checkout on the workspace PVC between Pods.
             - name: ENVBUILDER_INIT_SCRIPT
-              value: "examples/vscode-sandbox/entrypoint.sh"
+              value: "bash /sandbox-init/entrypoint.sh"
             - name: AGENT_PROMPT
               value: "You are an expert kubernetes developer who is helping with code reviews. Please look at the most recent commit and provide a review feedback. Dont make any code changes. Would you approve it ?"
             - name: ENVBUILDER_IGNORE_PATHS
-              value: "/var/run,/product_uuid,/product_name,/tokens"
+              value: "/var/run,/product_uuid,/product_name,/tokens,/sandbox-init"
           volumeMounts:
             - mountPath: /workspaces
               name: workspaces-pvc
+            - mountPath: /sandbox-init
+              name: entrypoint
+              readOnly: true
+      volumes:
+        - name: entrypoint
+          configMap:
+            name: vscode-sandbox-entrypoint
   volumeClaimTemplates:
     - metadata:
         name: workspaces-pvc

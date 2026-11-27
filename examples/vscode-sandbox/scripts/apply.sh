@@ -25,15 +25,19 @@ Usage: $(basename "$0") [OPTIONS]
 This script applies the necessary Kubernetes manifests to set up the VSCode sandbox environment.
 
 Options:
-  -h, --help                    Display this help message and exit
-  -i, --sandbox-router-image    Specify a custom image for sandbox-router
+  -h, --help                        Display this help message and exit
+  -i, --sandbox-router-image IMAGE  Specify a custom image for sandbox-router
+      --kubeconfig FILE             Select a kubeconfig (default: kubeconfig next to this script)
 
 Examples:
   $(basename "$0") -i repository/custom-sandbox-router:tag
-  $(basename "$0") --sandbox-router-image repository/custom-sandbox-router:tag
+  $(basename "$0") -i repository/custom-sandbox-router:tag --kubeconfig ./aks-kubeconfig
   $(basename "$0") --help
 EOF
 }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+KUBECONFIG_FILE="${SCRIPT_DIR}/kubeconfig"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -47,6 +51,15 @@ while [[ "$#" -gt 0 ]]; do
             SANDBOX_ROUTER_IMAGE="$2"
             shift
             ;;
+        --kubeconfig)
+            if [[ "$#" -lt 2 || -z "$2" || "$2" == -* ]]; then
+                echo "$1 requires a file path." >&2
+                usage
+                exit 1
+            fi
+            KUBECONFIG_FILE="$2"
+            shift
+            ;;
         *) echo "Unknown parameter passed: $1"; usage; exit 1 ;;
     esac
     shift
@@ -58,26 +71,25 @@ if [[ -z "${SANDBOX_ROUTER_IMAGE:-}" ]]; then
     exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-# az-provision.sh writes this kubeconfig. Preserve an explicit cluster selection.
-export KUBECONFIG="${KUBECONFIG:-${SCRIPT_DIR}/kubeconfig}"
+# Select one cluster explicitly because the Router installation grants cluster-wide RBAC.
+kubectl_cmd=(kubectl --kubeconfig "$KUBECONFIG_FILE")
 
 VERSION="${VERSION:-v1.0.12}"
 
 # install only the core components:
-kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml"
+"${kubectl_cmd[@]}" apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox.yaml"
 
 # install the extensions components:
-kubectl apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml"
+"${kubectl_cmd[@]}" apply -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/extensions.yaml"
 
 ROUTER_DIR="${REPO_ROOT}/sandbox-router/deploy"
-kubectl apply -f "${ROUTER_DIR}/serviceaccount.yaml" \
+"${kubectl_cmd[@]}" apply -f "${ROUTER_DIR}/serviceaccount.yaml" \
     -f "${ROUTER_DIR}/rbac.yaml" \
     -f "${ROUTER_DIR}/service.yaml"
 # Set the image before applying so the deployment never pulls the placeholder tag.
-kubectl set image --local -f "${ROUTER_DIR}/deployment.yaml" \
-    "sandbox-router=${SANDBOX_ROUTER_IMAGE}" -o yaml | kubectl apply -f -
+"${kubectl_cmd[@]}" set image --local -f "${ROUTER_DIR}/deployment.yaml" \
+    "sandbox-router=${SANDBOX_ROUTER_IMAGE}" -o yaml | "${kubectl_cmd[@]}" apply -f -
 
-kubectl apply -k "${SCRIPT_DIR}/../overlays/kata-mshv"
+"${kubectl_cmd[@]}" apply -k "${SCRIPT_DIR}/../overlays/kata-mshv"

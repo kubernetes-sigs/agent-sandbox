@@ -13,22 +13,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-
-export GEMINI_API_KEY=`cat /tokens/gemini`
-
-set -x
-
-
-# protection against running gemini on an unpause
-# if gemini-promt.txt dont run gemini else create and run it
-if [ -f gemini-prompt.txt ]; then
-  echo "gemini-prompt.txt exists, skipping gemini generation"
-else
-  echo "gemini-prompt.txt does not exist, running gemini"
-  echo "$AGENT_PROMPT" > gemini-prompt.txt
-  gemini -y  -p  "$AGENT_PROMPT" > gemini-output.txt || true
-fi
-
-#/usr/local/bin/code-server-entrypoint
-/usr/bin/code-server --auth=none --bind-addr=0.0.0.0:13337
+# Existing Sandbox templates can still start from a fresh checkout at this path.
+exec bash "$(dirname "$0")/base/entrypoint.sh" "$@"

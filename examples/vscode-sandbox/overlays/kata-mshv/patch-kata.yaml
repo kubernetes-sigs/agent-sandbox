@@ -2,7 +2,10 @@
 - op: add
   path: /spec/podTemplate/spec/runtimeClassName
   value: kata-vm-isolation
-# Kata's guest needs additional memory while envbuilder builds the environment.
+# AKS sizes the guest VM from the memory limit. Envbuilder needs room to build.
 - op: replace
   path: /spec/podTemplate/spec/containers/0/resources/requests/memory
+  value: 4Gi
+- op: add
+  path: /spec/podTemplate/spec/containers/0/resources/limits/memory
   value: 4Gi

@@ -5,7 +5,10 @@ namespace:
 
 image:
   repository: registry.k8s.io/agent-sandbox/agent-sandbox-controller
-  tag: ""  # required, eg. v0.3.10
+  tag: ""  # required unless digest is set, eg. v0.3.10
+  # digest pins the image, eg. sha256:<hex>. When set, the image is
+  # <repository>@<digest> and tag only sets the app.kubernetes.io/version label.
+  digest: ""
   pullPolicy: IfNotPresent
 
 # imagePullSecrets adds image pull secrets to the controller PodSpec (spec.template.spec.imagePullSecrets).

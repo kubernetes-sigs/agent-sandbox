@@ -13,7 +13,7 @@ helm install sandbox-router ./sandbox-router/helm/ \
   --set image.tag=<version>
 ```
 
-`image.tag` is required. The kustomize base pins `:latest`, which the chart deliberately does not.
+`image.tag` is required unless `image.digest` is set. The kustomize base pins `:latest`, which the chart deliberately does not.
 
 ### TokenReview authorization
 
@@ -73,7 +73,8 @@ helm uninstall sandbox-router --namespace agent-sandbox-system
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.tag` | Router image tag, **required** | `""` |
+| `image.tag` | Router image tag, **required** unless `image.digest` is set | `""` |
+| `image.digest` | Router image digest (e.g. `sha256:<hex>`). When set, the image is `<repository>@<digest>` and `image.tag` only sets the `app.kubernetes.io/version` label | `""` |
 | `image.repository` | Router image repository | `registry.k8s.io/agent-sandbox/sandbox-router-go` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | Image pull secrets for the Deployment | `[]` |

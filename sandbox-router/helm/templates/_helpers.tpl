@@ -43,11 +43,16 @@ app.kubernetes.io/version: {{ .Values.image.tag | quote }}
 {{- end }}
 
 {{/*
-The router image reference.
+The router image reference. image.digest, when set, pins the image by
+digest; image.tag then only sets the app.kubernetes.io/version label.
 */}}
 {{- define "sandbox-router.image" -}}
-{{- $tag := required "image.tag is required" .Values.image.tag }}
+{{- if .Values.image.digest }}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else }}
+{{- $tag := required "image.tag or image.digest is required" .Values.image.tag }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
+{{- end }}
 {{- end }}
 
 {{/*

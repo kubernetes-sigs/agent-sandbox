@@ -41,9 +41,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-The controller image reference.
+The controller image reference. image.digest, when set, pins the image by
+digest; image.tag then only sets the app.kubernetes.io/version label.
 */}}
 {{- define "agent-sandbox.image" -}}
-{{- $tag := required "image.tag is required" .Values.image.tag }}
+{{- if .Values.image.digest }}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else }}
+{{- $tag := required "image.tag or image.digest is required" .Values.image.tag }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
+{{- end }}
 {{- end }}

@@ -71,7 +71,8 @@ func (r *ProcessRegistry) Remove(pid int32) {
 }
 
 // SignalAll sends sig to the process group of every child recorded by
-// StartChild, which covers both Start processes and Execute commands.
+// StartChild, which covers both Start processes and Execute commands. If the
+// group signal fails, it signals the child's PID instead.
 func (r *ProcessRegistry) SignalAll(sig syscall.Signal) {
 	r.childMu.Lock()
 	defer r.childMu.Unlock()

@@ -317,7 +317,7 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 | `--rest-port` | `8080` | Port for the REST API. |
 | `--root-dir` | `/workspace` | Sandbox root confining all file operations and working directories. Created if missing. |
 | `--metadata-env-prefix` | `SANDBOX_` | Env var prefix exposed on `/v1/metadata`. |
-| `--shutdown-timeout` | `10s` | Grace period for in-flight requests and child processes. |
+| `--shutdown-timeout` | `10s` | Maximum time for graceful shutdown. Child processes, including in-flight `Execute` commands, get SIGTERM when shutdown starts and SIGKILL 2s later. |
 | `--http-idle-timeout` | `60s` | Close idle HTTP keep-alive connections after this duration. |
 | `--stream-chunk-size` | `4096` | Buffer size in bytes for streaming process stdout/stderr chunks. |
 | `--execute-default-time-limit` | `0` | Default unary execution time limit, as a Go duration such as `2s`. Zero leaves it unset. |

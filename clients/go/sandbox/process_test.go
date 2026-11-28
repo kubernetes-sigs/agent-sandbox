@@ -305,6 +305,28 @@ func TestProcessHandle_ProtocolAndStableTerminal(t *testing.T) {
 	}
 }
 
+func TestProcessHandle_SkipsKeepAlive(t *testing.T) {
+	keepAlive := &processv1.StartResponse{Event: &processv1.StartResponse_Keepalive{Keepalive: &processv1.KeepAlive{}}}
+	sb := newStreamingSandbox(t, scriptedProcessService([]*processv1.StartResponse{
+		processInit(), keepAlive, keepAlive,
+		{Event: &processv1.StartResponse_Stdout{Stdout: []byte("out")}},
+		keepAlive, processExit(3),
+	}, nil))
+	handle, err := sb.Commands().Start(processTestContext(t), "example")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+	event, err := handle.Recv()
+	require.NoError(t, err)
+	require.Equal(t, ProcessEventStdout, event.Type)
+	require.Equal(t, []byte("out"), event.Data)
+	event, err = handle.Recv()
+	require.NoError(t, err)
+	require.Equal(t, ProcessEventExit, event.Type)
+	require.Equal(t, 3, event.ExitCode)
+	_, err = handle.Recv()
+	require.ErrorIs(t, err, io.EOF)
+}
+
 func TestProcessHandle_RawOutputChunks(t *testing.T) {
 	sb := newStreamingSandbox(t, scriptedProcessService([]*processv1.StartResponse{
 		processInit(),

@@ -169,6 +169,13 @@ character. They do not bound the program's memory or total memory across
 concurrent executions. gRPC message-size limits apply separately to the final
 response. These policies do not apply to `Start` or PTY sessions.
 
+A quiet `Start` stream can hit an idle timeout in a proxy or load balancer.
+To prevent this, send the gRPC metadata key `keepalive-ping-interval` with a
+whole number of seconds (at least 1). sandboxd then sends an empty `keepalive`
+event whenever the stream has been silent for that long. Without the key,
+sandboxd sends no such events. A value below 1 or a non-integer fails with
+`INVALID_ARGUMENT`.
+
 ### FileWatcherService (gRPC, `:9090`)
 
 | RPC | Type | Purpose |

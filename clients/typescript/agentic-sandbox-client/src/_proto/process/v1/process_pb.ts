@@ -26,7 +26,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file process/v1/process.proto.
  */
 export const file_process_v1_process: GenFile = /*@__PURE__*/
-  fileDesc("Chhwcm9jZXNzL3YxL3Byb2Nlc3MucHJvdG8SCnByb2Nlc3MudjEiIQoDUFRZEgwKBGNvbHMYASABKA0SDAoEcm93cxgCIAEoDSKkAQoNUHJvY2Vzc0NvbmZpZxIPCgdjb21tYW5kGAEgAygJEjgKCGVudl92YXJzGAIgAygLMiYucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnLkVudlZhcnNFbnRyeRIQCgNjd2QYAyABKAlIAIgBARouCgxFbnZWYXJzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIGCgRfY3dkImQKDFN0YXJ0UmVxdWVzdBIpCgZjb25maWcYASABKAsyGS5wcm9jZXNzLnYxLlByb2Nlc3NDb25maWcSIQoDcHR5GAIgASgLMg8ucHJvY2Vzcy52MS5QVFlIAIgBAUIGCgRfcHR5Ih8KCUluaXRFdmVudBISCgpwcm9jZXNzX2lkGAEgASgFIh4KCUV4aXRFdmVudBIRCglleGl0X2NvZGUYASABKAUiigEKDVN0YXJ0UmVzcG9uc2USJQoEaW5pdBgBIAEoCzIVLnByb2Nlc3MudjEuSW5pdEV2ZW50SAASEAoGc3Rkb3V0GAIgASgMSAASEAoGc3RkZXJyGAMgASgMSAASJQoEZXhpdBgEIAEoCzIVLnByb2Nlc3MudjEuRXhpdEV2ZW50SABCBwoFZXZlbnQiOwoORXhlY3V0ZVJlcXVlc3QSKQoGY29uZmlnGAEgASgLMhkucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnIkQKD0V4ZWN1dGVSZXNwb25zZRIRCglleGl0X2NvZGUYASABKAUSDgoGc3Rkb3V0GAIgASgMEg4KBnN0ZGVychgDIAEoDCLkAQoYRXhlY3V0ZVdpdGhMaW1pdHNSZXF1ZXN0EikKBmNvbmZpZxgBIAEoCzIZLnByb2Nlc3MudjEuUHJvY2Vzc0NvbmZpZxIfChJzdGRvdXRfbGltaXRfYnl0ZXMYAiABKARIAIgBARIfChJzdGRlcnJfbGltaXRfYnl0ZXMYAyABKARIAYgBARItCgp0aW1lX2xpbWl0GAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uQhUKE19zdGRvdXRfbGltaXRfYnl0ZXNCFQoTX3N0ZGVycl9saW1pdF9ieXRlcyL5AQoZRXhlY3V0ZVdpdGhMaW1pdHNSZXNwb25zZRIRCglleGl0X2NvZGUYASABKAUSDgoGc3Rkb3V0GAIgASgMEg4KBnN0ZGVychgDIAEoDBJAChJ0ZXJtaW5hdGlvbl9yZWFzb24YBCABKA4yJC5wcm9jZXNzLnYxLkV4ZWN1dGVUZXJtaW5hdGlvblJlYXNvbhIzChBlbGFwc2VkX2R1cmF0aW9uGAUgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEhgKEHN0ZG91dF90cnVuY2F0ZWQYBiABKAgSGAoQc3RkZXJyX3RydW5jYXRlZBgHIAEoCCJqChFXcml0ZVN0ZGluUmVxdWVzdBISCgpwcm9jZXNzX2lkGAEgASgFEg8KBWlucHV0GAIgASgMSAASJQoDZW9mGAMgASgLMhYuZ29vZ2xlLnByb3RvYnVmLkVtcHR5SABCCQoHcGF5bG9hZCIUChJXcml0ZVN0ZGluUmVzcG9uc2UiSwoRU2VuZFNpZ25hbFJlcXVlc3QSEgoKcHJvY2Vzc19pZBgBIAEoBRIiCgZzaWduYWwYAiABKA4yEi5wcm9jZXNzLnYxLlNpZ25hbCIUChJTZW5kU2lnbmFsUmVzcG9uc2UiQgoQUmVzaXplVFRZUmVxdWVzdBISCgpwcm9jZXNzX2lkGAEgASgFEgwKBGNvbHMYAiABKA0SDAoEcm93cxgDIAEoDSITChFSZXNpemVUVFlSZXNwb25zZSpbCgZTaWduYWwSFgoSU0lHTkFMX1VOU1BFQ0lGSUVEEAASEQoNU0lHTkFMX1NJR0lOVBACEhIKDlNJR05BTF9TSUdLSUxMEAkSEgoOU0lHTkFMX1NJR1RFUk0QDyqhAQoYRXhlY3V0ZVRlcm1pbmF0aW9uUmVhc29uEioKJkVYRUNVVEVfVEVSTUlOQVRJT05fUkVBU09OX1VOU1BFQ0lGSUVEEAASJQohRVhFQ1VURV9URVJNSU5BVElPTl9SRUFTT05fRVhJVEVEEAESMgouRVhFQ1VURV9URVJNSU5BVElPTl9SRUFTT05fVElNRV9MSU1JVF9FWENFRURFRBACMtoDCg5Qcm9jZXNzU2VydmljZRI+CgVTdGFydBIYLnByb2Nlc3MudjEuU3RhcnRSZXF1ZXN0GhkucHJvY2Vzcy52MS5TdGFydFJlc3BvbnNlMAESQgoHRXhlY3V0ZRIaLnByb2Nlc3MudjEuRXhlY3V0ZVJlcXVlc3QaGy5wcm9jZXNzLnYxLkV4ZWN1dGVSZXNwb25zZRJgChFFeGVjdXRlV2l0aExpbWl0cxIkLnByb2Nlc3MudjEuRXhlY3V0ZVdpdGhMaW1pdHNSZXF1ZXN0GiUucHJvY2Vzcy52MS5FeGVjdXRlV2l0aExpbWl0c1Jlc3BvbnNlEksKCldyaXRlU3RkaW4SHS5wcm9jZXNzLnYxLldyaXRlU3RkaW5SZXF1ZXN0Gh4ucHJvY2Vzcy52MS5Xcml0ZVN0ZGluUmVzcG9uc2USSwoKU2VuZFNpZ25hbBIdLnByb2Nlc3MudjEuU2VuZFNpZ25hbFJlcXVlc3QaHi5wcm9jZXNzLnYxLlNlbmRTaWduYWxSZXNwb25zZRJICglSZXNpemVUVFkSHC5wcm9jZXNzLnYxLlJlc2l6ZVRUWVJlcXVlc3QaHS5wcm9jZXNzLnYxLlJlc2l6ZVRUWVJlc3BvbnNlQq4BCg5jb20ucHJvY2Vzcy52MUIMUHJvY2Vzc1Byb3RvUAFaRXNpZ3MuazhzLmlvL2FnZW50LXNhbmRib3gvcGFja2FnZXMvc2FuZGJveGQvc3BlYy9wcm9jZXNzL3YxO3Byb2Nlc3N2MaICA1BYWKoCClByb2Nlc3MuVjHKAgpQcm9jZXNzXFYx4gIWUHJvY2Vzc1xWMVxHUEJNZXRhZGF0YeoCC1Byb2Nlc3M6OlYxYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_empty]);
+  fileDesc("Chhwcm9jZXNzL3YxL3Byb2Nlc3MucHJvdG8SCnByb2Nlc3MudjEiIQoDUFRZEgwKBGNvbHMYASABKA0SDAoEcm93cxgCIAEoDSKkAQoNUHJvY2Vzc0NvbmZpZxIPCgdjb21tYW5kGAEgAygJEjgKCGVudl92YXJzGAIgAygLMiYucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnLkVudlZhcnNFbnRyeRIQCgNjd2QYAyABKAlIAIgBARouCgxFbnZWYXJzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUIGCgRfY3dkImQKDFN0YXJ0UmVxdWVzdBIpCgZjb25maWcYASABKAsyGS5wcm9jZXNzLnYxLlByb2Nlc3NDb25maWcSIQoDcHR5GAIgASgLMg8ucHJvY2Vzcy52MS5QVFlIAIgBAUIGCgRfcHR5Ih8KCUluaXRFdmVudBISCgpwcm9jZXNzX2lkGAEgASgFIh4KCUV4aXRFdmVudBIRCglleGl0X2NvZGUYASABKAUitgEKDVN0YXJ0UmVzcG9uc2USJQoEaW5pdBgBIAEoCzIVLnByb2Nlc3MudjEuSW5pdEV2ZW50SAASEAoGc3Rkb3V0GAIgASgMSAASEAoGc3RkZXJyGAMgASgMSAASJQoEZXhpdBgEIAEoCzIVLnByb2Nlc3MudjEuRXhpdEV2ZW50SAASKgoJa2VlcGFsaXZlGAUgASgLMhUucHJvY2Vzcy52MS5LZWVwQWxpdmVIAEIHCgVldmVudCILCglLZWVwQWxpdmUiOwoORXhlY3V0ZVJlcXVlc3QSKQoGY29uZmlnGAEgASgLMhkucHJvY2Vzcy52MS5Qcm9jZXNzQ29uZmlnIkQKD0V4ZWN1dGVSZXNwb25zZRIRCglleGl0X2NvZGUYASABKAUSDgoGc3Rkb3V0GAIgASgMEg4KBnN0ZGVychgDIAEoDCLkAQoYRXhlY3V0ZVdpdGhMaW1pdHNSZXF1ZXN0EikKBmNvbmZpZxgBIAEoCzIZLnByb2Nlc3MudjEuUHJvY2Vzc0NvbmZpZxIfChJzdGRvdXRfbGltaXRfYnl0ZXMYAiABKARIAIgBARIfChJzdGRlcnJfbGltaXRfYnl0ZXMYAyABKARIAYgBARItCgp0aW1lX2xpbWl0GAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uQhUKE19zdGRvdXRfbGltaXRfYnl0ZXNCFQoTX3N0ZGVycl9saW1pdF9ieXRlcyL5AQoZRXhlY3V0ZVdpdGhMaW1pdHNSZXNwb25zZRIRCglleGl0X2NvZGUYASABKAUSDgoGc3Rkb3V0GAIgASgMEg4KBnN0ZGVychgDIAEoDBJAChJ0ZXJtaW5hdGlvbl9yZWFzb24YBCABKA4yJC5wcm9jZXNzLnYxLkV4ZWN1dGVUZXJtaW5hdGlvblJlYXNvbhIzChBlbGFwc2VkX2R1cmF0aW9uGAUgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEhgKEHN0ZG91dF90cnVuY2F0ZWQYBiABKAgSGAoQc3RkZXJyX3RydW5jYXRlZBgHIAEoCCJqChFXcml0ZVN0ZGluUmVxdWVzdBISCgpwcm9jZXNzX2lkGAEgASgFEg8KBWlucHV0GAIgASgMSAASJQoDZW9mGAMgASgLMhYuZ29vZ2xlLnByb3RvYnVmLkVtcHR5SABCCQoHcGF5bG9hZCIUChJXcml0ZVN0ZGluUmVzcG9uc2UiSwoRU2VuZFNpZ25hbFJlcXVlc3QSEgoKcHJvY2Vzc19pZBgBIAEoBRIiCgZzaWduYWwYAiABKA4yEi5wcm9jZXNzLnYxLlNpZ25hbCIUChJTZW5kU2lnbmFsUmVzcG9uc2UiQgoQUmVzaXplVFRZUmVxdWVzdBISCgpwcm9jZXNzX2lkGAEgASgFEgwKBGNvbHMYAiABKA0SDAoEcm93cxgDIAEoDSITChFSZXNpemVUVFlSZXNwb25zZSpbCgZTaWduYWwSFgoSU0lHTkFMX1VOU1BFQ0lGSUVEEAASEQoNU0lHTkFMX1NJR0lOVBACEhIKDlNJR05BTF9TSUdLSUxMEAkSEgoOU0lHTkFMX1NJR1RFUk0QDyqhAQoYRXhlY3V0ZVRlcm1pbmF0aW9uUmVhc29uEioKJkVYRUNVVEVfVEVSTUlOQVRJT05fUkVBU09OX1VOU1BFQ0lGSUVEEAASJQohRVhFQ1VURV9URVJNSU5BVElPTl9SRUFTT05fRVhJVEVEEAESMgouRVhFQ1VURV9URVJNSU5BVElPTl9SRUFTT05fVElNRV9MSU1JVF9FWENFRURFRBACMtoDCg5Qcm9jZXNzU2VydmljZRI+CgVTdGFydBIYLnByb2Nlc3MudjEuU3RhcnRSZXF1ZXN0GhkucHJvY2Vzcy52MS5TdGFydFJlc3BvbnNlMAESQgoHRXhlY3V0ZRIaLnByb2Nlc3MudjEuRXhlY3V0ZVJlcXVlc3QaGy5wcm9jZXNzLnYxLkV4ZWN1dGVSZXNwb25zZRJgChFFeGVjdXRlV2l0aExpbWl0cxIkLnByb2Nlc3MudjEuRXhlY3V0ZVdpdGhMaW1pdHNSZXF1ZXN0GiUucHJvY2Vzcy52MS5FeGVjdXRlV2l0aExpbWl0c1Jlc3BvbnNlEksKCldyaXRlU3RkaW4SHS5wcm9jZXNzLnYxLldyaXRlU3RkaW5SZXF1ZXN0Gh4ucHJvY2Vzcy52MS5Xcml0ZVN0ZGluUmVzcG9uc2USSwoKU2VuZFNpZ25hbBIdLnByb2Nlc3MudjEuU2VuZFNpZ25hbFJlcXVlc3QaHi5wcm9jZXNzLnYxLlNlbmRTaWduYWxSZXNwb25zZRJICglSZXNpemVUVFkSHC5wcm9jZXNzLnYxLlJlc2l6ZVRUWVJlcXVlc3QaHS5wcm9jZXNzLnYxLlJlc2l6ZVRUWVJlc3BvbnNlQq4BCg5jb20ucHJvY2Vzcy52MUIMUHJvY2Vzc1Byb3RvUAFaRXNpZ3MuazhzLmlvL2FnZW50LXNhbmRib3gvcGFja2FnZXMvc2FuZGJveGQvc3BlYy9wcm9jZXNzL3YxO3Byb2Nlc3N2MaICA1BYWKoCClByb2Nlc3MuVjHKAgpQcm9jZXNzXFYx4gIWUHJvY2Vzc1xWMVxHUEJNZXRhZGF0YeoCC1Byb2Nlc3M6OlYxYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_empty]);
 
 /**
  * @generated from message process.v1.PTY
@@ -164,6 +164,12 @@ export type StartResponse = Message<"process.v1.StartResponse"> & {
      */
     value: ExitEvent;
     case: "exit";
+  } | {
+    /**
+     * @generated from field: process.v1.KeepAlive keepalive = 5;
+     */
+    value: KeepAlive;
+    case: "keepalive";
   } | { case: undefined; value?: undefined };
 };
 
@@ -173,6 +179,23 @@ export type StartResponse = Message<"process.v1.StartResponse"> & {
  */
 export const StartResponseSchema: GenMessage<StartResponse> = /*@__PURE__*/
   messageDesc(file_process_v1_process, 5);
+
+/**
+ * KeepAlive carries no data. sandboxd sends it on a quiet Start stream when the
+ * client sets the "keepalive-ping-interval" metadata key (seconds), so idle
+ * timeouts along the path do not cut the stream.
+ *
+ * @generated from message process.v1.KeepAlive
+ */
+export type KeepAlive = Message<"process.v1.KeepAlive"> & {
+};
+
+/**
+ * Describes the message process.v1.KeepAlive.
+ * Use `create(KeepAliveSchema)` to create a new message.
+ */
+export const KeepAliveSchema: GenMessage<KeepAlive> = /*@__PURE__*/
+  messageDesc(file_process_v1_process, 6);
 
 /**
  * @generated from message process.v1.ExecuteRequest
@@ -189,7 +212,7 @@ export type ExecuteRequest = Message<"process.v1.ExecuteRequest"> & {
  * Use `create(ExecuteRequestSchema)` to create a new message.
  */
 export const ExecuteRequestSchema: GenMessage<ExecuteRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 6);
+  messageDesc(file_process_v1_process, 7);
 
 /**
  * ExecuteResponse contains the complete output of a synchronously executed command.
@@ -224,7 +247,7 @@ export type ExecuteResponse = Message<"process.v1.ExecuteResponse"> & {
  * Use `create(ExecuteResponseSchema)` to create a new message.
  */
 export const ExecuteResponseSchema: GenMessage<ExecuteResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 7);
+  messageDesc(file_process_v1_process, 8);
 
 /**
  * @generated from message process.v1.ExecuteWithLimitsRequest
@@ -260,7 +283,7 @@ export type ExecuteWithLimitsRequest = Message<"process.v1.ExecuteWithLimitsRequ
  * Use `create(ExecuteWithLimitsRequestSchema)` to create a new message.
  */
 export const ExecuteWithLimitsRequestSchema: GenMessage<ExecuteWithLimitsRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 8);
+  messageDesc(file_process_v1_process, 9);
 
 /**
  * @generated from message process.v1.ExecuteWithLimitsResponse
@@ -311,7 +334,7 @@ export type ExecuteWithLimitsResponse = Message<"process.v1.ExecuteWithLimitsRes
  * Use `create(ExecuteWithLimitsResponseSchema)` to create a new message.
  */
 export const ExecuteWithLimitsResponseSchema: GenMessage<ExecuteWithLimitsResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 9);
+  messageDesc(file_process_v1_process, 10);
 
 /**
  * @generated from message process.v1.WriteStdinRequest
@@ -345,7 +368,7 @@ export type WriteStdinRequest = Message<"process.v1.WriteStdinRequest"> & {
  * Use `create(WriteStdinRequestSchema)` to create a new message.
  */
 export const WriteStdinRequestSchema: GenMessage<WriteStdinRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 10);
+  messageDesc(file_process_v1_process, 11);
 
 /**
  * WriteStdinResponse is returned on successful delivery of standard input.
@@ -362,7 +385,7 @@ export type WriteStdinResponse = Message<"process.v1.WriteStdinResponse"> & {
  * Use `create(WriteStdinResponseSchema)` to create a new message.
  */
 export const WriteStdinResponseSchema: GenMessage<WriteStdinResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 11);
+  messageDesc(file_process_v1_process, 12);
 
 /**
  * @generated from message process.v1.SendSignalRequest
@@ -384,7 +407,7 @@ export type SendSignalRequest = Message<"process.v1.SendSignalRequest"> & {
  * Use `create(SendSignalRequestSchema)` to create a new message.
  */
 export const SendSignalRequestSchema: GenMessage<SendSignalRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 12);
+  messageDesc(file_process_v1_process, 13);
 
 /**
  * SendSignalResponse is returned on successful delivery of a signal.
@@ -400,7 +423,7 @@ export type SendSignalResponse = Message<"process.v1.SendSignalResponse"> & {
  * Use `create(SendSignalResponseSchema)` to create a new message.
  */
 export const SendSignalResponseSchema: GenMessage<SendSignalResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 13);
+  messageDesc(file_process_v1_process, 14);
 
 /**
  * @generated from message process.v1.ResizeTTYRequest
@@ -427,7 +450,7 @@ export type ResizeTTYRequest = Message<"process.v1.ResizeTTYRequest"> & {
  * Use `create(ResizeTTYRequestSchema)` to create a new message.
  */
 export const ResizeTTYRequestSchema: GenMessage<ResizeTTYRequest> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 14);
+  messageDesc(file_process_v1_process, 15);
 
 /**
  * @generated from message process.v1.ResizeTTYResponse
@@ -440,7 +463,7 @@ export type ResizeTTYResponse = Message<"process.v1.ResizeTTYResponse"> & {
  * Use `create(ResizeTTYResponseSchema)` to create a new message.
  */
 export const ResizeTTYResponseSchema: GenMessage<ResizeTTYResponse> = /*@__PURE__*/
-  messageDesc(file_process_v1_process, 15);
+  messageDesc(file_process_v1_process, 16);
 
 /**
  * @generated from enum process.v1.Signal

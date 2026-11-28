@@ -77,16 +77,22 @@ class ExitEvent(_message.Message):
     def __init__(self, exit_code: _Optional[int] = ...) -> None: ...
 
 class StartResponse(_message.Message):
-    __slots__ = ("init", "stdout", "stderr", "exit")
+    __slots__ = ("init", "stdout", "stderr", "exit", "keepalive")
     INIT_FIELD_NUMBER: _ClassVar[int]
     STDOUT_FIELD_NUMBER: _ClassVar[int]
     STDERR_FIELD_NUMBER: _ClassVar[int]
     EXIT_FIELD_NUMBER: _ClassVar[int]
+    KEEPALIVE_FIELD_NUMBER: _ClassVar[int]
     init: InitEvent
     stdout: bytes
     stderr: bytes
     exit: ExitEvent
-    def __init__(self, init: _Optional[_Union[InitEvent, _Mapping]] = ..., stdout: _Optional[bytes] = ..., stderr: _Optional[bytes] = ..., exit: _Optional[_Union[ExitEvent, _Mapping]] = ...) -> None: ...
+    keepalive: KeepAlive
+    def __init__(self, init: _Optional[_Union[InitEvent, _Mapping]] = ..., stdout: _Optional[bytes] = ..., stderr: _Optional[bytes] = ..., exit: _Optional[_Union[ExitEvent, _Mapping]] = ..., keepalive: _Optional[_Union[KeepAlive, _Mapping]] = ...) -> None: ...
+
+class KeepAlive(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class ExecuteRequest(_message.Message):
     __slots__ = ("config",)

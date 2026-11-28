@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -82,6 +83,8 @@ type startResult struct {
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer
 	exitCode int32
+	// keepAlives counts KeepAlive events.
+	keepAlives int
 }
 
 // drainStart reads the stream until the ExitEvent and returns everything seen.
@@ -106,6 +109,9 @@ func drainStart(t *testing.T, stream processv1.ProcessService_StartClient) *star
 		case *processv1.StartResponse_Exit:
 			sawExit = true
 			res.exitCode = ev.Exit.GetExitCode()
+		case *processv1.StartResponse_Keepalive:
+			require.False(t, sawExit, "KeepAlive after ExitEvent")
+			res.keepAlives++
 		}
 	}
 	require.True(t, sawExit, "no ExitEvent received")
@@ -308,6 +314,88 @@ func TestStartStreamsStdoutStderrAndExit(t *testing.T) {
 	require.Equal(t, "out\n", res.stdout.String())
 	require.Equal(t, "err\n", res.stderr.String())
 	require.Equal(t, int32(7), res.exitCode)
+}
+
+func TestStartKeepAlive(t *testing.T) {
+	const (
+		waitForInput = "read line; echo done"
+		// Each gap between lines is well under the one second interval, but
+		// the run as a whole outlasts it.
+		steadyOutput = "for i in 1 2 3 4 5 6 7 8; do echo $i; sleep 0.2; done"
+	)
+	tests := []struct {
+		name   string
+		pty    bool
+		script string
+		// interval is the keepalive-ping-interval value; empty leaves
+		// keep-alives off.
+		interval string
+		// wantPings is how many keep-alives to see before releasing a child
+		// blocked on stdin. Zero means the child exits by itself and no
+		// keep-alive may arrive.
+		wantPings int
+		wantOut   []string
+	}{
+		{name: "silent pipe", script: waitForInput, interval: "1", wantPings: 2, wantOut: []string{"done"}},
+		{name: "silent pty", pty: true, script: waitForInput, interval: "1", wantPings: 2, wantOut: []string{"done"}},
+		{name: "steady output pipe", script: steadyOutput, interval: "1", wantOut: []string{"1", "2", "3", "4", "5", "6", "7", "8"}},
+		{name: "steady output pty", pty: true, script: steadyOutput, interval: "1", wantOut: []string{"1", "2", "3", "4", "5", "6", "7", "8"}},
+		{name: "not requested", script: "sleep 1.5; echo done", wantOut: []string{"done"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client := newProcessClient(t, t.TempDir())
+			ctx := testCtx(t)
+			if tt.interval != "" {
+				ctx = metadata.AppendToOutgoingContext(ctx, keepAliveMetadataKey, tt.interval)
+			}
+			req := &processv1.StartRequest{
+				Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", tt.script}},
+			}
+			if tt.pty {
+				req.Pty = &processv1.PTY{Cols: 80, Rows: 24}
+			}
+			stream, err := client.Start(ctx, req)
+			require.NoError(t, err)
+
+			if tt.wantPings > 0 {
+				pid := recvInit(t, stream)
+				for seen := 0; seen < tt.wantPings; {
+					msg, err := stream.Recv()
+					require.NoError(t, err)
+					if msg.GetKeepalive() != nil {
+						seen++
+					}
+				}
+				_, err := client.WriteStdin(ctx, &processv1.WriteStdinRequest{
+					ProcessId: pid,
+					Payload:   &processv1.WriteStdinRequest_Input{Input: []byte("\n")},
+				})
+				require.NoError(t, err)
+			}
+
+			res := drainStart(t, stream)
+			// The PTY line discipline echoes input and turns "\n" into "\r\n".
+			require.Equal(t, tt.wantOut, strings.Fields(res.stdout.String()))
+			if tt.wantPings == 0 {
+				require.Zero(t, res.keepAlives)
+			}
+		})
+	}
+}
+
+func TestStartRejectsInvalidKeepAliveInterval(t *testing.T) {
+	client := newProcessClient(t, t.TempDir())
+	for _, value := range []string{"0", "-1", "soon", ""} {
+		ctx := metadata.AppendToOutgoingContext(testCtx(t), keepAliveMetadataKey, value)
+		stream, err := client.Start(ctx, &processv1.StartRequest{
+			Config: &processv1.ProcessConfig{Command: []string{"true"}},
+		})
+		require.NoError(t, err)
+		_, err = stream.Recv()
+		require.Equal(t, codes.InvalidArgument, status.Code(err), value)
+	}
 }
 
 func TestStartClosesOutputPipes(t *testing.T) {

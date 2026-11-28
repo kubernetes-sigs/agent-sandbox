@@ -80,6 +80,8 @@ var ErrSandboxNotOwned = errors.New("sandbox not owned by this claim")
 // ErrWarmPoolNotFound is a sentinel error indicating a SandboxWarmPool was not found.
 var ErrWarmPoolNotFound = errors.New("SandboxWarmPool not found")
 
+var errReevaluateClaimDeadline = errors.New("re-evaluate claim deadline before allocation")
+
 // errAdoptionConflict classifies expected contention on the optimistically
 // locked adoption writes; the Ready condition surfaces it as the benign
 // AdoptionConflict reason instead of ReconcilerError.
@@ -245,9 +247,10 @@ func (m *observedTimeMap) LoadOrStore(key types.NamespacedName, entry observedTi
 type SandboxClaimReconciler struct {
 	client.Client
 	// APIReader reads directly from the API server, bypassing the informer
-	// cache. Used only to re-read a claim, or its assigned sandbox, after an
+	// cache. Used only to re-read a claim or its assigned sandbox after an
 	// optimistic-lock conflict or a suspect 404, where the cache is stale by
-	// definition. Falls back to Client when unset (e.g. in unit tests with a
+	// definition, and to confirm a positive pool TTL before persisting it.
+	// Falls back to Client when unset (e.g. in unit tests with a
 	// fake client).
 	APIReader               client.Reader
 	Scheme                  *runtime.Scheme
@@ -256,6 +259,10 @@ type SandboxClaimReconciler struct {
 	Tracer                  asmetrics.Instrumenter
 	MaxConcurrentReconciles int
 	observedTimes           observedTimeMap
+	// pendingDefaultDeadlines covers the gap until the Claim informer observes
+	// the status write, even when the API response was lost. Only positive
+	// default writes enter the map.
+	pendingDefaultDeadlines sync.Map // types.NamespacedName -> pendingDefaultDeadline
 	// cacheLagAttempts counts consecutive errSandboxAlreadyExists requeues per
 	// claim, so a persistently lagging informer backs off instead of
 	// re-issuing Create at a flat rate forever (#1313).
@@ -298,6 +305,7 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if k8errors.IsNotFound(err) {
 			// Fallback cleanup to prevent memory leaks if the delete predicate was missed or a stale request is processed.
 			r.observedTimes.Delete(req.NamespacedName)
+			r.pendingDefaultDeadlines.Delete(req.NamespacedName)
 			r.cacheLagAttempts.Delete(req.NamespacedName)
 			logger.V(1).Info("SandboxClaim not found, ignoring", "request", req.NamespacedName)
 			return ctrl.Result{}, nil
@@ -337,7 +345,16 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	defer end()
 
 	if !claim.DeletionTimestamp.IsZero() {
+		r.pendingDefaultDeadlines.Delete(req.NamespacedName)
 		return ctrl.Result{}, nil
+	}
+
+	stop, err := r.initializeDefaultLifecycle(ctx, claim)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if stop {
+		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 	}
 
 	// Initialize trace ID and observation time for active resources missing them.
@@ -366,17 +383,23 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// Handle "Delete" and "DeleteForeground" policies immediately.
 	// If we delete the claim, we return immediately.
 	// Continuing would try to update the status of a deleted object, causing a crash/error.
-	if claimExpired && claim.Spec.Lifecycle != nil &&
-		(claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDelete ||
-			claim.Spec.Lifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDeleteForeground) {
+	effectiveLifecycle := claimLifecycle(claim)
+	if claimExpired && effectiveLifecycle != nil &&
+		(effectiveLifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDelete ||
+			effectiveLifecycle.ShutdownPolicy == extensionsv1beta1.ShutdownPolicyDeleteForeground) {
 
-		policy := claim.Spec.Lifecycle.ShutdownPolicy
+		policy := effectiveLifecycle.ShutdownPolicy
 		logger.Info("Deleting Claim because time has expired", "shutdownPolicy", policy, "claim", claim.Name)
 		if r.Recorder != nil {
 			r.Recorder.Eventf(claim, nil, corev1.EventTypeNormal, extensionsv1beta1.ClaimExpiredReason, "Deleting", fmt.Sprintf("Deleting Claim (ShutdownPolicy=%s)", policy))
 		}
 
 		deleteOpts := []client.DeleteOption{}
+		if claim.Status.DefaultShutdownTime != nil && (claim.Spec.Lifecycle == nil || claim.Spec.Lifecycle.ShutdownTime == nil) {
+			// This Claim can delete itself because its pool supplied the deadline.
+			// Do not delete a replacement or one whose shutdown policy changed.
+			deleteOpts = append(deleteOpts, client.Preconditions{UID: &claim.UID, ResourceVersion: &claim.ResourceVersion})
+		}
 		if policy == extensionsv1beta1.ShutdownPolicyDeleteForeground {
 			deleteOpts = append(deleteOpts, client.PropagationPolicy(metav1.DeletePropagationForeground))
 		}
@@ -400,6 +423,10 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		sandbox, reconcileErr = r.reconcileActive(ctx, claim)
 	}
 
+	if errors.Is(reconcileErr, errReevaluateClaimDeadline) {
+		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
+	}
+
 	// Pending warm candidates are expected transient state, not a claim failure.
 	// Return before status calculation so the grace period does not publish a
 	// misleading SandboxMissing or ReconcilerError condition.
@@ -410,7 +437,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			"pendingCandidates", pendingWarmCandidates.pendingCandidates,
 			"retryAfter", pendingWarmCandidates.retryAfter,
 		)
-		return ctrl.Result{RequeueAfter: pendingWarmCandidates.retryAfter}, nil
+		delay := pendingWarmCandidates.retryAfter
+		_, remaining := r.checkExpiration(claim)
+		if remaining <= 0 && timeLeft > 0 {
+			delay = immediateRequeueDelay
+		} else if remaining > 0 && remaining < delay {
+			delay = remaining
+		}
+		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 
 	// Update Status & Events
@@ -574,14 +608,234 @@ func (r *SandboxClaimReconciler) initializeAnnotations(ctx context.Context, clai
 	return r.Patch(ctx, claim, patch)
 }
 
-// checkExpiration calculates if the claim is expired and how much time is left.
-func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
+// claimLifecycle overlays an explicit absolute deadline, finished TTL, and
+// shutdown policy. The pool supplies a frozen policy only when the Claim
+// has no lifecycle of its own.
+func claimLifecycle(claim *extensionsv1beta1.SandboxClaim) *extensionsv1beta1.Lifecycle {
+	if claim.Status.DefaultShutdownTime == nil {
+		return claim.Spec.Lifecycle
+	}
 	if claim.Spec.Lifecycle == nil {
-		return false, 0
+		return &extensionsv1beta1.Lifecycle{
+			ShutdownTime:   claim.Status.DefaultShutdownTime,
+			ShutdownPolicy: claim.Status.DefaultShutdownPolicy,
+		}
+	}
+	if claim.Spec.Lifecycle.ShutdownTime != nil {
+		return claim.Spec.Lifecycle
+	}
+	effective := *claim.Spec.Lifecycle
+	effective.ShutdownTime = claim.Status.DefaultShutdownTime
+	return &effective
+}
+
+type pendingDefaultDeadline struct {
+	uid             types.UID
+	at              metav1.Time
+	policy          extensionsv1beta1.ShutdownPolicy
+	resourceVersion string
+}
+
+func poolClaimTTL(pool *extensionsv1beta1.SandboxWarmPool) *int32 {
+	if pool.Spec.ClaimDefaults == nil {
+		return nil
+	}
+	return pool.Spec.ClaimDefaults.TTLSecondsAfterCreated
+}
+
+func hasClaimAssignmentReference(claim *extensionsv1beta1.SandboxClaim) bool {
+	return claim.Status.SandboxStatus.Name != "" ||
+		claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] != "" ||
+		claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] != ""
+}
+
+func (r *SandboxClaimReconciler) hasAssignedSandbox(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, checkReferences bool) (bool, error) {
+	names := []string{claim.Name}
+	if checkReferences {
+		names = append(names, claim.Status.SandboxStatus.Name,
+			claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation],
+			claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel])
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		sandbox := &v1beta1.Sandbox{}
+		key := client.ObjectKey{Namespace: claim.Namespace, Name: name}
+		if err := r.authoritativeReader().Get(ctx, key, sandbox); err != nil {
+			if k8errors.IsNotFound(err) {
+				continue
+			}
+			return false, fmt.Errorf("check existing sandbox before resolving lifecycle default: %w", err)
+		}
+		if metav1.IsControlledBy(sandbox, claim) {
+			return true, nil
+		}
+		if checkReferences && (name == claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] ||
+			name == claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel]) &&
+			verifySandboxCandidate(sandbox, claim) == nil {
+			return true, nil // an adoption already started, resume rather than allocate again
+		}
+	}
+	return false, nil
+}
+
+// initializeDefaultLifecycle persists a real deadline before provisioning.
+// With no opt-in the normal path makes no additional uncached reads or writes.
+func (r *SandboxClaimReconciler) initializeDefaultLifecycle(ctx context.Context, claim *extensionsv1beta1.SandboxClaim) (bool, error) {
+	return r.resolveDefaultDeadline(ctx, claim, false)
+}
+
+func (r *SandboxClaimReconciler) resolveDefaultDeadline(ctx context.Context, claim *extensionsv1beta1.SandboxClaim, beforeAllocation bool) (bool, error) {
+	key := client.ObjectKeyFromObject(claim)
+	if claim.Status.DefaultShutdownTime != nil {
+		r.pendingDefaultDeadlines.Delete(key)
+		return false, nil
+	}
+	value, pending := r.pendingDefaultDeadlines.Load(key)
+	var deadline pendingDefaultDeadline
+	if pending {
+		deadline = value.(pendingDefaultDeadline)
+		if deadline.uid != claim.UID {
+			r.pendingDefaultDeadlines.Delete(key)
+			pending = false
+		}
 	}
 
+	if !pending {
+		if (claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownTime != nil) ||
+			(!beforeAllocation && hasClaimAssignmentReference(claim)) ||
+			r.validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata) != nil {
+			return false, nil
+		}
+		pool, err := r.getWarmPool(ctx, claim)
+		if errors.Is(err, ErrWarmPoolNotFound) {
+			// Preserve existing reconciliation for missing pools (including
+			// recovery of an already owned backing sandbox).
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if poolClaimTTL(pool) == nil {
+			return false, nil
+		}
+	}
+
+	reader := r.authoritativeReader()
+	fresh := &extensionsv1beta1.SandboxClaim{}
+	if err := reader.Get(ctx, key, fresh); err != nil {
+		if k8errors.IsNotFound(err) {
+			r.pendingDefaultDeadlines.Delete(key)
+			return true, nil
+		}
+		return false, fmt.Errorf("read claim before resolving lifecycle default: %w", err)
+	}
+	if fresh.UID != claim.UID || !fresh.DeletionTimestamp.IsZero() {
+		r.pendingDefaultDeadlines.Delete(key)
+		return true, nil
+	}
+	adoptFreshClaim(claim, fresh)
+	if claim.Status.DefaultShutdownTime != nil {
+		// Keep the fence until the cache, not just a live read, observes
+		// this write. A subsequent OFF pool must not bypass it.
+		r.pendingDefaultDeadlines.Store(key, pendingDefaultDeadline{uid: claim.UID, at: *claim.Status.DefaultShutdownTime, policy: claim.Status.DefaultShutdownPolicy})
+		return beforeAllocation, nil
+	}
+	if pending && claim.ResourceVersion != deadline.resourceVersion {
+		// The old write did not persist and cannot now satisfy its
+		// optimistic precondition. Re-resolve the current pool, which
+		// may have been changed by this newer Claim revision.
+		r.pendingDefaultDeadlines.Delete(key)
+		pending = false
+	}
+
+	if (claim.Spec.Lifecycle != nil && claim.Spec.Lifecycle.ShutdownTime != nil) ||
+		r.validateAdditionalPodMetadata(&claim.Spec.AdditionalPodMetadata) != nil {
+		r.pendingDefaultDeadlines.Delete(key)
+		return beforeAllocation, nil
+	}
+	if !beforeAllocation && hasClaimAssignmentReference(claim) {
+		r.pendingDefaultDeadlines.Delete(key)
+		return false, nil
+	}
+
+	// Older controllers can create a cold Sandbox before recording assignment.
+	// On the allocation path, verify references rather than assuming they are
+	// valid: cached lookups may already have ruled them out or removed them.
+	assigned, err := r.hasAssignedSandbox(ctx, claim, beforeAllocation)
+	if err != nil {
+		return false, err
+	}
+	if assigned {
+		r.pendingDefaultDeadlines.Delete(key)
+		return beforeAllocation, nil
+	}
+
+	if !pending {
+		// Confirm the positive cached hint before making a durable decision.
+		pool := &extensionsv1beta1.SandboxWarmPool{}
+		poolKey := client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.WarmPoolRef.Name}
+		if err := reader.Get(ctx, poolKey, pool); err != nil {
+			if k8errors.IsNotFound(err) {
+				return false, nil
+			}
+			return false, fmt.Errorf("confirm pool lifecycle default: %w", err)
+		}
+		ttl := poolClaimTTL(pool)
+		if ttl == nil {
+			return false, nil
+		}
+		if *ttl <= 0 || claim.CreationTimestamp.IsZero() {
+			return false, fmt.Errorf("cannot resolve claim lifecycle default without a positive TTL and creation time")
+		}
+		policy := pool.Spec.ClaimDefaults.ShutdownPolicy
+		if claim.Spec.Lifecycle != nil || policy == extensionsv1beta1.ShutdownPolicyRetain {
+			// Retain is the absence of an inherited destructive action.
+			// An existing Claim lifecycle owns the action at resolution.
+			policy = ""
+		}
+		deadline = pendingDefaultDeadline{
+			uid:    claim.UID,
+			at:     metav1.NewTime(claim.CreationTimestamp.Add(time.Duration(*ttl) * time.Second)),
+			policy: policy,
+		}
+	}
+	original := claim.DeepCopy()
+	claim.Status.DefaultShutdownTime = &deadline.at
+	claim.Status.DefaultShutdownPolicy = deadline.policy
+	patch := client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+
+	// Mark the attempt before sending the write. A timeout does not prove
+	// the write failed, so retries first resolve any stored result by UID.
+	deadline.resourceVersion = original.ResourceVersion
+	r.pendingDefaultDeadlines.Store(key, deadline)
+	if err := r.Status().Patch(ctx, claim, patch); err != nil {
+		// Clear a first attempt only for a definite rejection: a timeout can
+		// follow a committed write, unlike these API status responses.
+		if !pending && (k8errors.IsConflict(err) || k8errors.IsNotFound(err) ||
+			k8errors.IsBadRequest(err) || k8errors.IsInvalid(err) ||
+			k8errors.IsForbidden(err) || k8errors.IsUnauthorized(err)) {
+			r.pendingDefaultDeadlines.Delete(key)
+		}
+		if k8errors.IsConflict(err) || k8errors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("persist claim lifecycle default before provisioning: %w", err)
+	}
+	return beforeAllocation, nil
+}
+
+// checkExpiration calculates if the claim is expired and how much time is left.
+func (r *SandboxClaimReconciler) checkExpiration(claim *extensionsv1beta1.SandboxClaim) (bool, time.Duration) {
+	effective := claimLifecycle(claim)
+	if effective == nil {
+		return false, 0
+	}
 	finishedCondition := lifecycle.FinishedCondition(claim.Status.Conditions, string(v1beta1.SandboxConditionFinished))
-	return lifecycle.TimeLeft(time.Now(), claim.Spec.Lifecycle.ShutdownTime, claim.Spec.Lifecycle.TTLSecondsAfterFinished, finishedCondition)
+	return lifecycle.TimeLeft(time.Now(), effective.ShutdownTime, effective.TTLSecondsAfterFinished, finishedCondition)
 }
 
 // reconcileActive handles the creation and updates of running sandboxes.
@@ -766,7 +1020,7 @@ func (r *SandboxClaimReconciler) reconcileExpired(ctx context.Context, claim *ex
 	// Sandbox exists, delete it.
 	if sandbox.DeletionTimestamp.IsZero() {
 		logger.Info("Deleting Sandbox because Claim expired (Policy=Retain)", "sandbox", sandbox.Name, "claim", claim.Name)
-		if err := r.Delete(ctx, sandbox); err != nil {
+		if err := r.Delete(ctx, sandbox, client.Preconditions{UID: &sandbox.UID}); err != nil {
 			return sandbox, fmt.Errorf("failed to delete expired sandbox: %w", err)
 		}
 	}
@@ -2303,6 +2557,8 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	logger := log.FromContext(ctx)
 	logger.V(4).Info("Executing getOrCreateSandbox", "claim", claim.Name)
 
+	hadAssignmentReference := hasClaimAssignmentReference(claim)
+
 	// Check if a previously adopted sandbox is recorded in claim status
 	clearedStaleName := ""
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
@@ -2482,6 +2738,18 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		return sandbox, nil
 	}
 
+	// A stale assignment can have skipped the initial default check. Check
+	// before selecting a new warm candidate or falling back to cold creation.
+	if hadAssignmentReference && claim.Status.DefaultShutdownTime == nil {
+		stop, err := r.resolveDefaultDeadline(ctx, claim, true)
+		if err != nil {
+			return nil, err
+		}
+		if stop {
+			return nil, errReevaluateClaimDeadline
+		}
+	}
+
 	// Implicit Cold Start Detection (Bypassing the Queue):
 	// If len(claim.Spec.Env) > 0 or len(claim.Spec.VolumeClaimTemplates) > 0, the controller immediately bypasses the warm pool queue.
 	if claimForcesColdStart(claim) {
@@ -2631,6 +2899,9 @@ func (r *SandboxClaimReconciler) getTimingPredicate() predicate.Funcs {
 			entry, ok := r.observedTimes.Load(key)
 			if ok && entry.uid == e.Object.GetUID() {
 				r.observedTimes.CompareAndDelete(key, entry)
+			}
+			if value, ok := r.pendingDefaultDeadlines.Load(key); ok && value.(pendingDefaultDeadline).uid == e.Object.GetUID() {
+				r.pendingDefaultDeadlines.CompareAndDelete(key, value)
 			}
 			return true
 		},

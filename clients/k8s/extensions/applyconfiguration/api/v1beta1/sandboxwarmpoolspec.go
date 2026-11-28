@@ -21,6 +21,9 @@ package v1beta1
 //
 // SandboxWarmPoolSpec defines the desired state of SandboxWarmPool.
 type SandboxWarmPoolSpecApplyConfiguration struct {
+	// claimDefaults applies only to claims without an explicit shutdownTime.
+	// Existing assigned claims are not retroactively given a deadline.
+	ClaimDefaults *SandboxClaimDefaultsApplyConfiguration `json:"claimDefaults,omitempty"`
 	// replicas is the desired number of sandboxes in the pool.
 	// This field is controlled by an HPA if specified.
 	Replicas *int32 `json:"replicas,omitempty"`
@@ -58,6 +61,14 @@ type SandboxWarmPoolSpecApplyConfiguration struct {
 // apply.
 func SandboxWarmPoolSpec() *SandboxWarmPoolSpecApplyConfiguration {
 	return &SandboxWarmPoolSpecApplyConfiguration{}
+}
+
+// WithClaimDefaults sets the ClaimDefaults field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ClaimDefaults field is set to the value of the last call.
+func (b *SandboxWarmPoolSpecApplyConfiguration) WithClaimDefaults(value *SandboxClaimDefaultsApplyConfiguration) *SandboxWarmPoolSpecApplyConfiguration {
+	b.ClaimDefaults = value
+	return b
 }
 
 // WithReplicas sets the Replicas field in the declarative configuration to the given value

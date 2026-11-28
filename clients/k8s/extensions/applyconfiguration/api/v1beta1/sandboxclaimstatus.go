@@ -17,7 +17,9 @@
 package v1beta1
 
 import (
-	v1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	apiv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // SandboxClaimStatusApplyConfiguration represents a declarative configuration of the SandboxClaimStatus type for use
@@ -25,8 +27,16 @@ import (
 //
 // SandboxClaimStatus defines the observed state of Sandbox.
 type SandboxClaimStatusApplyConfiguration struct {
+	// defaultShutdownTime is the absolute deadline resolved from the warm pool
+	// TTL before provisioning. It is absent when no deadline was resolved.
+	// A claim's explicit shutdownTime takes precedence.
+	DefaultShutdownTime *v1.Time `json:"defaultShutdownTime,omitempty"`
+	// defaultShutdownPolicy is a non-Retain pool policy frozen with
+	// defaultShutdownTime when the Claim has no lifecycle at resolution.
+	// Its absence means Retain. A Claim's own lifecycle policy takes precedence.
+	DefaultShutdownPolicy *apiv1beta1.ShutdownPolicy `json:"defaultShutdownPolicy,omitempty"`
 	// conditions represent the latest available observations of a Sandbox's current state.
-	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
+	Conditions []metav1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// sandbox defines the state of Sandbox
 	SandboxStatus *SandboxStatusApplyConfiguration `json:"sandbox,omitempty"`
 }
@@ -37,10 +47,26 @@ func SandboxClaimStatus() *SandboxClaimStatusApplyConfiguration {
 	return &SandboxClaimStatusApplyConfiguration{}
 }
 
+// WithDefaultShutdownTime sets the DefaultShutdownTime field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DefaultShutdownTime field is set to the value of the last call.
+func (b *SandboxClaimStatusApplyConfiguration) WithDefaultShutdownTime(value v1.Time) *SandboxClaimStatusApplyConfiguration {
+	b.DefaultShutdownTime = &value
+	return b
+}
+
+// WithDefaultShutdownPolicy sets the DefaultShutdownPolicy field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DefaultShutdownPolicy field is set to the value of the last call.
+func (b *SandboxClaimStatusApplyConfiguration) WithDefaultShutdownPolicy(value apiv1beta1.ShutdownPolicy) *SandboxClaimStatusApplyConfiguration {
+	b.DefaultShutdownPolicy = &value
+	return b
+}
+
 // WithConditions adds the given value to the Conditions field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Conditions field.
-func (b *SandboxClaimStatusApplyConfiguration) WithConditions(values ...*v1.ConditionApplyConfiguration) *SandboxClaimStatusApplyConfiguration {
+func (b *SandboxClaimStatusApplyConfiguration) WithConditions(values ...*metav1.ConditionApplyConfiguration) *SandboxClaimStatusApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithConditions")

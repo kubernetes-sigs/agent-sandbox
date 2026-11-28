@@ -121,6 +121,12 @@ delete-kind:
 kill-cloud-provider-kind:
 	killall cloud-provider-kind
 
+
+# Requires local envtest etcd and kube-apiserver binaries. See docs/development.md.
+.PHONY: test-claim-ttl-integration
+test-claim-ttl-integration:
+	go test -tags integration ./extensions/controllers -run '^TestSandboxClaimPoolTTLIntegration$$'
+
 .PHONY: test-unit
 test-unit:
 	./dev/tools/test-unit

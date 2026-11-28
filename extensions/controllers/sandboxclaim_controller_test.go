@@ -7572,6 +7572,7 @@ func TestSandboxClaimStaleStatusPatchConflictDroppedWithoutMetrics(t *testing.T)
 	staleClaimView := false
 	var preReadyClaim *extensionsv1beta1.SandboxClaim
 	statusPatchAttempts := 0
+	// Lifecycle initialization is already complete; exercise readiness status conflicts.
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(template, warmPool, claim, adopted).
@@ -7804,6 +7805,8 @@ func TestSandboxClaimStatusConflictRetriedOnFreshBase(t *testing.T) {
 		claim.Name,
 		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
 	)
+
+	// Isolate the existing provisioning/status retry from lifecycle initialization.
 
 	rawClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -8119,6 +8122,8 @@ func TestSandboxClaimStatusConflictRecreatedClaimUIDMismatch(t *testing.T) {
 		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
 	)
 
+	// Isolate the existing provisioning/status retry from lifecycle initialization.
+
 	rawClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(template, warmPool, claim, adopted).
@@ -8185,6 +8190,8 @@ func TestSandboxClaimStatusConflictGenerationMismatch(t *testing.T) {
 		claim.Name,
 		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
 	)
+
+	// Isolate the existing provisioning/status retry from lifecycle initialization.
 
 	rawClient := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -9383,6 +9390,8 @@ func TestCreateSandboxAlreadyExistsRecoversViaAuthoritativeRead(t *testing.T) {
 
 	// The cache never converges in this test: every cached sandbox Get stays
 	// NotFound, so recovery can only come from the authoritative read.
+	// Isolate the existing provisioning/status retry from lifecycle initialization.
+
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(claim, warmPool, template, existingSandbox).
 		WithStatusSubresource(claim).
@@ -9477,6 +9486,8 @@ func TestCreateSandboxAlreadyExistsNameCollisionIsTerminal(t *testing.T) {
 		}}},
 	}
 
+	// Isolate the existing provisioning/status retry from lifecycle initialization.
+
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(claim, warmPool, template, foreignSandbox).
 		WithStatusSubresource(claim).
@@ -9568,6 +9579,8 @@ func TestCreateSandboxAlreadyExistsAuthoritativeReadFailure(t *testing.T) {
 			},
 		}}},
 	}
+
+	// Isolate the existing provisioning/status retry from lifecycle initialization.
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
 		WithObjects(claim, warmPool, template, existingSandbox).

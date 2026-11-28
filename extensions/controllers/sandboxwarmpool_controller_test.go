@@ -1277,6 +1277,55 @@ func TestReconcilePoolGCStuckSandboxes(t *testing.T) {
 		require.Equal(t, replicas, poolCount)
 		require.Equal(t, replicas, warmPool.Status.Replicas)
 	})
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*sandboxv1beta1.Sandbox)
+	}{
+		{"pod failed", func(sb *sandboxv1beta1.Sandbox) {
+			sb.Status.Conditions = append(sb.Status.Conditions, metav1.Condition{
+				Type:   string(sandboxv1beta1.SandboxConditionFinished),
+				Status: metav1.ConditionTrue,
+				Reason: sandboxv1beta1.SandboxReasonPodFailed,
+			})
+		}},
+		{"expired", func(sb *sandboxv1beta1.Sandbox) {
+			sb.Status.Conditions[0].Reason = sandboxv1beta1.SandboxReasonExpired
+		}},
+	} {
+		t.Run("deletes terminal ("+tc.name+") sandbox within grace period", func(t *testing.T) {
+			terminal := createSandboxWithAge("-terminal", metav1.ConditionFalse, 30*time.Second)
+			tc.mutate(terminal)
+			r := SandboxWarmPoolReconciler{
+				Client: newFakeClient(scheme,
+					template,
+					terminal,
+					createSandboxWithAge("-healthy", metav1.ConditionTrue, 10*time.Minute),
+				),
+				Scheme:       scheme,
+				MaxBatchSize: sandboxCreateDeleteMaxBatchSize,
+			}
+
+			ctx := context.Background()
+			_, err := r.reconcilePool(ctx, warmPool)
+			require.NoError(t, err)
+
+			// A terminal member cannot recover, so it is replaced immediately
+			// instead of being held for the grace period (#2247).
+			list := &sandboxv1beta1.SandboxList{}
+			err = r.List(ctx, list, &client.ListOptions{Namespace: poolNamespace})
+			require.NoError(t, err)
+
+			poolCount := int32(0)
+			for _, sb := range list.Items {
+				if sb.Labels[warmPoolSandboxLabel] == poolNameHash {
+					poolCount++
+					require.NotEqual(t, terminal.Name, sb.Name, "terminal sandbox should be deleted")
+				}
+			}
+			require.Equal(t, replicas-1, poolCount, "terminal sandbox should be deleted without a same-pass replacement")
+		})
+	}
 }
 
 func TestReconcilePool_TemplateUpdateRollout(t *testing.T) {

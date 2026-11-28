@@ -540,7 +540,11 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(readinessGraceStart(&sb))
-			if age <= graceWindow {
+			// A terminal member cannot recover, so the grace period does not
+			// apply to it: replace it now instead of holding it (and leaving
+			// it eligible for claim adoption) until the window expires.
+			terminal := isSandboxTerminal(&sb)
+			if age <= graceWindow && !terminal {
 				// Not Ready but still within the grace period. In a quiet
 				// cluster nothing else touches the Sandbox objects of a pool
 				// that settles at Ready=False (pod FailedScheduling events do
@@ -577,6 +581,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			}
 			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
+				"terminal", terminal,
 				"age", age.Round(time.Second))
 			r.exp().ExpectDeletion(poolKey, sb.UID)
 			if err := r.deletePoolSandbox(ctx, &sb); err != nil {
@@ -957,6 +962,21 @@ func isSandboxPodUnschedulable(sb *sandboxv1beta1.Sandbox) bool {
 // be held instead of replaced.
 func isSandboxPodSchedulingGated(sb *sandboxv1beta1.Sandbox) bool {
 	return podNotScheduledReason(sb) == corev1.PodReasonSchedulingGated
+}
+
+// isSandboxTerminal reports whether a pool member has permanently stopped:
+// its backing Pod reached a terminal phase, or the Sandbox expired. Such a
+// member never becomes Ready again, so it should be replaced rather than held
+// for the readiness grace period or adopted by a claim.
+func isSandboxTerminal(sb *sandboxv1beta1.Sandbox) bool {
+	if sb == nil {
+		return false
+	}
+	if finished := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionFinished)); finished != nil && finished.Status == metav1.ConditionTrue {
+		return true
+	}
+	ready := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	return ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == sandboxv1beta1.SandboxReasonExpired
 }
 
 // podNotScheduledReason returns the reason of a live pool member's mirrored

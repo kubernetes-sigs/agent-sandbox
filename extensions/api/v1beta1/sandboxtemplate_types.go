@@ -161,6 +161,9 @@ type SandboxTemplateSpec struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=sandboxtemplate
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Images",type="string",JSONPath=".spec.podTemplate.spec.containers[*].image",priority=1
+// +kubebuilder:printcolumn:name="Runtime",type="string",JSONPath=".spec.podTemplate.spec.runtimeClassName",priority=1
 // +kubebuilder:storageversion
 // SandboxTemplate is the Schema for the sandbox template API.
 type SandboxTemplate struct {

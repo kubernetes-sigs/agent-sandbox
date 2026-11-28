@@ -26,6 +26,18 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.podIPs[0]
+      name: IP
+      priority: 1
+      type: string
+    - jsonPath: .status.nodeName
+      name: Node
+      priority: 1
+      type: string
+    - jsonPath: .metadata.ownerReferences[?(@.controller==true)].kind
+      name: Owner
+      priority: 1
+      type: string
     name: v1beta1
     schema:
       openAPIV3Schema:

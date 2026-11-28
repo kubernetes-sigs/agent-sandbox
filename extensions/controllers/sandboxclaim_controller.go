@@ -1536,6 +1536,7 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	originalAdopted := adopted.DeepCopy()
 
 	templateHash := adopted.Labels[sandboxTemplateRefHash]
+	retainedWithoutTemplate := false
 
 	// Remove warm pool labels so the sandbox no longer appears in warm pool queries
 	delete(adopted.Labels, warmPoolSandboxLabel)
@@ -1609,6 +1610,10 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 
 		// Force an exact match
 		adopted.Spec.PodTemplate.ObjectMeta = mergedMeta
+
+		// A pool member carries no PVC retention policy. Apply the template's
+		// at handover, before the Sandbox holds a user's data.
+		adopted.Spec.PersistentVolumeClaimRetentionPolicy = template.Spec.PersistentVolumeClaimRetentionPolicy.DeepCopy()
 	} else {
 		// Fallback (just in case template is somehow missing)
 		if templateHash != "" {
@@ -1618,6 +1623,13 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 		if err := r.mergePodMetadata(&adopted.Spec.PodTemplate.ObjectMeta, &claim.Spec.AdditionalPodMetadata); err != nil {
 			return err
 		}
+
+		// Without the template, the policy it would apply is unknown, so
+		// fall back to Retain, which never loses data.
+		retainedWithoutTemplate = adopted.Spec.PersistentVolumeClaimRetentionPolicy.EffectiveWhenDeleted() != v1beta1.PersistentVolumeClaimRetentionPolicyRetain
+		adopted.Spec.PersistentVolumeClaimRetentionPolicy = &v1beta1.PersistentVolumeClaimRetentionPolicy{
+			WhenDeleted: v1beta1.PersistentVolumeClaimRetentionPolicyRetain,
+		}
 	}
 
 	// Optimistic lock: a transfer computed from a stale base is rejected
@@ -1625,6 +1637,13 @@ func (r *SandboxClaimReconciler) completeAdoption(ctx context.Context, claim *ex
 	// are resolved authoritatively by resolveAdoptionCompletion.
 	if err := r.Patch(ctx, adopted, client.MergeFromWithOptions(originalAdopted, client.MergeFromWithOptimisticLock{})); err != nil {
 		return err
+	}
+	if retainedWithoutTemplate {
+		const note = "SandboxTemplate could not be read at handover; the Sandbox's PVCs are retained when it is deleted and must be cleaned up"
+		log.FromContext(ctx).Info(note, "claim", claim.Name, "sandbox", adopted.Name, "error", templateErr)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(claim, adopted, corev1.EventTypeWarning, "PVCsRetainedWithoutTemplate", "Adoption", note)
+		}
 	}
 
 	return nil

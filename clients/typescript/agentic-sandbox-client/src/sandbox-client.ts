@@ -41,10 +41,12 @@ import { resolveLogger } from "./logger.js";
 import type { ResolvedSandboxdOptions, SandboxInit } from "./sandbox.js";
 import {
   findReadyCondition,
+  isWatchCleanClose,
   normalizeSandboxdOptions,
   raceWithTimeout,
   readConditions,
   Sandbox,
+  watchSandboxOnce,
 } from "./sandbox.js";
 import type { Tracer } from "./trace-manager.js";
 import {
@@ -424,30 +426,6 @@ function readSandbox(
       typeof status.serviceFQDN === "string" ? status.serviceFQDN : "",
     annotations,
   };
-}
-
-/**
- * True when a Watch `done(err)` signals the stream ended without a real
- * failure, so the caller should re-GET and restart the watch from a fresh
- * resourceVersion rather than surface the error:
- *  - `done(null)`: the server closed the long-poll connection normally;
- *  - AbortError: our own AbortController firing (deadline or success);
- *  - TimeoutError: @kubernetes/client-node 2.x aborts every watch after its
- *    30s request timeout — far shorter than the public ready-wait budget;
- *  - 410 Gone: the supplied resourceVersion has been compacted away.
- */
-function isWatchCleanClose(err: unknown): boolean {
-  if (!err) return true;
-  if (
-    err instanceof Error &&
-    (err.name === "AbortError" || err.name === "TimeoutError")
-  ) {
-    return true;
-  }
-  const code =
-    (err as { statusCode?: number; code?: number }).statusCode ??
-    (err as { statusCode?: number; code?: number }).code;
-  return code === 410;
 }
 
 /**
@@ -1721,99 +1699,43 @@ export class SandboxClient {
     remainingMs: number,
     resourceVersion?: string,
   ): Promise<WatchPassResult<ReadySandbox>> {
-    return new Promise((resolve) => {
-      const watcher = new k8s.Watch(this.kubeConfig);
-      let abortController: AbortController | undefined;
-      let settled = false;
-
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          try {
-            abortController?.abort();
-          } catch {
-            // ignore
+    return watchSandboxOnce<WatchPassResult<ReadySandbox>>({
+      kubeConfig: this.kubeConfig,
+      namespace,
+      sandboxName,
+      // Start from the resourceVersion the preceding GET observed so a
+      // readiness transition between that GET and the watch is not missed.
+      resourceVersion,
+      remainingMs,
+      // A clean close: the outer loop re-GETs and re-watches until the deadline.
+      closed: { type: "closed" },
+      failed: (error) => ({ type: "error", error }),
+      onEvent: (type, obj) => {
+        if (type === "ADDED" || type === "MODIFIED") {
+          const ready = readReadySandbox(obj);
+          if (ready === "unnamed") {
+            return {
+              type: "error",
+              error: new SandboxMetadataError(
+                "Could not determine sandbox name from sandbox object.",
+              ),
+            };
           }
-          resolve({ type: "closed" });
-        }
-      }, remainingMs);
-
-      const settle = (result: WatchPassResult<ReadySandbox>) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        try {
-          abortController?.abort();
-        } catch {
-          // ignore
-        }
-        resolve(result);
-      };
-
-      watcher
-        .watch(
-          `/apis/${SANDBOX_API_GROUP}/${SANDBOX_API_VERSION}/namespaces/${namespace}/${SANDBOX_PLURAL_NAME}`,
-          // Start from the resourceVersion the preceding GET observed so a
-          // readiness transition between that GET and the watch is not missed.
-          { fieldSelector: `metadata.name=${sandboxName}`, resourceVersion },
-          (type: string, obj: Record<string, unknown>) => {
-            if (type === "ERROR") {
-              // Stale/compacted resourceVersion (typically 410 Gone) → clean
-              // close so the caller re-GETs and restarts from a fresh version.
-              settle({ type: "closed" });
-              return;
-            }
-            if (type === "ADDED" || type === "MODIFIED") {
-              const ready = readReadySandbox(obj);
-              if (ready === "unnamed") {
-                settle({
-                  type: "error",
-                  error: new SandboxMetadataError(
-                    "Could not determine sandbox name from sandbox object.",
-                  ),
-                });
-                return;
-              }
-              if (ready) {
-                this.logger.info(`Sandbox ${ready.sandboxName} is ready.`);
-                this.logPodNameSource(ready);
-                settle({ type: "resolved", value: ready });
-              }
-            } else if (type === "DELETED") {
-              settle({
-                type: "error",
-                error: new SandboxNotFoundError(
-                  `Sandbox '${sandboxName}' was deleted while waiting for it to become ready.`,
-                ),
-              });
-            }
-          },
-          (err) => {
-            if (isWatchCleanClose(err)) {
-              // Clean close (done(null) / AbortError / 30s TimeoutError / 410
-              // Gone): the outer loop re-GETs and re-watches until the deadline.
-              settle({ type: "closed" });
-            } else {
-              settle({
-                type: "error",
-                error: err instanceof Error ? err : new Error(String(err)),
-              });
-            }
-          },
-        )
-        .then((ac) => {
-          if (settled) {
-            ac.abort();
-          } else {
-            abortController = ac;
+          if (ready) {
+            this.logger.info(`Sandbox ${ready.sandboxName} is ready.`);
+            this.logPodNameSource(ready);
+            return { type: "resolved", value: ready };
           }
-        })
-        .catch((err: unknown) => {
-          settle({
+        } else if (type === "DELETED") {
+          return {
             type: "error",
-            error: err instanceof Error ? err : new Error(String(err)),
-          });
-        });
+            error: new SandboxNotFoundError(
+              `Sandbox '${sandboxName}' was deleted while waiting for it to become ready.`,
+            ),
+          };
+        }
+        return undefined;
+      },
     });
   }
 

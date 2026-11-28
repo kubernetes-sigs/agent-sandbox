@@ -57,6 +57,7 @@ import {
 } from "./exceptions.js";
 import { SandboxFiles } from "./files.js";
 import { noopLogger } from "./logger.js";
+import { MetricsManager, recordLatency } from "./metrics.js";
 import {
   ProcessClient,
   type ProcessSpec,
@@ -431,6 +432,25 @@ function executableName(command: string): string {
   return command.slice(command.lastIndexOf("/") + 1);
 }
 
+/**
+ * Whether err cancels a measured call rather than failing it: the handle
+ * closed, or an abort signal fired for a reason other than a deadline
+ * expiring. A cancelled call stops at an arbitrary point, so its duration
+ * says nothing about sandbox latency; the Go SDK skips context.Canceled
+ * samples the same way. Timeouts stay recorded as failures, including a
+ * caller deadline passed as AbortSignal.timeout(), whose TimeoutError
+ * reason is the JS equivalent of context.DeadlineExceeded.
+ */
+function isCancellation(err: unknown, userSignal?: AbortSignal): boolean {
+  if (err instanceof SandboxTimeoutError) return false;
+  if (err instanceof SandboxClosedError) return true;
+  // AbortSignal.timeout() expires with a DOMException named TimeoutError.
+  if (err instanceof Error && err.name === "TimeoutError") return false;
+  if (userSignal?.aborted && err === userSignal.reason) return true;
+  // The default reason of a bare AbortController.abort().
+  return err instanceof Error && err.name === "AbortError";
+}
+
 function classifyForTelemetry(
   err: unknown,
   userSignal: AbortSignal | undefined,
@@ -484,6 +504,8 @@ export interface SandboxInit {
   sandboxdOptions: ResolvedSandboxdOptions;
   tracingManager: TracerManager | null;
   traceServiceName: string;
+  /** Latency histograms; defaults to a no-op manager when omitted. */
+  metricsManager?: MetricsManager | null;
   logger?: Logger;
 }
 
@@ -519,6 +541,7 @@ export class Sandbox {
   private readonly kubeConfig: k8s.KubeConfig;
   private readonly sandboxdOptions: ResolvedSandboxdOptions;
   private readonly traceServiceName: string;
+  private readonly metrics: MetricsManager;
 
   private _isClosed = false;
   private _inflightCount = 0;
@@ -553,6 +576,7 @@ export class Sandbox {
     this.sandboxdOptions = init.sandboxdOptions;
     this.tracingManager = init.tracingManager;
     this.traceServiceName = init.traceServiceName;
+    this.metrics = init.metricsManager ?? MetricsManager.noop();
     this.logger = init.logger ?? noopLogger;
     this.connectionStrategy = this.createStrategy();
   }
@@ -723,9 +747,16 @@ export class Sandbox {
    * survive; processes, memory and `emptyDir` data do not.
    */
   async suspend(opts?: SuspendResumeOptions): Promise<void> {
-    const budget = lifecycleBudget(opts);
-    const { signal, dispose } = this.lifecycleSignal(opts, budget, "suspend");
+    const start = performance.now();
+    // null means the call was cancelled and records no sample at all.
+    let status: "success" | "failure" | null = "success";
+    // Setup stays inside the measured boundary so a validation failure also
+    // records a sample; disposeSignal is set only after lifecycleSignal.
+    let disposeSignal: (() => void) | undefined;
     try {
+      const budget = lifecycleBudget(opts);
+      const { signal, dispose } = this.lifecycleSignal(opts, budget, "suspend");
+      disposeSignal = dispose;
       await this.serializeLifecycle(signal, async () => {
         const { uid, generation } = await this.setOperatingMode(
           "Suspended",
@@ -747,8 +778,14 @@ export class Sandbox {
         );
         this.logger.info(`Sandbox '${this.sandboxName}' suspended`);
       });
+    } catch (err) {
+      status = isCancellation(err, opts?.signal) ? null : "failure";
+      throw err;
     } finally {
-      dispose();
+      disposeSignal?.();
+      if (status !== null) {
+        recordLatency(this.metrics.suspendLatency, start, status);
+      }
     }
   }
 
@@ -758,13 +795,20 @@ export class Sandbox {
    * the new pod.
    */
   async resume(opts?: SuspendResumeOptions): Promise<void> {
-    const budget = lifecycleBudget(opts);
-    const { signal, dispose } = this.lifecycleSignal(
-      opts,
-      budget,
-      "become ready",
-    );
+    const start = performance.now();
+    // null means the call was cancelled and records no sample at all.
+    let status: "success" | "failure" | null = "success";
+    // Setup stays inside the measured boundary so a validation failure also
+    // records a sample; disposeSignal is set only after lifecycleSignal.
+    let disposeSignal: (() => void) | undefined;
     try {
+      const budget = lifecycleBudget(opts);
+      const { signal, dispose } = this.lifecycleSignal(
+        opts,
+        budget,
+        "become ready",
+      );
+      disposeSignal = dispose;
       await this.serializeLifecycle(signal, async () => {
         const { uid, generation, changed } = await this.setOperatingMode(
           "Running",
@@ -802,8 +846,14 @@ export class Sandbox {
         }
         this.logger.info(`Sandbox '${this.sandboxName}' resumed`);
       });
+    } catch (err) {
+      status = isCancellation(err, opts?.signal) ? null : "failure";
+      throw err;
     } finally {
-      dispose();
+      disposeSignal?.();
+      if (status !== null) {
+        recordLatency(this.metrics.resumeLatency, start, status);
+      }
     }
   }
 
@@ -1277,6 +1327,13 @@ export class Sandbox {
 
   private async doConnect(): Promise<ConnectionGeneration> {
     const id = ++this.generationCounter;
+    // Mirrors the Go/Python SDKs' discovery latency metric: one sample per
+    // connect attempt, covering the transport open and the health wait. An
+    // attempt cancelled by close() stops at an arbitrary point and records
+    // no sample, matching the Go SDK.
+    const start = performance.now();
+    // null means the attempt was cancelled and records no sample at all.
+    let status: "success" | "failure" | null = "success";
     const deadlineMs = this.sandboxdOptions.portForwardReadyTimeoutMs;
     const deadlineController = new AbortController();
     const timer = setTimeout(() => {
@@ -1333,10 +1390,28 @@ export class Sandbox {
         abortController: new AbortController(),
       };
     } catch (err) {
+      // A close() during the attempt cancels it; whatever error the aborted
+      // transport surfaces, the attempt records no sample.
+      status =
+        isCancellation(err) || this.connectAbortController.signal.aborted
+          ? null
+          : "failure";
       await transport?.close().catch(() => {});
       throw err;
     } finally {
       clearTimeout(timer);
+      if (status !== null) {
+        recordLatency(this.metrics.discoveryLatency, start, status, {
+          // `port-forward` is the apiserver tunnel to sandboxd on the pod,
+          // which the Go and Python SDKs record as `sandboxd_pod_tunnel`;
+          // there `port_forward` means a tunnel through the sandbox-router.
+          // The remaining values match the Go SDK's mode labels.
+          mode:
+            this.connectionStrategy.connectivity === "port-forward"
+              ? "sandboxd_pod_tunnel"
+              : this.connectionStrategy.connectivity.replace(/-/g, "_"),
+        });
+      }
     }
   }
 

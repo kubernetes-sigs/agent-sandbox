@@ -49,6 +49,7 @@ import {
 } from "../exceptions.js";
 import type { FileCallOptions, ListOptions } from "../index.js";
 import { noopLogger } from "../logger.js";
+import type { MetricsManager } from "../metrics.js";
 import type { SandboxInit } from "../sandbox.js";
 import { normalizeSandboxdOptions, Sandbox } from "../sandbox.js";
 import type { Span, Tracer, TracerManager } from "../trace-manager.js";
@@ -342,6 +343,7 @@ function makeSandbox(overrides: {
   podIP?: string;
   serviceFQDN?: string;
   authToken?: string;
+  metricsManager?: MetricsManager | null;
 }): Sandbox {
   const init: SandboxInit = {
     claimName: "test-claim",
@@ -364,9 +366,30 @@ function makeSandbox(overrides: {
     }),
     tracingManager: overrides.tracingManager ?? null,
     traceServiceName: "test",
+    metricsManager: overrides.metricsManager ?? null,
     logger: noopLogger,
   };
   return new Sandbox(init);
+}
+
+/**
+ * A MetricsManager that captures every discovery latency sample so a test
+ * can assert the recorded attributes.
+ */
+function makeRecordingMetricsManager(): {
+  metricsManager: MetricsManager;
+  samples: Array<{ value: number; attributes: Record<string, string> }>;
+} {
+  const samples: Array<{ value: number; attributes: Record<string, string> }> =
+    [];
+  const metricsManager = {
+    discoveryLatency: {
+      record: (value: number, attributes?: Record<string, string>) => {
+        samples.push({ value, attributes: attributes ?? {} });
+      },
+    },
+  } as unknown as MetricsManager;
+  return { metricsManager, samples };
 }
 
 /**
@@ -693,6 +716,113 @@ describe("Sandbox health() and metadata()", () => {
     });
     // health() is a real probe, not a cached connect result.
     expect(restBackend.healthHits).toBe(2);
+  });
+
+  it("returns the connection generation when discovery latency recording throws", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    // doConnect records discovery latency in a finally block after building
+    // the generation; a throwing provider must not discard the connection.
+    const throwing = {
+      discoveryLatency: {
+        record: () => {
+          throw new Error("provider exploded");
+        },
+      },
+    } as unknown as MetricsManager;
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      metricsManager: throwing,
+    });
+
+    await expect(sandbox.health()).resolves.toEqual({
+      status: "ok",
+      uptimeSeconds: 1,
+    });
+  });
+
+  it("records one discovery sample with mode and status 'success' on a successful connect", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer({ 18080: restBackend.port, 19090: 1 });
+    const { metricsManager, samples } = makeRecordingMetricsManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      metricsManager,
+    });
+
+    await expect(sandbox.health()).resolves.toEqual({
+      status: "ok",
+      uptimeSeconds: 1,
+    });
+    expect(samples).toHaveLength(1);
+    expect(samples[0]?.attributes).toEqual({
+      status: "success",
+      mode: "sandboxd_pod_tunnel",
+    });
+    expect(samples[0]?.value).toBeGreaterThanOrEqual(0);
+  });
+
+  it("records one discovery sample with status 'failure' when the connect fails", async () => {
+    restBackend = await startRestBackend();
+    api = await startFakeApiServer(
+      { 19090: 1 },
+      { 18080: 404 }, // simulates the Pod having disappeared before connect.
+    );
+    const { metricsManager, samples } = makeRecordingMetricsManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      metricsManager,
+    });
+
+    await expect(sandbox.files.read("a.txt")).rejects.toMatchObject({
+      kind: "port_forward",
+    });
+    expect(samples).toHaveLength(1);
+    expect(samples[0]?.attributes).toEqual({
+      status: "failure",
+      mode: "sandboxd_pod_tunnel",
+    });
+  });
+
+  it("records no discovery sample when the handle closes during the connect", async () => {
+    // A backend that accepts the health request but never answers keeps the
+    // connect in its health wait, so closeLocal() cancels it mid-attempt. A
+    // cancelled attempt stops at an arbitrary point; like the Go SDK, it
+    // records no sample.
+    let healthArrived!: () => void;
+    const firstHealth = new Promise<void>((resolve) => {
+      healthArrived = resolve;
+    });
+    const hanging = http.createServer(() => healthArrived());
+    await new Promise<void>((resolve) =>
+      hanging.listen(0, "127.0.0.1", resolve),
+    );
+    const hangingPort = (hanging.address() as net.AddressInfo).port;
+    api = await startFakeApiServer({ 18080: hangingPort, 19090: 1 });
+    const { metricsManager, samples } = makeRecordingMetricsManager();
+    sandbox = makeSandbox({
+      apiServerPort: api.port,
+      restPort: 18080,
+      grpcPort: 19090,
+      metricsManager,
+    });
+
+    const pending = expect(sandbox.health()).rejects.toThrow(
+      SandboxClosedError,
+    );
+    await firstHealth;
+    await sandbox.closeLocal();
+    await pending;
+
+    expect(samples).toHaveLength(0);
+    hanging.closeAllConnections();
+    await new Promise((resolve) => hanging.close(resolve));
   });
 
   it("rejects an invalid timeoutMs before connecting", async () => {

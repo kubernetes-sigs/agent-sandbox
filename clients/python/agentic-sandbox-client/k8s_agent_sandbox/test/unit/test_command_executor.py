@@ -24,6 +24,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from k8s_agent_sandbox.commands.command_executor import CommandExecutor, _extract_executable
+from k8s_agent_sandbox.exceptions import (
+    SandboxClosedError,
+    SandboxConnectionError,
+    SandboxTimeoutError,
+)
 from k8s_agent_sandbox.commands.async_command_executor import AsyncCommandExecutor
 from k8s_agent_sandbox.models import (
     ExecutionResult,
@@ -289,8 +294,10 @@ class TestCommandExecutor(unittest.TestCase):
             },
         ):
             executor = CommandExecutor(connector, MagicMock(), "sandbox-client")
-            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+            with self.assertRaises(SandboxConnectionError) as caught:
                 executor._run_sandboxd("echo hello", timeout=12)
+            self.assertEqual(caught.exception.kind, "unavailable")
+            self.assertEqual(caught.exception.detail, "connection lost")
         connector.invalidate_sandboxd_transport.assert_called_once_with(channel)
         stub.ProcessServiceStub.return_value.Execute.assert_called_once()
 
@@ -353,8 +360,9 @@ class TestCommandExecutor(unittest.TestCase):
         stub.ProcessServiceStub.return_value.Execute.side_effect = DeadlineRpcError()
         with patch.dict(sys.modules, _grpc_modules(stub)):
             executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
-            with self.assertRaisesRegex(RuntimeError, "Deadline Exceeded"):
+            with self.assertRaises(SandboxTimeoutError) as caught:
                 executor._run_sandboxd("sleep 30", timeout=2)
+        self.assertEqual(caught.exception.__cause__.details(), "Deadline Exceeded")
 
 
 class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
@@ -553,8 +561,10 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
             },
         ):
             executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
-            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+            with self.assertRaises(SandboxConnectionError) as caught:
                 await executor._run_sandboxd("echo hello", timeout=12)
+            self.assertEqual(caught.exception.kind, "unavailable")
+            self.assertEqual(caught.exception.detail, "connection lost")
         connector.invalidate_sandboxd_transport.assert_awaited_once_with(channel)
         stub.ProcessServiceStub.return_value.Execute.assert_awaited_once()
 
@@ -631,8 +641,9 @@ class TestAsyncCommandExecutor(unittest.IsolatedAsyncioTestCase):
         )
         with patch.dict(sys.modules, _grpc_modules(stub)):
             executor = AsyncCommandExecutor(connector, MagicMock(), "sandbox-client")
-            with self.assertRaisesRegex(RuntimeError, "Deadline Exceeded"):
+            with self.assertRaises(SandboxTimeoutError) as caught:
                 await executor._run_sandboxd("sleep 30", timeout=1.5)
+        self.assertEqual(caught.exception.__cause__.details(), "Deadline Exceeded")
 
 
 def _require_grpc():
@@ -820,8 +831,11 @@ class TestProcessHandleSync(unittest.TestCase):
         stub.SendSignal.side_effect = rpc_error
 
         with executor.start("noop") as handle:
-            with self.assertRaisesRegex(TimeoutError, "Deadline Exceeded"):
+            with self.assertRaises(SandboxTimeoutError) as caught:
                 handle.signal(sig.SIGTERM)
+            self.assertIsInstance(caught.exception, TimeoutError)
+            self.assertEqual(caught.exception.__cause__.details(),
+                             "Deadline Exceeded")
             self.assertFalse(stream.cancelled)
             self.assertEqual(list(handle.events()), [
                 ProcessOutputEvent(type="stdout", data=b"still running"),
@@ -875,7 +889,7 @@ class TestProcessHandleSync(unittest.TestCase):
         # the stream and raise TimeoutError, not a generic RuntimeError.
         stream = _StalledStream()
         executor, _, _ = self._executor_with_stream(stream)
-        with self.assertRaises(TimeoutError):
+        with self.assertRaises(SandboxTimeoutError):
             executor.start("noop", timeout=0.05)
         self.assertTrue(stream.cancelled)
 
@@ -1091,8 +1105,11 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
             stream, send_signal=send_signal)
 
         async with await executor.start("noop") as handle:
-            with self.assertRaisesRegex(TimeoutError, "Deadline Exceeded"):
+            with self.assertRaises(SandboxTimeoutError) as caught:
                 await handle.signal(sig.SIGTERM)
+            self.assertIsInstance(caught.exception, TimeoutError)
+            self.assertEqual(caught.exception.__cause__.details(),
+                             "Deadline Exceeded")
             self.assertFalse(stream.cancelled)
             self.assertEqual([event async for event in handle.events()], [
                 ProcessOutputEvent(type="stdout", data=b"still running"),
@@ -1152,6 +1169,120 @@ class TestAsyncProcessHandle(unittest.IsolatedAsyncioTestCase):
         async with await executor.start("noop"):
             pass  # no exit event seen, so __aexit__ must cancel
         self.assertTrue(stream.cancelled)
+
+
+class _CancelledAfterInitStream:
+    """Yields Init, then fails the next read the way a cancelled call does."""
+
+    def __init__(self, pb2) -> None:
+        self._first = _make_start_response(pb2, init=5)
+        self.cancelled = False
+
+    def __iter__(self):
+        import grpc
+
+        yield self._first
+        err = grpc.RpcError()
+        err.code = lambda: grpc.StatusCode.CANCELLED
+        err.details = lambda: "cancelled"
+        raise err
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class TestProcessHandleClosed(unittest.TestCase):
+    """A stream the handle cancelled itself must not look like a dead transport."""
+
+    def setUp(self):
+        stubs = _require_grpc()
+        if stubs is None:
+            self.skipTest(
+                "grpc extra not installed; sandboxd gRPC path is opt-in")
+        self.pb2, _ = stubs
+
+    def _executor_with_stream(self, stream):
+        stub = MagicMock()
+        stub.Start.return_value = stream
+        connector = MagicMock()
+        connector.is_sandboxd.return_value = True
+        connector.grpc_channel.return_value = MagicMock()
+        patcher = patch(
+            "k8s_agent_sandbox.commands._process_stubs.process_pb2_grpc.ProcessServiceStub",
+            return_value=stub,)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return CommandExecutor(connector, MagicMock(), "sandbox-client")
+
+    def test_cancelled_read_after_close_reports_closed(self):
+        executor = self._executor_with_stream(
+            _CancelledAfterInitStream(self.pb2))
+        handle = executor.start("noop")
+        handle.close()
+        with self.assertRaises(SandboxClosedError):
+            list(handle.events())
+
+    def test_cancelled_read_without_close_reports_a_transport_failure(self):
+        executor = self._executor_with_stream(
+            _CancelledAfterInitStream(self.pb2))
+        handle = executor.start("noop")
+        with self.assertRaises(SandboxConnectionError) as caught:
+            list(handle.events())
+        self.assertEqual(caught.exception.kind, "socket")
+
+
+class TestClosedSubClients(unittest.TestCase):
+    """close_connection() must report a closed handle, not a dropped attribute."""
+
+    def test_retained_command_executor_rejects_use_after_close(self):
+        executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
+        executor._mark_closed()
+        with self.assertRaises(SandboxClosedError):
+            executor.run("echo hi")
+
+    def test_retained_filesystem_rejects_use_after_close(self):
+        from k8s_agent_sandbox.files.filesystem import Filesystem
+
+        files = Filesystem(MagicMock(), MagicMock(), "sandbox-client")
+        files._mark_closed()
+        for call in (
+            lambda: files.list("."),
+            lambda: files.exists("f"),
+            lambda: files.delete("f"),
+            lambda: files.mkdir("d"),
+            lambda: files.read("f"),
+        ):
+            with self.assertRaises(SandboxClosedError):
+                call()
+
+    def test_closed_filesystem_rejects_a_limited_read(self):
+        """read() branches before its span setup when a limit is configured.
+
+        The guard has to be the first statement in the method, or this path
+        reaches the network on a closed handle.
+        """
+        from k8s_agent_sandbox.files.filesystem import Filesystem
+        from k8s_agent_sandbox.models import SandboxFileConfig
+
+        files = Filesystem(
+            MagicMock(), MagicMock(), "sandbox-client",
+            file_config=SandboxFileConfig(max_download_size=1024),
+        )
+        files._mark_closed()
+        with self.assertRaises(SandboxClosedError):
+            files.read("f")
+
+    def test_retained_watcher_rejects_use_after_close(self):
+        from k8s_agent_sandbox.watcher.file_watcher import FileWatcher
+
+        watcher = FileWatcher(MagicMock(), MagicMock(), "sandbox-client")
+        watcher._mark_closed()
+        with self.assertRaises(SandboxClosedError):
+            list(watcher.watch("."))
+
+    def test_an_open_sub_client_is_unaffected(self):
+        executor = CommandExecutor(MagicMock(), MagicMock(), "sandbox-client")
+        executor._ensure_open()  # must not raise
 
 
 if __name__ == "__main__":

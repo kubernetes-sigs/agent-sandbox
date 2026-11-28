@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from k8s_agent_sandbox.exceptions import SandboxConnectionError, SandboxdRpcError
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", (False, True))
@@ -56,12 +58,18 @@ async def test_watch_invalidates_unavailable_transport(asynchronous, unavailable
         "k8s_agent_sandbox.watcher._watcher_stubs.watcher_pb2_grpc.FileWatcherServiceStub",
         return_value=stub,
     ):
-        with pytest.raises(RuntimeError, match="watch failed"):
+        expected = SandboxConnectionError if unavailable else SandboxdRpcError
+        with pytest.raises(expected) as caught:
             if asynchronous:
                 async for _ in watcher.watch("."):
                     pass
             else:
                 list(watcher.watch("."))
+        assert caught.value.detail == "watch failed"
+        if unavailable:
+            assert caught.value.kind == "unavailable"
+        else:
+            assert caught.value.code == "permission_denied"
 
     if unavailable:
         if asynchronous:

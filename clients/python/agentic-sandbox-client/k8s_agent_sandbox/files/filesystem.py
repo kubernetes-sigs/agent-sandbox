@@ -30,6 +30,7 @@ from k8s_agent_sandbox.connector import SandboxConnector
 from k8s_agent_sandbox.exceptions import SandboxRequestError, SandboxResponseTooLargeError
 from k8s_agent_sandbox.models import FileEntry, SandboxFileConfig
 from k8s_agent_sandbox.trace_manager import trace, trace_span
+from k8s_agent_sandbox.utils import ClosableClient
 
 logger = logging.getLogger(__name__)
 
@@ -354,7 +355,7 @@ def _coerce_binary(
     return content
 
 
-class Filesystem:
+class Filesystem(ClosableClient):
     """
     Handles file operations within the sandbox.
 
@@ -393,6 +394,7 @@ class Filesystem:
         (``ValueError``). The legacy runtime raises
         ``NotImplementedError``.
         """
+        self._ensure_open()
         _check_write_options(self.connector, append, create_only)
         if isinstance(content, str):
             content = content.encode("utf-8")
@@ -510,6 +512,7 @@ class Filesystem:
         On the sandboxd runtime, a directory raises ``SandboxRequestError``
         with status 409, and the root path ``/`` raises ``ValueError``.
         """
+        self._ensure_open()
         if self._file_config.max_download_size is not None:
             with io.BytesIO() as destination:
                 self._read_to(path, destination, timeout, allow_unsafe_paths, None)
@@ -557,6 +560,7 @@ class Filesystem:
         On the sandboxd runtime, a directory raises ``SandboxRequestError``
         with status 409, and the root path ``/`` raises ``ValueError``.
         """
+        self._ensure_open()
         return self._read_to(path, destination, timeout, allow_unsafe_paths, max_bytes)
 
     def _read_to(
@@ -636,6 +640,7 @@ class Filesystem:
         ``recursive=True`` needs the sandboxd runtime; the legacy python-runtime
         raises NotImplementedError.
         """
+        self._ensure_open()
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -685,6 +690,7 @@ class Filesystem:
     @trace_span("exists")
     def exists(self, path: str, timeout: int = 60) -> bool:
         """Return whether a path exists without downloading its contents."""
+        self._ensure_open()
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -751,6 +757,7 @@ class Filesystem:
         otherwise deleting a non-empty directory fails with a 409. The legacy
         python-runtime has no delete endpoint and raises NotImplementedError.
         """
+        self._ensure_open()
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -768,6 +775,7 @@ class Filesystem:
         missing parent fails with a 404. The legacy python-runtime raises
         NotImplementedError.
         """
+        self._ensure_open()
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)
@@ -786,6 +794,7 @@ class Filesystem:
         never a directory. The legacy python-runtime raises
         NotImplementedError.
         """
+        self._ensure_open()
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", source)
@@ -799,6 +808,7 @@ class Filesystem:
         self, source: str, destination: str, overwrite: bool = False, timeout: int = 60
     ) -> None:
         """Copy a file or directory with the same rules as ``move()``."""
+        self._ensure_open()
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", source)
@@ -819,6 +829,7 @@ class Filesystem:
         streamed once without retries. The legacy python-runtime raises
         NotImplementedError.
         """
+        self._ensure_open()
         span = trace.get_current_span()
         if span.is_recording():
             span.set_attribute("sandbox.file.path", path)

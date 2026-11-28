@@ -87,3 +87,88 @@ class SandboxClaimFailedError(SandboxError):
     ready without user action, so ready-waits raise instead of waiting
     out the timeout.
     """
+
+
+class SandboxTimeoutError(SandboxError, TimeoutError):
+    """Raised when an operation did not complete within its deadline.
+
+    Also a builtin ``TimeoutError`` so callers written against the previous
+    behaviour keep working. That makes it an ``OSError`` too, by way of
+    ``TimeoutError``.
+    """
+
+
+class SandboxClosedError(SandboxError):
+    """Raised when an operation is attempted on a handle that was closed."""
+
+
+class SandboxConnectionError(SandboxError):
+    """Raised when the sandboxd transport fails outside a timeout or cancellation.
+
+    Attributes:
+        kind: Fixed classification of the failure, one of
+            ``SANDBOX_CONNECTION_ERROR_KINDS``.
+        detail: A truncated diagnostic, or ``None``. Never a raw response
+            object, and never the untruncated server text.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        kind: str,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.detail = detail
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # BaseException rebuilds an exception by calling the class with args,
+        # which holds the message alone, so unpickling would leave out the
+        # required kind. ProcessPoolExecutor comes through here to re-raise a
+        # worker's error in the parent process.
+        return (type(self), (str(self), self.kind, self.detail))
+
+
+class SandboxdRpcError(SandboxError):
+    """Raised for a sandboxd gRPC status that is not a timeout or a transport failure.
+
+    Attributes:
+        code: The gRPC status name in lowercase snake_case, for example
+            ``"resource_exhausted"``, or ``"unknown"`` for an unrecognized
+            status. Never the raw status details, which go in ``detail``.
+        detail: A truncated diagnostic, or ``None``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: str,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.detail = detail
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # As in SandboxConnectionError: args carries only the message, so the
+        # required code is restored here instead. type(self) keeps the
+        # subclasses rebuilding as themselves.
+        return (type(self), (str(self), self.code, self.detail))
+
+
+class SandboxdProcessNotFoundError(SandboxdRpcError, LookupError):
+    """Raised when sandboxd has no record of the process being addressed.
+
+    Also a builtin ``LookupError``, which is what ``signal()`` raised for a
+    ``NOT_FOUND`` status before this class existed.
+    """
+
+
+class SandboxdPermissionError(SandboxdRpcError, PermissionError):
+    """Raised when sandboxd refuses an operation on a path or process.
+
+    Also a builtin ``PermissionError``, which is what ``signal()`` raised for a
+    ``PERMISSION_DENIED`` status before this class existed. That makes it an
+    ``OSError`` too.
+    """

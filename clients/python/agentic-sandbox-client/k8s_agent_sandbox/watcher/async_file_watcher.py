@@ -17,13 +17,15 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
+from k8s_agent_sandbox._grpc_errors import classify_rpc_error
 from k8s_agent_sandbox.async_connector import AsyncSandboxConnector
 from k8s_agent_sandbox.models import FileEvent
 from k8s_agent_sandbox.trace_manager import trace as _otel_trace
+from k8s_agent_sandbox.utils import ClosableClient
 from k8s_agent_sandbox.watcher.file_watcher import _event_type_name
 
 
-class AsyncFileWatcher:
+class AsyncFileWatcher(ClosableClient):
     """Async stream of filesystem events from a sandboxd-managed directory.
 
     Uses the ``watcher.v1.FileWatcherService`` gRPC API through
@@ -64,10 +66,13 @@ class AsyncFileWatcher:
             FileEvent instances for each observed change.
 
         Raises:
-            RuntimeError: If the connected runtime is not sandboxd, or if
-                the gRPC stream fails.
+            RuntimeError: If the connected runtime is not sandboxd.
+            SandboxConnectionError: If the gRPC transport drops out.
+            SandboxdRpcError: If sandboxd reports any other failing status.
+            SandboxClosedError: If the sandbox connection was closed.
             ImportError: If grpcio is not installed.
         """
+        self._ensure_open()
         # See FileWatcher.watch for rationale on manual span management
         # around a generator. Fall back to the (no-op) global tracer when
         # tracing is disabled so start_span is always safe to call.
@@ -117,18 +122,13 @@ class AsyncFileWatcher:
                         error=proto_event.error,
                     )
             except grpc.RpcError as e:
-                # grpcio's type stubs declare code()/details() on grpc.Call
-                # but not consistently on RpcError across versions; the
-                # rendezvous objects raised by streaming calls implement
-                # both. Read them defensively to stay stub-version
-                # independent.
-                code = getattr(e, "code", lambda: "UNKNOWN")()
-                details = getattr(e, "details", lambda: str(e))()
+                # grpcio's type stubs declare code() on grpc.Call but not
+                # consistently on RpcError across versions, so read it the
+                # same defensive way classify_rpc_error does.
+                code = getattr(e, "code", lambda: None)()
                 if code == grpc.StatusCode.UNAVAILABLE:
                     await self.connector.invalidate_sandboxd_transport(channel)
-                raise RuntimeError(
-                    f"sandboxd file watcher service failed ({code}): {details}"
-                ) from e
+                raise classify_rpc_error(e, operation="WatchDir") from e
         except Exception:
             if span.is_recording():
                 try:

@@ -388,6 +388,26 @@ class TestAsyncSandbox(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.sandbox.files)
         self.assertTrue(self.sandbox._is_closed)
 
+    async def test_close_connection_marks_sub_clients_closed(self):
+        """A reference kept from before the close must report it, not break."""
+        from k8s_agent_sandbox.commands.async_command_executor import (
+            AsyncCommandExecutor,
+        )
+        from k8s_agent_sandbox.exceptions import SandboxClosedError
+        from k8s_agent_sandbox.files.async_filesystem import AsyncFilesystem
+
+        commands = AsyncCommandExecutor(MagicMock(), MagicMock(), "test")
+        files = AsyncFilesystem(MagicMock(), MagicMock(), "test")
+        self.sandbox._commands = commands
+        self.sandbox._files = files
+
+        await self.sandbox.close_connection()
+
+        with self.assertRaises(SandboxClosedError):
+            await commands.run("echo hi")
+        with self.assertRaises(SandboxClosedError):
+            await files.list(".")
+
     async def test_close_connection(self):
         """Tests the public close_connection method."""
         await self.sandbox.close_connection()

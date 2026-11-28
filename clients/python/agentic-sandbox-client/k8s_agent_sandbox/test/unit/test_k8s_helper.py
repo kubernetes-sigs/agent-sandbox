@@ -495,7 +495,8 @@ class TestK8sHelperDeleteSandboxClaimAndWait(unittest.TestCase):
         for timeout in (kwargs["_request_timeout"], api.get_namespaced_custom_object.call_args.kwargs["_request_timeout"]):
             # Older kubernetes releases ignore a float, so the timeout must be a tuple.
             self.assertIsInstance(timeout, tuple)
-            self.assertLessEqual(max(timeout), 30)
+            # Each request gets a share of the budget so urllib3 retries stay within it.
+            self.assertLessEqual(max(timeout), 30 / 4)
         self.assertEqual(mock_sleep.call_count, 1)
 
     def test_replacement_with_same_name_ends_the_wait(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):

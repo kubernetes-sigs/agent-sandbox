@@ -50,23 +50,31 @@ from .constants import (
 
 logger = logging.getLogger(__name__)
 
+# urllib3 retries a timed-out GET or DELETE 3 times, so one call can make 4 requests.
+_REQUEST_ATTEMPTS = 4
+
 
 class _Budget:
     """Tracks the time left to delete a SandboxClaim.
 
     Older ``kubernetes`` releases apply ``_request_timeout`` only when it is an
     ``int`` or a tuple, so ``request_timeout`` returns a ``(connect, read)`` tuple.
+    It gives each request a share of the time left, so retries stay within the deadline.
     """
 
     def __init__(self, name: str, timeout: float):
         self._name = name
         self._deadline = time.monotonic() + timeout
 
-    def request_timeout(self) -> tuple[float, float]:
+    def remaining(self) -> float:
         left = self._deadline - time.monotonic()
         if left <= 0:
             raise TimeoutError(f"SandboxClaim '{self._name}' was not deleted before the timeout.")
-        return (left, left)
+        return left
+
+    def request_timeout(self) -> tuple[float, float]:
+        share = self.remaining() / _REQUEST_ATTEMPTS
+        return (share, share)
 
     @contextlib.contextmanager
     def guard(self) -> Iterator[None]:
@@ -485,7 +493,7 @@ class K8sHelper:
             if self._delete_unless_replaced(name, namespace, expected_uid, True, budget.request_timeout):
                 return
             while claim_uid(self.get_sandbox_claim(name, namespace, budget.request_timeout())) == expected_uid:
-                time.sleep(min(CLAIM_DELETE_POLL_INTERVAL, budget.request_timeout()[0]))
+                time.sleep(min(CLAIM_DELETE_POLL_INTERVAL, budget.remaining()))
 
     def patch_sandbox_operating_mode(
         self, name: str, namespace: str, mode: str, uid: str,

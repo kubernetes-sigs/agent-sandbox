@@ -2286,7 +2286,19 @@ func (r *SandboxClaimReconciler) warmCandidateRetryAfter(claim *extensionsv1beta
 	if claim.CreationTimestamp.IsZero() {
 		return 0, false
 	}
-	remaining := claim.CreationTimestamp.Add(r.warmCandidateGracePeriod()).Sub(now)
+	// CreationTimestamp has whole-second resolution, so timing the grace from it
+	// alone can cut up to 1s off. Start from the time the controller first
+	// observed the claim instead, clamped to [created, created+1s] so an observed
+	// time recorded after a controller restart cannot extend the grace further.
+	start := claim.CreationTimestamp.Time
+	key := types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}
+	if entry, ok := r.observedTimes.Load(key); ok && entry.uid == claim.UID && entry.timestamp.After(start) {
+		start = entry.timestamp
+		if latest := claim.CreationTimestamp.Add(time.Second); start.After(latest) {
+			start = latest
+		}
+	}
+	remaining := start.Add(r.warmCandidateGracePeriod()).Sub(now)
 	if remaining <= 0 {
 		return 0, false
 	}

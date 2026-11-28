@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -388,4 +389,138 @@ func TestSandboxTemplateReconcile_Vulnerability(t *testing.T) {
 			t.Errorf("VULNERABILITY: Unowned NetworkPolicy was updated/overwritten!")
 		}
 	})
+}
+
+func newTemplateReconcilerForTest(t *testing.T, objs ...client.Object) (*SandboxTemplateReconciler, client.Client) {
+	t.Helper()
+	scheme := newScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	return &SandboxTemplateReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: events.NewFakeRecorder(10),
+		Tracer:   asmetrics.NewNoOp(),
+	}, c
+}
+
+func TestSandboxTemplateNetworkPolicyProtectionFinalizer(t *testing.T) {
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "demo", Namespace: "default"}}
+
+	t.Run("managed template gets the finalizer", func(t *testing.T) {
+		template := &extensionsv1beta1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"}}
+		r, c := newTemplateReconcilerForTest(t, template)
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		var got extensionsv1beta1.SandboxTemplate
+		if err := c.Get(ctx, req.NamespacedName, &got); err != nil {
+			t.Fatalf("get template: %v", err)
+		}
+		if !slices.Contains(got.Finalizers, networkPolicyProtectionFinalizer) {
+			t.Errorf("expected finalizer %q, got %v", networkPolicyProtectionFinalizer, got.Finalizers)
+		}
+	})
+
+	t.Run("unmanaged template drops the finalizer", func(t *testing.T) {
+		template := &extensionsv1beta1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", Finalizers: []string{networkPolicyProtectionFinalizer}},
+			Spec:       extensionsv1beta1.SandboxTemplateSpec{NetworkPolicyManagement: extensionsv1beta1.NetworkPolicyManagementUnmanaged},
+		}
+		r, c := newTemplateReconcilerForTest(t, template)
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		var got extensionsv1beta1.SandboxTemplate
+		if err := c.Get(ctx, req.NamespacedName, &got); err != nil {
+			t.Fatalf("get template: %v", err)
+		}
+		if slices.Contains(got.Finalizers, networkPolicyProtectionFinalizer) {
+			t.Errorf("expected finalizer to be removed, got %v", got.Finalizers)
+		}
+	})
+
+	templateUserLabels := map[string]string{sandboxTemplateRefHash: SandboxTemplateRefHash("demo")}
+	users := map[string]func() client.Object{
+		"sandbox": func() client.Object {
+			return &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "demo-sb", Namespace: "default", Labels: templateUserLabels}}
+		},
+		"pod": func() client.Object {
+			return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "demo-sb", Namespace: "default", Labels: templateUserLabels}}
+		},
+	}
+	for kind, newUser := range users {
+		t.Run("deleted template keeps its NetworkPolicy while a "+kind+" uses it", func(t *testing.T) {
+			template := &extensionsv1beta1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"}}
+			user := newUser()
+			// Unrelated objects must not hold the template back.
+			otherNamespace := newUser()
+			otherNamespace.SetNamespace("other")
+			otherTemplate := newUser()
+			otherTemplate.SetName("other-sb")
+			otherTemplate.SetLabels(map[string]string{sandboxTemplateRefHash: SandboxTemplateRefHash("other")})
+			r, c := newTemplateReconcilerForTest(t, template, user, otherNamespace, otherTemplate)
+
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			current := &extensionsv1beta1.SandboxTemplate{}
+			if err := c.Get(ctx, req.NamespacedName, current); err != nil {
+				t.Fatalf("get template: %v", err)
+			}
+			if err := c.Delete(ctx, current); err != nil {
+				t.Fatalf("delete template: %v", err)
+			}
+
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("reconcile deleting template: %v", err)
+			}
+			if err := c.Get(ctx, req.NamespacedName, current); err != nil {
+				t.Fatalf("expected template to remain while a %s uses it: %v", kind, err)
+			}
+			if current.DeletionTimestamp.IsZero() || !slices.Contains(current.Finalizers, networkPolicyProtectionFinalizer) {
+				t.Fatalf("expected deleting template with finalizer, got deletionTimestamp=%v finalizers=%v", current.DeletionTimestamp, current.Finalizers)
+			}
+			var np networkingv1.NetworkPolicy
+			if err := c.Get(ctx, types.NamespacedName{Name: "demo-network-policy", Namespace: "default"}, &np); err != nil {
+				t.Fatalf("expected NetworkPolicy to remain: %v", err)
+			}
+
+			reqs := r.mapTemplateUserToDeletingTemplates(ctx, user)
+			if len(reqs) != 1 || reqs[0].NamespacedName != req.NamespacedName {
+				t.Fatalf("expected %s to map to the deleting template, got %v", kind, reqs)
+			}
+			if reqs := r.mapTemplateUserToDeletingTemplates(ctx, otherTemplate); len(reqs) != 0 {
+				t.Fatalf("expected %s of another template not to map, got %v", kind, reqs)
+			}
+
+			if err := c.Delete(ctx, user); err != nil {
+				t.Fatalf("delete %s: %v", kind, err)
+			}
+			if _, err := r.Reconcile(ctx, req); err != nil {
+				t.Fatalf("reconcile after %s deletion: %v", kind, err)
+			}
+			if err := c.Get(ctx, req.NamespacedName, current); !k8errors.IsNotFound(err) {
+				t.Fatalf("expected template to be gone once no %s uses it, got err=%v finalizers=%v", kind, err, current.Finalizers)
+			}
+		})
+	}
+}
+
+func TestTemplateUserReleasedPredicate(t *testing.T) {
+	p := templateUserReleasedPredicate()
+	labeled := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandboxTemplateRefHash: "a"}}}
+	relabeled := &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{sandboxTemplateRefHash: "b"}}}
+	if p.Create(event.CreateEvent{Object: labeled}) {
+		t.Error("create should not pass")
+	}
+	if !p.Delete(event.DeleteEvent{Object: labeled}) {
+		t.Error("delete should pass")
+	}
+	if p.Update(event.UpdateEvent{ObjectOld: labeled, ObjectNew: labeled.DeepCopy()}) {
+		t.Error("update without label change should not pass")
+	}
+	if !p.Update(event.UpdateEvent{ObjectOld: labeled, ObjectNew: relabeled}) {
+		t.Error("update changing the template hash label should pass")
+	}
 }

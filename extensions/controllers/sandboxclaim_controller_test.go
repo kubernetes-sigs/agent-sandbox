@@ -3049,7 +3049,7 @@ func TestSandboxClaimWarmCandidateGrace(t *testing.T) {
 		},
 		{
 			name:          "pending candidate past deadline cold starts",
-			claimCreated:  time.Now().Add(-DefaultWarmCandidateGracePeriod - time.Second),
+			claimCreated:  time.Now().Add(-DefaultWarmCandidateGracePeriod - 2*time.Second),
 			withCandidate: true,
 			wantCold:      true,
 		},
@@ -3062,7 +3062,7 @@ func TestSandboxClaimWarmCandidateGrace(t *testing.T) {
 		},
 		{
 			name:          "pending candidate past configured grace period cold starts",
-			claimCreated:  time.Now().Add(-6 * time.Second),
+			claimCreated:  time.Now().Add(-7 * time.Second),
 			gracePeriod:   5 * time.Second,
 			withCandidate: true,
 			wantCold:      true,
@@ -3093,6 +3093,115 @@ func TestSandboxClaimWarmCandidateGrace(t *testing.T) {
 				require.NoError(t, fakeClient.Get(context.Background(), req.NamespacedName, &updatedClaim))
 				require.Empty(t, updatedClaim.Status.Conditions, "grace retry should not publish a failure condition")
 			}
+		})
+	}
+}
+
+func TestSandboxClaimWarmCandidateRetryAfterSubSecond(t *testing.T) {
+	// created is a whole second, like a CreationTimestamp read back from the API server.
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name          string
+		gracePeriod   time.Duration
+		observedTime  *time.Time
+		observedUID   types.UID
+		now           time.Time
+		wantRetry     bool
+		wantRetryWait time.Duration
+	}{
+		{
+			name:          "sub-second grace runs from observed time",
+			gracePeriod:   500 * time.Millisecond,
+			observedTime:  new(created.Add(600 * time.Millisecond)),
+			now:           created.Add(700 * time.Millisecond),
+			wantRetry:     true,
+			wantRetryWait: warmCandidateRetryInterval, // 400ms remaining, capped
+		},
+		{
+			name:          "sub-second grace expires at observed time plus grace",
+			gracePeriod:   500 * time.Millisecond,
+			observedTime:  new(created.Add(600 * time.Millisecond)),
+			now:           created.Add(1050 * time.Millisecond),
+			wantRetry:     true,
+			wantRetryWait: 50 * time.Millisecond,
+		},
+		{
+			name:          "default grace runs from observed time",
+			observedTime:  new(created.Add(600 * time.Millisecond)),
+			now:           created.Add(2100 * time.Millisecond),
+			wantRetry:     true,
+			wantRetryWait: warmCandidateRetryInterval, // 500ms remaining, capped
+		},
+		{
+			name:          "observed time after a restart is clamped to one second past creation",
+			observedTime:  new(created.Add(5 * time.Second)),
+			now:           created.Add(2950 * time.Millisecond),
+			wantRetry:     true,
+			wantRetryWait: 50 * time.Millisecond,
+		},
+		{
+			name:         "observed time after a restart expires one second past the creation deadline",
+			observedTime: new(created.Add(5 * time.Second)),
+			now:          created.Add(3 * time.Second),
+		},
+		{
+			name:          "observed time equal to creation keeps the creation deadline",
+			observedTime:  new(created),
+			now:           created.Add(1950 * time.Millisecond),
+			wantRetry:     true,
+			wantRetryWait: 50 * time.Millisecond,
+		},
+		{
+			name:         "observed time equal to creation expires at the creation deadline",
+			observedTime: new(created),
+			now:          created.Add(2 * time.Second),
+		},
+		{
+			name:          "observed time before creation keeps the creation deadline",
+			observedTime:  new(created.Add(-300 * time.Millisecond)),
+			now:           created.Add(1950 * time.Millisecond),
+			wantRetry:     true,
+			wantRetryWait: 50 * time.Millisecond,
+		},
+		{
+			name:          "no observed time keeps the creation deadline",
+			now:           created.Add(1950 * time.Millisecond),
+			wantRetry:     true,
+			wantRetryWait: 50 * time.Millisecond,
+		},
+		{
+			name: "no observed time expires at the creation deadline",
+			now:  created.Add(2 * time.Second),
+		},
+		{
+			name:         "observed time for another UID is ignored",
+			observedTime: new(created.Add(600 * time.Millisecond)),
+			observedUID:  "old-uid",
+			now:          created.Add(2 * time.Second),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := &extensionsv1beta1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{
+				Name:              "claim",
+				Namespace:         "default",
+				UID:               "claim-uid",
+				CreationTimestamp: metav1.NewTime(created),
+			}}
+			r := &SandboxClaimReconciler{WarmCandidateGracePeriod: tc.gracePeriod}
+			if tc.observedTime != nil {
+				uid := claim.UID
+				if tc.observedUID != "" {
+					uid = tc.observedUID
+				}
+				r.observedTimes.Store(types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
+					observedTimeEntry{timestamp: *tc.observedTime, uid: uid})
+			}
+
+			retryAfter, ok := r.warmCandidateRetryAfter(claim, tc.now)
+			require.Equal(t, tc.wantRetry, ok)
+			require.Equal(t, tc.wantRetryWait, retryAfter)
 		})
 	}
 }

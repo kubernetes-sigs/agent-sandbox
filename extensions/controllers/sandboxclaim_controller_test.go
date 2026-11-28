@@ -974,9 +974,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: claimWithEnvOverrideNotAllowed,
 			existingObjects:  []client.Object{templateWithEnvAllowed, warmPoolWithEnvAllowed},
 			expectSandbox:    false,
-			expectError:      true,
+			expectError:      false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: environment variable override is not allowed by the template policy for variable \"EXISTING_VAR\"",
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: environment variable override is not allowed by the template policy for variable \"EXISTING_VAR\"",
 			},
 		},
 		{
@@ -1093,9 +1093,9 @@ func TestSandboxClaimReconcile(t *testing.T) {
 			claimToReconcile: claimTargetInvalid,
 			existingObjects:  []client.Object{templateMultiContainer, warmPoolMultiContainer},
 			expectSandbox:    false,
-			expectError:      true,
+			expectError:      false,
 			expectedCondition: metav1.Condition{
-				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "ReconcilerError", Message: "Error seen: target container \"does-not-exist\" not found in template for environment variable \"INVALID_ENV\"",
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: "EnvVarsInjectionRejected", Message: "environment variable injection rejected: target container \"does-not-exist\" not found in template for environment variable \"INVALID_ENV\"",
 			},
 		},
 		{

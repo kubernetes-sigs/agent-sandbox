@@ -81,6 +81,26 @@ tolerations: []
 
 affinity: {}
 
+# priorityClassName for the controller pod. The PriorityClass must already exist.
+priorityClassName: ""
+
+# topologySpreadConstraints for the controller pod. Set labelSelector to match the pod
+# labels: app.kubernetes.io/name and app.kubernetes.io/instance (the release name).
+topologySpreadConstraints: []
+  # - maxSkew: 1
+  #   topologyKey: kubernetes.io/hostname
+  #   whenUnsatisfiable: ScheduleAnyway
+  #   labelSelector:
+  #     matchLabels:
+  #       app.kubernetes.io/name: agent-sandbox
+  #       app.kubernetes.io/instance: <release-name>
+
+# pdb creates a PodDisruptionBudget. Off by default: with one replica,
+# minAvailable: 1 blocks node drains.
+pdb:
+  enabled: false
+  minAvailable: 1
+
 # Pod-level securityContext (spec.template.spec.securityContext). Default null — omitted unless set.
 # Example for Kyverno / restricted Pod Security:
 # podSecurityContext:

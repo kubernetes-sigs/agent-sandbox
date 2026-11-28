@@ -117,6 +117,10 @@ The following table lists the configurable parameters and their defaults. For fl
 | `nodeSelector` | Node selector for the controller pod | `{}` |
 | `tolerations` | Tolerations for the controller pod | `[]` |
 | `affinity` | Affinity rules for the controller pod | `{}` |
+| `priorityClassName` | `priorityClassName` for the controller pod (must already exist); omitted when empty | `""` |
+| `topologySpreadConstraints` | Topology spread constraints for the controller pod | `[]` |
+| `pdb.enabled` | Create a `PodDisruptionBudget` for the controller | `false` |
+| `pdb.minAvailable` | Controller pods that must stay available during voluntary disruptions | `1` |
 | `podSecurityContext` | Pod `securityContext`; only rendered when set (e.g. Kyverno / Pod Security) | `null` |
 | `containerSecurityContext` | Container `securityContext` for the controller; only rendered when set | `null` |
 | `podAnnotations` | Annotations added to the controller pod template (e.g. service-mesh sidecar toggles, Prometheus scrape autodiscovery) | `{}` |
@@ -129,6 +133,34 @@ The following table lists the configurable parameters and their defaults. For fl
 | `metrics.prometheusRule.enabled` | Create a Prometheus Operator `PrometheusRule` for the controller metrics endpoint (requires the prometheus-operator CRDs) | `false` |
 | `metrics.prometheusRule.additionalLabels` | Extra labels on the `PrometheusRule` (often required to match the Prometheus `ruleSelector`, e.g. `release: kube-prometheus-stack`) | `{}` |
 | `metrics.prometheusRule.additionalGroups` | Additional Prometheus rule groups appended after the chart's starter rule group | `[]` |
+
+### High availability
+
+With `replicaCount` of 2 or more, these opt-in settings protect the controller replicas from being evicted together (the PDB covers voluntary disruptions only) and spread them across nodes. `ScheduleAnyway` is best-effort: both replicas can still land on one node if only one fits. Use `DoNotSchedule` to forbid that.
+
+```yaml
+# ha-values.yaml
+replicaCount: 2
+priorityClassName: agent-sandbox-controller  # an existing PriorityClass
+pdb:
+  enabled: true
+  minAvailable: 1  # keep this below replicaCount, or node drains will block
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: agent-sandbox
+        app.kubernetes.io/instance: agent-sandbox  # your Helm release name
+```
+
+```bash
+helm upgrade --install agent-sandbox ./helm/ \
+  --namespace agent-sandbox-system \
+  --set image.tag=<version> \
+  -f ha-values.yaml
+```
 
 ## Metrics
 

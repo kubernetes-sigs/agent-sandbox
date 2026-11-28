@@ -33,11 +33,14 @@ from .constants import (
     SANDBOX_API_VERSION,
     SANDBOX_PLURAL_NAME,
     CREATED_BY_LABEL,
+    CLAIM_DELETE_POLL_INTERVAL,
     TERMINAL_CLAIM_READY_REASONS,
 )
 from .models import AdditionalPodMetadata
 from .exceptions import SandboxClaimFailedError, SandboxMetadataError, SandboxNotFoundError, SandboxTemplateNotFoundError, SandboxWarmPoolNotFoundError
 from .utils import (
+    claim_delete_options,
+    claim_uid,
     construct_sandbox_claim_env_spec,
     current_not_ready,
     is_valid_gateway_hostname,
@@ -420,15 +423,19 @@ class AsyncK8sHelper:
             finally:
                 await w.close()
 
-    async def delete_sandbox_claim(self, name: str, namespace: str, *, expected_uid: str | None = None) -> None:
-        """Deletes a SandboxClaim, optionally requiring a matching UID."""
+    async def delete_sandbox_claim(
+        self, name: str, namespace: str, *, expected_uid: str | None = None, foreground: bool = False,
+    ) -> None:
+        """Deletes a SandboxClaim, optionally requiring a matching UID and using foreground propagation."""
         await self._ensure_initialized()
 
         delete_kwargs: dict[str, Any] = {}
-        if expected_uid is not None:
-            delete_kwargs["body"] = client.V1DeleteOptions(
-                preconditions=client.V1Preconditions(uid=expected_uid)
-            )
+        body = claim_delete_options(
+            expected_uid, foreground,
+            options=client.V1DeleteOptions, preconditions=client.V1Preconditions,
+        )
+        if body is not None:
+            delete_kwargs["body"] = body
         try:
             await self.custom_objects_api.delete_namespaced_custom_object(
                 group=CLAIM_API_GROUP,
@@ -443,6 +450,41 @@ class AsyncK8sHelper:
             if e.status != 404:
                 logger.error(f"Error terminating SandboxClaim {name}: {e}")
                 raise
+
+    async def _delete_unless_replaced(
+        self, name: str, namespace: str, expected_uid: str, foreground: bool,
+    ) -> bool:
+        """Deletes the Claim and returns True if a different Claim now has the name."""
+        try:
+            await self.delete_sandbox_claim(name, namespace, expected_uid=expected_uid, foreground=foreground)
+        except client.ApiException as e:
+            # A webhook can also reject the delete with a 409, so confirm the Claim was replaced.
+            if e.status == 409 and claim_uid(await self.get_sandbox_claim(name, namespace)) != expected_uid:
+                return True
+            raise
+        return False
+
+    async def delete_pinned_sandbox_claim(self, name: str, namespace: str, expected_uid: str) -> None:
+        """Deletes the SandboxClaim with ``expected_uid``. Returns normally if a different Claim now has the name."""
+        await self._delete_unless_replaced(name, namespace, expected_uid, False)
+
+    async def delete_sandbox_claim_and_wait(
+        self, name: str, namespace: str, timeout: float, expected_uid: str,
+    ) -> None:
+        """Deletes the SandboxClaim with ``expected_uid`` in the foreground and waits until it is gone.
+
+        Raises ``TimeoutError`` if the Claim still exists after ``timeout``
+        seconds, including the time spent in each API request. The Claim stays
+        in place so the caller can retry.
+        """
+        try:
+            async with asyncio.timeout(timeout):
+                if await self._delete_unless_replaced(name, namespace, expected_uid, True):
+                    return
+                while claim_uid(await self.get_sandbox_claim(name, namespace)) == expected_uid:
+                    await asyncio.sleep(CLAIM_DELETE_POLL_INTERVAL)
+        except TimeoutError as e:
+            raise TimeoutError(f"SandboxClaim '{name}' was not deleted before the timeout.") from e
 
     async def patch_sandbox_operating_mode(
         self, name: str, namespace: str, mode: str, uid: str,

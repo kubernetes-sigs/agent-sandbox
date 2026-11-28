@@ -40,6 +40,9 @@ PODSNAPSHOTMANUALTRIGGER_PLURAL = "podsnapshotmanualtriggers"
 PODSNAPSHOTMANUALTRIGGER_API_KIND = "PodSnapshotManualTrigger"
 PODSNAPSHOT_API_KIND = "PodSnapshot"
 
+# Seconds between checks while waiting for a deleted SandboxClaim to disappear.
+CLAIM_DELETE_POLL_INTERVAL = 0.5
+
 # SandboxClaim Ready=False reasons the claim controller will not recover from
 # on its own (see computeReadyCondition in
 # extensions/controllers/sandboxclaim_controller.go). Watch-based ready-waits

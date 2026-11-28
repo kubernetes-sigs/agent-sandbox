@@ -469,6 +469,101 @@ class TestK8sHelperDeleteSandboxClaim(unittest.TestCase):
         self.assertEqual(mock_api.delete_namespaced_custom_object.call_args.kwargs["_request_timeout"], 30)
 
 
+@patch("k8s_agent_sandbox.k8s_helper.time.sleep")
+@patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
+@patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
+@patch("k8s_agent_sandbox.k8s_helper.config")
+class TestK8sHelperDeleteSandboxClaimAndWait(unittest.TestCase):
+
+    @staticmethod
+    def _claim(uid):
+        return {"metadata": {"uid": uid}}
+
+    def _helper(self, mock_api_cls, gets):
+        mock_api = MagicMock()
+        mock_api_cls.return_value = mock_api
+        mock_api.get_namespaced_custom_object.side_effect = gets
+        return K8sHelper(), mock_api
+
+    def test_deletes_in_foreground_by_uid_and_waits_until_gone(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [self._claim("u1"), client.ApiException(status=404)])
+        helper.delete_sandbox_claim_and_wait("claim", "default", 30, "u1")
+
+        kwargs = api.delete_namespaced_custom_object.call_args.kwargs
+        self.assertEqual(kwargs["body"].propagation_policy, "Foreground")
+        self.assertEqual(kwargs["body"].preconditions.uid, "u1")
+        for timeout in (kwargs["_request_timeout"], api.get_namespaced_custom_object.call_args.kwargs["_request_timeout"]):
+            # Older kubernetes releases ignore a float, so the timeout must be a tuple.
+            self.assertIsInstance(timeout, tuple)
+            # Each request gets a share of the budget so urllib3 retries stay within it.
+            self.assertLessEqual(max(timeout), 30 / 4)
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    def test_replacement_with_same_name_ends_the_wait(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, _ = self._helper(mock_api_cls, [self._claim("u2")])
+        helper.delete_sandbox_claim_and_wait("claim", "default", 30, "u1")
+        mock_sleep.assert_not_called()
+
+    def test_uid_conflict_with_replaced_claim_is_success(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [self._claim("u2")])
+        api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        helper.delete_sandbox_claim_and_wait("claim", "default", 30, "u1")
+
+    def test_uid_conflict_with_claim_gone_is_success(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [client.ApiException(status=404)])
+        api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        helper.delete_sandbox_claim_and_wait("claim", "default", 30, "u1")
+
+    def test_conflict_with_same_claim_is_raised(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [self._claim("u1")])
+        api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        with self.assertRaises(client.ApiException):
+            helper.delete_sandbox_claim_and_wait("claim", "default", 30, "u1")
+
+    def test_times_out_while_claim_remains(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, _ = self._helper(mock_api_cls, lambda **kw: self._claim("u1"))
+        with self.assertRaises(TimeoutError):
+            helper.delete_sandbox_claim_and_wait("claim", "default", 0, "u1")
+
+    def test_delete_pinned_pins_the_uid_in_the_background(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [])
+        helper.delete_pinned_sandbox_claim("claim", "default", "u1")
+
+        body = api.delete_namespaced_custom_object.call_args.kwargs["body"]
+        self.assertEqual(body.preconditions.uid, "u1")
+        self.assertIsNone(body.propagation_policy)
+
+    def test_delete_pinned_treats_a_replaced_claim_as_success(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [self._claim("u2")])
+        api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        helper.delete_pinned_sandbox_claim("claim", "default", "u1")
+
+    def test_delete_pinned_raises_a_conflict_with_the_same_claim(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [self._claim("u1")])
+        api.delete_namespaced_custom_object.side_effect = client.ApiException(status=409)
+        with self.assertRaises(client.ApiException):
+            helper.delete_pinned_sandbox_claim("claim", "default", "u1")
+
+    def test_get_claim_uid_returns_uid_or_none(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [self._claim("u1"), client.ApiException(status=404)])
+        self.assertEqual(helper.get_sandbox_claim_uid("claim", "default", 30), "u1")
+        self.assertIsInstance(api.get_namespaced_custom_object.call_args.kwargs["_request_timeout"], tuple)
+        self.assertIsNone(helper.get_sandbox_claim_uid("claim", "default", 30))
+
+    def test_get_claim_uid_stall_past_the_deadline_is_a_timeout(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, _ = self._helper(mock_api_cls, urllib3.exceptions.ReadTimeoutError(None, "", "timed out"))
+        with patch("k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=[0, 0, 100]):
+            with self.assertRaises(TimeoutError):
+                helper.get_sandbox_claim_uid("claim", "default", 5)
+
+    def test_stalled_request_past_the_deadline_is_a_timeout(self, mock_config, mock_api_cls, mock_core_cls, mock_sleep):
+        helper, api = self._helper(mock_api_cls, [])
+        api.delete_namespaced_custom_object.side_effect = urllib3.exceptions.ReadTimeoutError(None, "", "timed out")
+        with patch("k8s_agent_sandbox.k8s_helper.time.monotonic", side_effect=[0, 0, 100, 100]):
+            with self.assertRaises(TimeoutError):
+                helper.delete_sandbox_claim_and_wait("claim", "default", 5, "u1")
+
+
 @patch("k8s_agent_sandbox.k8s_helper.client.CoreV1Api")
 @patch("k8s_agent_sandbox.k8s_helper.client.CustomObjectsApi")
 @patch("k8s_agent_sandbox.k8s_helper.config")

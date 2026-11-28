@@ -33,7 +33,7 @@ from .k8s_helper import K8sHelper
 from .connector import SandboxConnector
 from .constants import POD_NAME_ANNOTATION
 from .exceptions import SandboxError, SandboxNotFoundError
-from .utils import select_pod_ip, extract_sandbox_name_hash
+from .utils import claim_uid, select_pod_ip, extract_sandbox_name_hash
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ class Sandbox:
         
         # Internal state tracking
         self._lifecycle_uid: str | None = None
+        self._claim_uid_to_delete: str | None = None
         self._lifecycle_lock = Lock()
         self._is_closed = False
         self._pod_name: str | None = None
@@ -320,7 +321,7 @@ class Sandbox:
         self._is_closed = True
         logger.info(f"Connection to sandbox claim '{self.claim_name}' has been closed.")
     
-    def terminate(self) -> None:
+    def terminate(self, *, wait: bool = False, timeout: float = 180) -> None:
         """
         Permanent deletion of all server side infrastructure and client side connection.
 
@@ -328,6 +329,12 @@ class Sandbox:
         cleared so later calls are a local no-op and do not issue another DELETE.
         If the claim is already gone remotely, ``delete_sandbox_claim`` treats a
         404 as success rather than raising.
+
+        Args:
+            wait: Delete the claim in the foreground and wait until it is gone.
+                Needs ``get`` on SandboxClaims.
+            timeout: Seconds to wait. On expiry, raises ``TimeoutError`` and
+                keeps ``claim_name`` so you can retry.
         """
         # Close the client side connection and trace manager lifecycle
         self.close_connection()
@@ -336,7 +343,21 @@ class Sandbox:
             # Already deleted (or never successfully created a claim).
             return
 
-        self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
+        if wait:
+            deadline = time.monotonic() + timeout
+            # Remember the UID so a retry after a timeout cannot delete a same-name replacement.
+            if self._claim_uid_to_delete is None:
+                self._claim_uid_to_delete = self.k8s_helper.get_sandbox_claim_uid(
+                    self.claim_name, self.namespace, timeout)
+            if self._claim_uid_to_delete is not None:
+                self.k8s_helper.delete_sandbox_claim_and_wait(
+                    self.claim_name, self.namespace, max(deadline - time.monotonic(), 0),
+                    self._claim_uid_to_delete)
+        elif self._claim_uid_to_delete:
+            # After a timed-out wait=True, keep deleting only that Claim.
+            self.k8s_helper.delete_pinned_sandbox_claim(self.claim_name, self.namespace, self._claim_uid_to_delete)
+        else:
+            self.k8s_helper.delete_sandbox_claim(self.claim_name, self.namespace)
 
         # The client stops tracking the handle here because its claim is gone. Call
         # _on_terminated before clearing claim_name, because that name is the client's key.

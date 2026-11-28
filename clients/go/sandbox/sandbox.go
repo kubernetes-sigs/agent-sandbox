@@ -45,6 +45,7 @@ type Sandbox struct {
 	log       logr.Logger
 
 	claimName   string
+	claimUID    k8stypes.UID
 	sandboxName string
 	sandboxUID  k8stypes.UID
 	suspended   bool // set by Suspend, cleared by Resume, Open, and Close
@@ -52,6 +53,10 @@ type Sandbox struct {
 	podIP       string
 	serviceFQDN string
 	annotations map[string]string
+
+	// terminatingClaim is a claim that rollbackOpen deleted in the foreground
+	// and that Close still waits for.
+	terminatingClaim claimRef
 
 	lifecycleSem chan struct{}
 	mu           sync.Mutex
@@ -329,9 +334,7 @@ func (s *Sandbox) Open(ctx context.Context) (retErr error) {
 		}
 	}
 	claimName := claim.Name
-	s.mu.Lock()
-	s.claimName = claimName
-	s.mu.Unlock()
+	s.setClaim(claim)
 
 	// Resolve sandbox name (may differ from claim name with warm pool).
 	resolveStart := time.Now()
@@ -398,10 +401,11 @@ func (s *Sandbox) reconnect(ctx context.Context) error {
 	sandboxName := s.SandboxName()
 	s.log.Info("reconnecting transport", "claim", claimName, "sandbox", sandboxName)
 
-	if err := s.k8s.verifyClaimExists(reconnCtx, claimName, s.opts.Namespace, s.tracer, s.traceServiceName); err != nil {
+	if _, err := s.k8s.verifyClaimExists(reconnCtx, claimName, s.opts.Namespace, s.tracer, s.traceServiceName); err != nil {
 		s.mu.Lock()
 		if k8serrors.IsNotFound(err) {
 			s.claimName = ""
+			s.claimUID = ""
 			s.sandboxName = ""
 			s.podName = ""
 			s.podIP = ""
@@ -473,7 +477,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	_ = s.connector.Close()
 
 	s.mu.Lock()
-	name := s.claimName
+	name, uid := s.claimName, s.claimUID
 	s.mu.Unlock()
 
 	var cleanupErr error
@@ -481,7 +485,7 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), s.opts.CleanupTimeout)
 		defer cancel()
 
-		cleanupErr = s.k8s.deleteClaim(cleanupCtx, name, s.opts.Namespace)
+		cleanupErr = s.deleteClaim(cleanupCtx, name, uid)
 	}
 
 	s.mu.Lock()
@@ -492,6 +496,11 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 	s.annotations = nil
 	if cleanupErr == nil {
 		s.claimName = ""
+		s.claimUID = ""
+		// A Close that interrupted this Open waits for the deletion started here.
+		if s.opts.ClaimName == "" && s.opts.WaitForTermination {
+			s.terminatingClaim = claimRef{name, uid}
+		}
 	}
 	s.mu.Unlock()
 
@@ -500,6 +509,21 @@ func (s *Sandbox) rollbackOpen(originalErr error) error {
 		return errors.Join(originalErr, fmt.Errorf("sandbox[%s/%s]: open rollback: %w", s.opts.Namespace, name, cleanupErr))
 	}
 	return originalErr
+}
+
+// claimRef identifies one SandboxClaim. The UID tells it apart from a
+// same-name replacement.
+type claimRef struct {
+	name string
+	uid  k8stypes.UID
+}
+
+// deleteClaim deletes the claim, in the foreground when WaitForTermination is set.
+func (s *Sandbox) deleteClaim(ctx context.Context, name string, uid k8stypes.UID) error {
+	if s.opts.WaitForTermination {
+		return s.k8s.deleteClaimForeground(ctx, name, s.opts.Namespace, uid)
+	}
+	return s.k8s.deleteClaim(ctx, name, s.opts.Namespace)
 }
 
 // Close deletes the SandboxClaim and cleans up resources.
@@ -560,12 +584,26 @@ func (s *Sandbox) Close(ctx context.Context) error {
 
 	// Delete claim using the remaining time budget.
 	s.mu.Lock()
-	name := s.claimName
+	name, uid := s.claimName, s.claimUID
+	terminating := s.terminatingClaim
 	s.mu.Unlock()
 
 	cleanupCtx, cancel := context.WithDeadline(context.Background(), closeDeadline)
 	defer cancel()
-	err := s.k8s.deleteClaim(cleanupCtx, name, s.opts.Namespace)
+	err := s.deleteClaim(cleanupCtx, name, uid)
+	deleteSent := err == nil
+	if err == nil && s.opts.WaitForTermination {
+		// The delete above ignores ctx so a cancelled caller still cleans
+		// up. Only the wait stops when ctx is done.
+		waitCtx, cancelWait := context.WithCancel(cleanupCtx)
+		defer cancelWait()
+		defer context.AfterFunc(ctx, cancelWait)()
+		for _, c := range []claimRef{{name, uid}, terminating} {
+			if err = s.k8s.waitForClaimDeleted(waitCtx, c.name, s.opts.Namespace, c.uid); err != nil {
+				break
+			}
+		}
+	}
 
 	s.mu.Lock()
 	s.draining = false
@@ -579,9 +617,17 @@ func (s *Sandbox) Close(ctx context.Context) error {
 	// would hand out this closed one from GetSandbox.
 	s.suspended = false
 	if err != nil && s.claimName != "" {
-		s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
+		if deleteSent {
+			s.log.Error(err, "claim is still terminating after Close; retry Close() to wait again", "claim", s.claimName)
+		} else {
+			s.log.Error(err, "orphaned claim during Close, could not delete; retry Close() to clean up", "claim", s.claimName)
+		}
 	} else {
 		s.claimName = ""
+		s.claimUID = ""
+	}
+	if err == nil {
+		s.terminatingClaim = claimRef{}
 	}
 	s.mu.Unlock()
 
@@ -866,6 +912,13 @@ func (s *Sandbox) trackOp() func() {
 	wg.Add(1)
 	s.mu.Unlock()
 	return wg.Done
+}
+
+func (s *Sandbox) setClaim(claim *extv1beta1.SandboxClaim) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.claimName = claim.Name
+	s.claimUID = claim.UID
 }
 
 func (s *Sandbox) setState(state *sandboxState) {

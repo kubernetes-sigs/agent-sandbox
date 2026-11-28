@@ -156,7 +156,8 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	sandboxOpts.K8sHelper = c.k8s
 
 	// Verify claim exists and resolve sandbox name before constructing handle.
-	if err := c.k8s.verifyClaimExists(ctx, claimName, namespace, c.tracer, c.svcName); err != nil {
+	claim, err := c.k8s.verifyClaimExists(ctx, claimName, namespace, c.tracer, c.svcName)
+	if err != nil {
 		return nil, fmt.Errorf("sandbox: claim %q not found in %q: %w", claimName, namespace, err)
 	}
 	sandboxName, err := c.k8s.resolveSandboxName(ctx, claimName, namespace, "", sandboxOpts.SandboxReadyTimeout, c.tracer, c.svcName)
@@ -170,8 +171,8 @@ func (c *Client) GetSandbox(ctx context.Context, claimName, namespace string) (*
 	}
 
 	// Inject identity so Open() takes the reconnect path.
+	sb.setClaim(claim)
 	sb.mu.Lock()
-	sb.claimName = claimName
 	sb.sandboxName = sandboxName
 	sb.mu.Unlock()
 
@@ -294,17 +295,25 @@ func (c *Client) closeTracked(ctx context.Context, keepNamed bool) {
 	c.registry = make(map[Key]*Sandbox)
 	c.mu.Unlock()
 
+	// Close concurrently so a slow WaitForTermination wait on one claim cannot
+	// delay the deletes of the rest.
+	var wg sync.WaitGroup
 	for _, t := range snapshot {
-		var err error
-		if t.keep {
-			err = t.sb.Disconnect(ctx)
-		} else {
-			err = t.sb.Close(ctx)
-		}
-		if err != nil {
-			c.log.Error(err, "cleanup failed", "claim", t.key.ClaimName, "namespace", t.key.Namespace)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if t.keep {
+				err = t.sb.Disconnect(ctx)
+			} else {
+				err = t.sb.Close(ctx)
+			}
+			if err != nil {
+				c.log.Error(err, "cleanup failed", "claim", t.key.ClaimName, "namespace", t.key.Namespace)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // EnableAutoCleanup deletes tracked sandboxes on SIGINT/SIGTERM. Claims

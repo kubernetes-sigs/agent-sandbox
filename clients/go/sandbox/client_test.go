@@ -457,7 +457,7 @@ func TestClient_GetSandbox_Reattach_WithoutClientWarmPoolName(t *testing.T) {
 	extensionsCS.PrependReactor("get", "sandboxclaims", func(action ktesting.Action) (bool, runtime.Object, error) {
 		ga := action.(ktesting.GetAction)
 		return true, &extv1beta1.SandboxClaim{
-			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace()},
+			ObjectMeta: metav1.ObjectMeta{Name: ga.GetName(), Namespace: ga.GetNamespace(), UID: testClaimUID(ga.GetName())},
 			Status: extv1beta1.SandboxClaimStatus{
 				SandboxStatus: extv1beta1.SandboxStatus{Name: sandboxName},
 			},
@@ -497,6 +497,9 @@ func TestClient_GetSandbox_Reattach_WithoutClientWarmPoolName(t *testing.T) {
 	}
 	if sb.SandboxName() != sandboxName {
 		t.Errorf("expected sandbox %q, got %q", sandboxName, sb.SandboxName())
+	}
+	if sb.claimUID != testClaimUID(claimName) {
+		t.Errorf("expected claim UID %q, got %q", testClaimUID(claimName), sb.claimUID)
 	}
 }
 
@@ -909,7 +912,7 @@ func TestResolveSandboxName_FromClaimStatus(t *testing.T) {
 // claimNotReady returns a claim whose Ready condition is False for reason.
 func claimNotReady(name, reason string) *extv1beta1.SandboxClaim {
 	return &extv1beta1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: testClaimUID(name)},
 		Status: extv1beta1.SandboxClaimStatus{
 			Conditions: []metav1.Condition{{
 				Type:    string(sandboxv1beta1.SandboxConditionReady),

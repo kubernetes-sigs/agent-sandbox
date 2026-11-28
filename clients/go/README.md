@@ -465,6 +465,10 @@ This is useful for suspending a session (e.g., between user requests in a
 web service) while keeping the sandbox warm. `Close()` deletes the claim;
 `Disconnect(ctx)` preserves it.
 
+Set `Options.WaitForTermination` to make `Close()` return only after the claim
+is gone. Foreground deletion holds the claim only for dependents the garbage
+collector has already seen, so this does not promise the Pod has stopped.
+
 ## Suspend and Resume
 
 `Suspend()` asks the controller to stop the sandbox: it sets the Sandbox's

@@ -15,7 +15,6 @@
 package processmanager
 
 import (
-	"errors"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -77,7 +76,7 @@ func (r *ProcessRegistry) SignalAll(sig syscall.Signal) {
 	r.childMu.Lock()
 	defer r.childMu.Unlock()
 	for pid := range r.children {
-		if err := syscall.Kill(-pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := syscall.Kill(-pid, sig); err != nil {
 			_ = syscall.Kill(pid, sig)
 		}
 	}

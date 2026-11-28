@@ -43,7 +43,7 @@ from .models import (
 )
 from .k8s_helper import K8sHelper
 from .pod_metadata import build_pod_metadata, validate_labels
-from .utils import construct_sandbox_claim_lifecycle_spec
+from .utils import construct_sandbox_claim_lifecycle_spec, run_cleanup_on_sigterm
 from .exceptions import SandboxMetadataError, SandboxNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -107,9 +107,11 @@ class SandboxClient(Generic[T]):
         if cleanup:
             # Register a static method bound to the cleanup data with functools.partial, so the hook
             # never keeps the client alive. A bound method of the client would keep it alive until exit.
-            atexit.register(functools.partial(
+            cleanup_hook = functools.partial(
                 SandboxClient._delete_automatic_sandboxes, self._active_connection_sandboxes, self._explicit_claims
-            ))
+            )
+            atexit.register(cleanup_hook)
+            run_cleanup_on_sigterm(cleanup_hook)
 
     def __enter__(self) -> Self:
         return self

@@ -20,6 +20,7 @@ import gc
 import json
 import os
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -2468,10 +2469,19 @@ users:
         self.addCleanup(os.remove, path)
         return path
 
-    def _run_atexit_script(self, kubeconfig_path: str, tmpdir: str | None = None) -> None:
+    def _run_atexit_script(self, kubeconfig_path: str, tmpdir: str | None = None, sigterm: bool = False) -> None:
         """Runs a client that never closes, so only its atexit hook can delete the claim."""
-        script = """
+        # A live non-daemon thread would block a SystemExit-based shutdown before atexit runs.
+        send_sigterm = (
+            "    threading.Thread(target=threading.Event().wait).start()\n"
+            "    os.kill(os.getpid(), signal.SIGTERM)\n"
+            "    await asyncio.sleep(30)\n"
+        ) if sigterm else ""
+        script = f"""
 import asyncio
+import os
+import signal
+import threading
 from k8s_agent_sandbox.async_sandbox_client import AsyncSandboxClient
 from k8s_agent_sandbox.models import SandboxDirectConnectionConfig
 
@@ -2481,7 +2491,7 @@ async def main():
         cleanup=True,
     )
     client._active_connection_sandboxes[("default", "claim-abc")] = object()
-
+{send_sigterm}
 asyncio.run(main())
 # No explicit close()/delete_all() — relying entirely on the atexit hook.
 """
@@ -2507,8 +2517,16 @@ asyncio.run(main())
             env=env,
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, -signal.SIGTERM if sigterm else 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr, result.stderr)
+
+    def test_atexit_cleanup_deletes_claim_on_sigterm(self):
+        self._run_atexit_script(self._write_fake_kubeconfig(), sigterm=True)
+
+        self.assertEqual(
+            SandboxClaimDeleteHandler.received_deletes,
+            ["/apis/extensions.agents.x-k8s.io/v1beta1/namespaces/default/sandboxclaims/claim-abc"],
+        )
 
     def test_atexit_cleanup_deletes_claim_on_real_process_exit(self):
         self._run_atexit_script(self._write_fake_kubeconfig())

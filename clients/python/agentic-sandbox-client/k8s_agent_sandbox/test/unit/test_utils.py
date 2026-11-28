@@ -15,6 +15,8 @@
 import json
 import os
 import stat
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -322,6 +324,29 @@ class TestMergeHeaders(unittest.TestCase):
         base = {"A": "1"}
         merge_headers(base, {"a": "2"}).clear()
         self.assertEqual(base, {"A": "1"})
+
+
+class TestRunCleanupOnSigterm(unittest.TestCase):
+
+    def test_forked_child_skips_parent_cleanup(self):
+        script = """
+import os, signal, sys, time
+from k8s_agent_sandbox.utils import run_cleanup_on_sigterm
+run_cleanup_on_sigterm(lambda: print("cleanup ran", flush=True))
+ready_r, ready_w = os.pipe()
+pid = os.fork()
+if pid == 0:
+    os.write(ready_w, b"x")
+    time.sleep(30)
+    os._exit(0)
+os.read(ready_r, 1)
+os.kill(pid, signal.SIGTERM)
+_, status = os.waitpid(pid, 0)
+sys.exit(0 if os.WIFSIGNALED(status) else 1)
+"""
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("cleanup ran", result.stdout)
 
 
 if __name__ == "__main__":

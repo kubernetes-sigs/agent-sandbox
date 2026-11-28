@@ -108,6 +108,30 @@ const (
 	reasonSandboxTemplateError   = "SandboxTemplateError"
 	reasonWarmPoolNotProgressing = "WarmPoolNotProgressing"
 	reasonWarmPoolProgressing    = "WarmPoolProgressing"
+	// reasonStuckReplacements is emitted when stuck members keep being
+	// replaced without any member becoming Ready. It needs its own reason, not
+	// reasonWarmPoolNotProgressing, because setNotProgressing tracks one active
+	// action per reason and the unschedulable and gated holds already use that.
+	reasonStuckReplacements = "WarmPoolStuckReplacements"
+)
+
+const (
+	// stuckBackoffBase and stuckBackoffMax bound the extra time a pool waits
+	// beyond the readiness grace period before replacing a stuck member again.
+	// The delay doubles with every round of stuck replacements that produced
+	// no Ready member. The first round has no extra delay, so a one-off fault
+	// (a bad node, a transient pull error) is replaced exactly as before.
+	stuckBackoffBase = 30 * time.Second
+	stuckBackoffMax  = 30 * time.Minute
+
+	// stuckProgressReadyFor is how long a member must have stayed Ready to
+	// count as progress. A crash-looping container without a readiness probe
+	// is Ready for a few seconds after every restart, which is not progress.
+	stuckProgressReadyFor = 30 * time.Second
+
+	// stuckSignalRounds is how many consecutive stuck-replacement rounds
+	// without progress make the pool report that it is backing off.
+	stuckSignalRounds = 2
 )
 
 // SandboxWarmPoolReconciler reconciles a SandboxWarmPool object.
@@ -141,6 +165,12 @@ type SandboxWarmPoolReconciler struct {
 	// transition event exactly once).
 	notProgressingMu sync.Mutex
 	notProgressing   map[types.NamespacedName]map[string]string
+
+	// stuckMu guards stuckBackoff. Distinct pools may reconcile concurrently.
+	stuckMu sync.Mutex
+	// stuckBackoff tracks, per pool, how many rounds of stuck-member
+	// replacement in a row produced no Ready member. See stuckBackoffState.
+	stuckBackoff map[types.NamespacedName]*stuckBackoffState
 
 	// now is a test hook for the reconciler's clock; nil means time.Now.
 	now func() time.Time
@@ -377,6 +407,146 @@ func (r *SandboxWarmPoolReconciler) refundRefillTokens(key types.NamespacedName,
 	}
 }
 
+// stuckBackoffState is a pool's memory of failed stuck-member replacements.
+//
+// Replacing a stuck member recreates it from the same blueprint, so it only
+// helps when the fault belongs to that one instance (a bad node, a transient
+// pull error). When the fault is in the blueprint (bad image, crash loop,
+// broken readiness probe) every replacement fails the same way, and each one
+// also restarts the kubelet's own image-pull and crash-loop backoff. The only
+// thing that tells the two apart is the outcome of earlier replacements, which
+// a stateless grace-period check cannot see, so the pool keeps it here.
+//
+// The state is in memory, like the other per-pool tuning state. A controller
+// restart forgets it and costs at most one extra round.
+type stuckBackoffState struct {
+	// uid identifies the pool object the failures belong to. A pool deleted
+	// and recreated under the same name starts without history, even if its
+	// blueprint is the same.
+	uid types.UID
+	// blueprintHash is the blueprint the failures were observed against. A
+	// different blueprint is a different experiment, so the count restarts.
+	blueprintHash string
+	// failures is the number of rounds in a row that replaced stuck members
+	// without a replacement becoming stably Ready.
+	failures int
+	// roundStart is when the latest round began. Deletions within one grace
+	// period of it belong to the same round: a replacement created at or after
+	// it cannot be judged stuck sooner than one grace period later.
+	roundStart time.Time
+	// lastBusy is the last time the pool had a member that was not Ready past
+	// its grace period, or the last time it replaced one. The history is
+	// forgotten only after the pool has been idle for a long while; a
+	// replacement that waits to be scheduled for longer than one round keeps the
+	// pool busy, while a young member still warming up does not.
+	lastBusy time.Time
+}
+
+// stuckBackoffDelay is the extra wait beyond the grace period after failures
+// rounds in a row: none for the first round, then doubling up to the cap.
+func stuckBackoffDelay(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	delay := stuckBackoffBase
+	for i := 1; i < failures; i++ {
+		if delay >= stuckBackoffMax/2 {
+			return stuckBackoffMax
+		}
+		delay *= 2
+	}
+	return min(delay, stuckBackoffMax)
+}
+
+// observeStuckBackoff updates the pool's backoff state from what this
+// reconcile sees. It returns the failure count to act on and, when a
+// replacement has only just turned Ready, how long until it has stayed Ready
+// long enough to count, so the caller can schedule a recheck.
+//
+// The count resets when a replacement stays Ready, when the blueprint changes,
+// when the pool object is a different one, and after the pool has had no
+// non-Ready member for long enough that it must be healthy. Only members that
+// turned Ready after the latest round began count as progress: a member that
+// was already Ready says nothing about whether the replacements are
+// succeeding.
+func (r *SandboxWarmPoolReconciler) observeStuckBackoff(key types.NamespacedName, uid types.UID, blueprintHash string, members []sandboxv1beta1.Sandbox, grace time.Duration, now time.Time) (int, time.Duration) {
+	r.stuckMu.Lock()
+	defer r.stuckMu.Unlock()
+	st := r.stuckBackoff[key]
+	if st == nil {
+		return 0, 0
+	}
+	if st.uid != uid || (blueprintHash != "" && st.blueprintHash != blueprintHash) {
+		delete(r.stuckBackoff, key)
+		return 0, 0
+	}
+	// Only a member past its grace period counts as busy. One that is still
+	// warming is normal: a pool whose Ready members are claimed within seconds
+	// always has a young replacement, and must still reach idle.
+	for i := range members {
+		if !isSandboxReady(&members[i]) && !members[i].CreationTimestamp.IsZero() && now.Sub(readinessGraceStart(&members[i])) > grace {
+			st.lastBusy = now
+			break
+		}
+	}
+	stable, remaining := readyReplacements(members, st.roundStart, now)
+	idle := now.Sub(st.lastBusy) > 2*(grace+stuckBackoffDelay(st.failures))
+	if stable || idle {
+		delete(r.stuckBackoff, key)
+		return 0, 0
+	}
+	return st.failures, remaining
+}
+
+// noteStuckReplacement records that this reconcile deleted stuck members and
+// returns the failure count, which grows at most once per grace period.
+func (r *SandboxWarmPoolReconciler) noteStuckReplacement(key types.NamespacedName, uid types.UID, blueprintHash string, grace time.Duration, now time.Time) int {
+	r.stuckMu.Lock()
+	defer r.stuckMu.Unlock()
+	if r.stuckBackoff == nil {
+		r.stuckBackoff = make(map[types.NamespacedName]*stuckBackoffState)
+	}
+	st := r.stuckBackoff[key]
+	if st == nil || st.uid != uid {
+		st = &stuckBackoffState{uid: uid, blueprintHash: blueprintHash}
+		r.stuckBackoff[key] = st
+	}
+	st.lastBusy = now
+	if st.failures == 0 || now.Sub(st.roundStart) >= grace {
+		st.failures++
+		st.roundStart = now
+	}
+	return st.failures
+}
+
+// readyReplacements looks at the members that turned Ready after since, which
+// is when the latest round of stuck replacement began. It reports whether any
+// has stayed Ready for stuckProgressReadyFor, and otherwise how long until the
+// soonest one will, or 0 if there is none. Nothing else wakes a pool whose
+// members are all Ready, so the caller schedules a recheck for that time.
+//
+// A transition time is stored with second precision, so it is compared with
+// since rounded down to the same precision. A replacement that turns Ready in
+// the second the round began still counts.
+func readyReplacements(members []sandboxv1beta1.Sandbox, since, now time.Time) (bool, time.Duration) {
+	var remaining time.Duration
+	since = since.Truncate(time.Second)
+	for i := range members {
+		cond := meta.FindStatusCondition(members[i].Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+		if cond == nil || cond.Status != metav1.ConditionTrue || cond.LastTransitionTime.Time.Before(since) {
+			continue
+		}
+		left := stuckProgressReadyFor - now.Sub(cond.LastTransitionTime.Time)
+		if left <= 0 {
+			return true, 0
+		}
+		if remaining == 0 || left < remaining {
+			remaining = left
+		}
+	}
+	return false, remaining
+}
+
 // clockNow returns the reconciler's current time (time.Now unless a test
 // injected a fake clock).
 func (r *SandboxWarmPoolReconciler) clockNow() time.Time {
@@ -488,6 +658,9 @@ func (r *SandboxWarmPoolReconciler) forgetPool(key types.NamespacedName) {
 	delete(r.notProgressing, key)
 	r.notProgressingMu.Unlock()
 	r.forgetReplenishState(key)
+	r.stuckMu.Lock()
+	delete(r.stuckBackoff, key)
+	r.stuckMu.Unlock()
 }
 
 // reconcilePool ensures the correct number of pre-allocated sandboxes exist in the pool.
@@ -537,6 +710,20 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// grace deadline among not-yet-Ready sandboxes (0 = none pending).
 	var nextGraceDeadline time.Duration
 	graceWindow := r.readinessGracePeriod(warmPool)
+	// Replacing a stuck member again is futile when earlier replacements of the
+	// same blueprint did not produce a Ready member, so each failed round
+	// extends the wait before the next one. Only the delete path waits longer:
+	// the unschedulable and gated holds below are unchanged.
+	stuckFailures, stuckRecheck := r.observeStuckBackoff(poolKey, warmPool.UID, currentSandboxBlueprintHash, activeSandboxes, graceWindow, now)
+	stuckDelay := stuckBackoffDelay(stuckFailures)
+	stuckDeleted := false
+	// A replacement that only just turned Ready is not yet progress, and with
+	// every member Ready no other deadline wakes the pool, so recheck once it
+	// has stayed Ready long enough. Otherwise the failure history and its
+	// warning would linger until some unrelated event.
+	if stuckRecheck > 0 {
+		requeueAfter = minNonZeroDuration(requeueAfter, stuckRecheck+graceRequeueSlack)
+	}
 	for _, sb := range activeSandboxes {
 		if !isSandboxReady(&sb) && !sb.CreationTimestamp.IsZero() {
 			age := now.Sub(readinessGraceStart(&sb))
@@ -575,6 +762,17 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				healthySandboxes = append(healthySandboxes, sb)
 				continue
 			}
+			// Hold a stuck member through the backoff instead of deleting it:
+			// the kubelet keeps retrying the pull or restart in place, so a
+			// fault that clears on its own still recovers, and no replacement
+			// restarts the kubelet's backoff.
+			if age <= graceWindow+stuckDelay {
+				if remaining := graceWindow + stuckDelay - age + graceRequeueSlack; nextGraceDeadline == 0 || remaining < nextGraceDeadline {
+					nextGraceDeadline = remaining
+				}
+				healthySandboxes = append(healthySandboxes, sb)
+				continue
+			}
 			logger.Info("Deleting stuck warm pool sandbox",
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
@@ -597,11 +795,15 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			// until the deletion is observed; the replacement is created on a
 			// later reconcile once it no longer counts against the target.
 			inactiveReplicas++
+			stuckDeleted = true
 			continue
 		}
 		healthySandboxes = append(healthySandboxes, sb)
 	}
 	activeSandboxes = healthySandboxes
+	if stuckDeleted {
+		stuckFailures = r.noteStuckReplacement(poolKey, warmPool.UID, currentSandboxBlueprintHash, graceWindow, now)
+	}
 
 	desiredReplicas := int32(1)
 	if warmPool.Spec.Replicas != nil {
@@ -817,6 +1019,13 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 		requeueAfter = minNonZeroDuration(requeueAfter, missingTemplateRequeueDelay)
 	} else {
 		r.setNotProgressing(warmPool, poolKey, reasonSandboxTemplateError, "", "")
+	}
+	if stuckFailures >= stuckSignalRounds {
+		r.setNotProgressing(warmPool, poolKey, reasonStuckReplacements, "BackingOffStuckReplacements", fmt.Sprintf(
+			"%d rounds of replacing sandboxes that never became Ready have not produced a Ready member; the next replacement waits an extra %s beyond the %s readiness grace period. The template is probably failing (check the image, command and readiness probe)",
+			stuckFailures, stuckBackoffDelay(stuckFailures), graceWindow))
+	} else {
+		r.setNotProgressing(warmPool, poolKey, reasonStuckReplacements, "", "")
 	}
 	cause, message := notProgressingSignal(unschedulableReplicas, gatedReplicas, desiredReplicas, graceWindow)
 	r.setNotProgressing(warmPool, poolKey, reasonWarmPoolNotProgressing, cause, message)

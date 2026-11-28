@@ -750,7 +750,7 @@ Seconds to wait for the router tunnel. Must be positive.
 
 #### pod\_ip\_routing
 
-Send X-Sandbox-Pod-IP on REST and gRPC. Set true only when the router cache is disabled and the Sandbox has no Service.
+Send X-Sandbox-Pod-IP on REST and gRPC. Current routers ignore it. Set true only for an older router with the cache disabled and a Sandbox without a Service.
 
 <a id="k8s_agent_sandbox.models.SandboxdInClusterConnectionConfig"></a>
 

@@ -52,10 +52,8 @@ type Target struct {
 	Namespace string
 	// Port is the upstream port.
 	Port int
-	// PodIP is the optional direct pod IP from X-Sandbox-Pod-IP. When set,
-	// both DNS and cache lookups are bypassed and the proxy dials this IP
-	// directly. Lets a caller (typically an SDK that just created the
-	// Sandbox) skip the discovery hop entirely.
+	// PodIP is the optional direct pod IP from X-Sandbox-Pod-IP. Resolve
+	// dials it only when it is a loopback address.
 	PodIP string
 }
 
@@ -180,10 +178,6 @@ func validDNSLabel(s string) bool {
 // an SSRF gadget — letting a caller dial cluster-internal admin
 // endpoints, the loopback of the router pod itself, or cloud
 // instance-metadata services.
-//
-// We do NOT additionally restrict to "looks like a Pod CIDR" because
-// the SDK fast-path (caller just created the Sandbox, knows its IP)
-// is a supported use case and Pod CIDRs vary per cluster.
 //
 // allowLoopback exists for the sidecar deployment shape (sandbox in
 // the same Pod as the router) and for integration tests using a

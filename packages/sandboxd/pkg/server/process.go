@@ -23,11 +23,10 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/creack/pty"
 	"github.com/go-logr/logr"
@@ -190,12 +189,18 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// it afterwards races with a child that reads the terminal size
 		// immediately (e.g. `stty size` would report 0 0).
 		if req.GetPty().GetCols() > 0 && req.GetPty().GetRows() > 0 {
-			ptyFile, err = pty.StartWithSize(cmd, &pty.Winsize{
-				Cols: uint16(req.GetPty().GetCols()),
-				Rows: uint16(req.GetPty().GetRows()),
+			err = s.registry.StartChild(cmd, func() (startErr error) {
+				ptyFile, startErr = pty.StartWithSize(cmd, &pty.Winsize{
+					Cols: uint16(req.GetPty().GetCols()),
+					Rows: uint16(req.GetPty().GetRows()),
+				})
+				return startErr
 			})
 		} else {
-			ptyFile, err = pty.Start(cmd)
+			err = s.registry.StartChild(cmd, func() (startErr error) {
+				ptyFile, startErr = pty.Start(cmd)
+				return startErr
+			})
 		}
 		if err != nil {
 			return mapCommandError(err, "failed to start command with PTY")
@@ -230,7 +235,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 			return status.FromContextError(err).Err()
 		}
 
-		if err := cmd.Start(); err != nil {
+		if err := s.registry.StartChild(cmd, cmd.Start); err != nil {
 			closeAll(stdoutR, stdoutW, stderrR, stderrW, stdinR, stdinW)
 			return mapCommandError(err, "failed to start command")
 		}
@@ -247,7 +252,7 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 	// Kill the entire process group (not just the child PID) when the
 	// stream context is cancelled (client disconnects). This prevents
 	// grandchildren from becoming orphan processes.
-	s.killProcessGroupOnContextDone(stream.Context(), cmd, proc.Done)
+	stopCancelKill := s.killProcessGroupOnContextDone(stream.Context(), cmd)
 
 	if err := stream.Send(&processv1.StartResponse{
 		Event: &processv1.StartResponse_Init{
@@ -257,9 +262,10 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		_ = proc.Signal(syscall.SIGKILL)
 		closeAll(stdoutR, stderrR, stdinW)
 		go func() {
-			_ = cmd.Wait()
+			stopCancelKill()
+			_ = s.registry.WaitChild(cmd)
 			_ = proc.ClosePTY()
-			close(proc.Done) // release the cancellation watcher so it doesn't leak
+			close(proc.Done)
 		}()
 		return status.Errorf(codes.Internal, "failed to send InitEvent: %v", err)
 	}
@@ -306,17 +312,21 @@ func (s *ProcessServer) Start(req *processv1.StartRequest, stream processv1.Proc
 		// short-lived process, so give the reader a chance to finish first.
 		// Closing the PTY only on timeout unblocks a straggling read (e.g. a
 		// grandchild still holds the slave side).
-		waitErr = cmd.Wait()
+		waitForExit(cmd.Process.Pid)
 		waitForReaders(&streamWg, func() { _ = proc.ClosePTY() })
 		_ = proc.ClosePTY()
+		stopCancelKill()
+		waitErr = s.registry.WaitChild(cmd)
 	} else {
 		streamWg.Add(2)
 		go streamOutput(stdoutR, false)
 		go streamOutput(stderrR, true)
 
-		waitErr = cmd.Wait()
+		waitForExit(cmd.Process.Pid)
 		waitForReaders(&streamWg, func() { closeAll(stdoutR, stderrR) })
 		closeAll(stdoutR, stderrR)
+		stopCancelKill()
+		waitErr = s.registry.WaitChild(cmd)
 	}
 
 	exitCode := int32(0)
@@ -460,8 +470,8 @@ func channelClosed(done <-chan struct{}) bool {
 	}
 }
 
-func (run unaryExecution) finished(waitDone <-chan struct{}) bool {
-	return channelClosed(waitDone) && channelClosed(run.stdout.done) && channelClosed(run.stderr.done)
+func (run unaryExecution) finished(exited <-chan struct{}) bool {
+	return channelClosed(exited) && channelClosed(run.stdout.done) && channelClosed(run.stderr.done)
 }
 
 func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessConfig, limits executionLimits) (*processv1.ExecuteWithLimitsResponse, error) {
@@ -500,7 +510,7 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 		defer timer.Stop()
 		timeExpired = timer.C
 	}
-	if err := cmd.Start(); err != nil {
+	if err := s.registry.StartChild(cmd, cmd.Start); err != nil {
 		return nil, mapCommandError(err, "failed to execute command")
 	}
 	stdoutBuf.collect()
@@ -538,17 +548,38 @@ func (s *ProcessServer) execute(ctx context.Context, config *processv1.ProcessCo
 
 // waitExecution owns the sole Wait call and joins termination before inspecting
 // output. Even if cleanup times out, the Wait goroutine still reaps the child.
+//
+// The leader stays unreaped until the loop ends, so its PID cannot be reused
+// while termination may still signal it or its process group.
 func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, timeExpired <-chan time.Time) (executionOutcome, error) {
+	exited := make(chan struct{})
+	release := make(chan struct{})
 	waitDone := make(chan struct{})
 	var runErr error
 	go func() {
-		runErr = run.cmd.Wait()
+		waitForExit(run.cmd.Process.Pid)
+		close(exited)
+		<-release
+		runErr = s.registry.WaitChild(run.cmd)
 		close(waitDone)
 	}()
-	var outcome executionOutcome
-	pendingWait, pendingOut, pendingErr := waitDone, run.stdout.done, run.stderr.done
-	ctxDone := ctx.Done()
+	var releaseOnce sync.Once
+	releaseLeader := func() { releaseOnce.Do(func() { close(release) }) }
 	var pendingKill chan struct{}
+	defer func() {
+		// On an early return the leader stays unreaped until termination ends.
+		if pendingKill == nil {
+			releaseLeader()
+			return
+		}
+		go func() {
+			<-pendingKill
+			releaseLeader()
+		}()
+	}()
+	var outcome executionOutcome
+	pendingWait, pendingOut, pendingErr := exited, run.stdout.done, run.stderr.done
+	ctxDone := ctx.Done()
 	var cleanupDone <-chan struct{}
 	var cleanupCancel context.CancelFunc
 	var drainDone <-chan time.Time
@@ -592,19 +623,19 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 			}
 		case <-ctxDone:
 			ctxDone, timeExpired = nil, nil
-			if run.finished(waitDone) {
+			if run.finished(exited) {
 				continue
 			}
 			startCleanup()
 		case <-timeExpired:
 			ctxDone, timeExpired = nil, nil
-			if run.finished(waitDone) {
+			if run.finished(exited) {
 				continue
 			}
 			outcome.timeLimitExceeded = true
 			startCleanup()
 		case <-cleanupDone:
-			if run.finished(waitDone) && (pendingKill == nil || channelClosed(pendingKill)) {
+			if run.finished(exited) && (pendingKill == nil || channelClosed(pendingKill)) {
 				cleanupDone = nil
 				continue
 			}
@@ -632,6 +663,8 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 			drainDone = nil
 		}
 	}
+	releaseLeader()
+	<-waitDone
 	if err := ctx.Err(); err != nil {
 		return executionOutcome{}, status.FromContextError(err).Err()
 	}
@@ -652,6 +685,20 @@ func (s *ProcessServer) waitExecution(ctx context.Context, run unaryExecution, t
 		}
 	}
 	return outcome, nil
+}
+
+// waitForExit blocks until the process pid has exited, without reaping it. An
+// unreaped process keeps its PID reserved, so signalling the PID or its process
+// group stays safe until the caller reaps it with cmd.Wait.
+func waitForExit(pid int) {
+	var info [128]byte // siginfo_t
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, 1 /* P_PID */, uintptr(pid),
+			uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOWAIT, 0, 0)
+		if errno != syscall.EINTR {
+			return
+		}
+	}
 }
 
 func (s *ProcessServer) terminateExecution(ctx context.Context, cmd *exec.Cmd) chan struct{} {
@@ -744,9 +791,11 @@ func closeAll(files ...*os.File) {
 // killProcessGroupOnContextDone starts a goroutine that terminates the
 // command's entire process tree when ctx is cancelled. This replaces the
 // default exec.CommandContext behaviour (which only sends SIGKILL to the
-// child PID) so that grandchildren are reaped as well. The goroutine exits
-// when ctx is done OR when the process exits (done closed), whichever comes
-// first.
+// child PID) so that grandchildren are reaped as well.
+//
+// The returned stop function prevents any new termination and waits for one
+// in progress. Callers must call it before cmd.Wait reaps the leader, since
+// its PID/PGID may be reused by an unrelated process afterwards.
 //
 // The kill strategy is layered to work across container runtimes:
 //
@@ -762,21 +811,31 @@ func closeAll(files ...*os.File) {
 //
 // The caller must have set Setpgid (or Setsid via PTY) on the command so
 // that the child and its descendants share a process group.
-func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
+func (s *ProcessServer) killProcessGroupOnContextDone(ctx context.Context, cmd *exec.Cmd) (stop func()) {
+	var mu sync.Mutex
+	var stopped bool
+	stopCh := make(chan struct{})
+	var stopOnce sync.Once
 	go func() {
 		select {
 		case <-ctx.Done():
-			// Skip the kill if the child has already been reaped by Wait;
-			// its PID/PGID may have been reused by an unrelated process.
-			select {
-			case <-done:
-				return
-			default:
+			mu.Lock()
+			defer mu.Unlock()
+			if !stopped {
+				s.killProcessTree(context.Background(), cmd)
 			}
-			s.killProcessTree(context.Background(), cmd)
-		case <-done:
+		case <-stopCh:
 		}
 	}()
+	return func() {
+		stopOnce.Do(func() {
+			// Taking the lock waits for a termination already in progress.
+			mu.Lock()
+			stopped = true
+			mu.Unlock()
+			close(stopCh)
+		})
+	}
 }
 
 func (s *ProcessServer) killProcessTree(ctx context.Context, cmd *exec.Cmd) {
@@ -798,7 +857,7 @@ func (s *ProcessServer) killProcessTree(ctx context.Context, cmd *exec.Cmd) {
 // silently skipped. In runtimes like gVisor where PGID kill does not
 // propagate, this ensures grandchildren do not outlive the parent.
 func (s *ProcessServer) killDescendants(ctx context.Context, rootPID int) {
-	for _, cpid := range readProcChildren(ctx, rootPID) {
+	for _, cpid := range processmanager.ReadProcChildren(ctx, rootPID) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -810,40 +869,6 @@ func (s *ProcessServer) killDescendants(ctx context.Context, rootPID int) {
 			s.log.V(1).Info("failed to kill descendant process", "pid", cpid, "error", err)
 		}
 	}
-}
-
-// readProcChildren returns the direct children of pid by iterating every
-// thread's /proc/<pid>/task/<tid>/children (a Linux-specific interface
-// enabled by CONFIG_PROC_CHILDREN). Children forked by a non-main thread
-// only appear under that thread's TID, so scanning only the main PID
-// would miss grandchildren of multithreaded parents. Returns nil when the
-// directory is unavailable.
-func readProcChildren(ctx context.Context, pid int) []int {
-	taskDir := fmt.Sprintf("/proc/%d/task", pid)
-	entries, err := os.ReadDir(taskDir)
-	if err != nil {
-		return nil
-	}
-	seen := make(map[int]struct{})
-	var children []int
-	for _, entry := range entries {
-		if ctx.Err() != nil {
-			break
-		}
-		data, err := os.ReadFile(fmt.Sprintf("%s/%s/children", taskDir, entry.Name()))
-		if err != nil {
-			continue
-		}
-		for f := range strings.FieldsSeq(string(data)) {
-			if cpid, err := strconv.Atoi(f); err == nil && cpid > 0 {
-				if _, ok := seen[cpid]; !ok {
-					seen[cpid] = struct{}{}
-					children = append(children, cpid)
-				}
-			}
-		}
-	}
-	return children
 }
 
 // waitForReaders blocks until every output reader in wg has finished. Readers

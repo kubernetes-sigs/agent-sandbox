@@ -16,6 +16,7 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
   - [func WithEnv\(env map\[string\]string\) CallOption](<#WithEnv>)
   - [func WithMaxAttempts\(n int\) CallOption](<#WithMaxAttempts>)
   - [func WithMaxDepth\(n int\) CallOption](<#WithMaxDepth>)
+  - [func WithPTY\(cols, rows uint32\) CallOption](<#WithPTY>)
   - [func WithRecursive\(\) CallOption](<#WithRecursive>)
   - [func WithTimeout\(d time.Duration\) CallOption](<#WithTimeout>)
   - [func WithWorkingDir\(dir string\) CallOption](<#WithWorkingDir>)
@@ -83,9 +84,12 @@ import "sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 - [type ProcessEventType](<#ProcessEventType>)
 - [type ProcessHandle](<#ProcessHandle>)
   - [func \(h \*ProcessHandle\) Close\(\) error](<#ProcessHandle.Close>)
+  - [func \(h \*ProcessHandle\) CloseStdin\(ctx context.Context\) error](<#ProcessHandle.CloseStdin>)
   - [func \(h \*ProcessHandle\) ProcessID\(\) int32](<#ProcessHandle.ProcessID>)
   - [func \(h \*ProcessHandle\) Recv\(\) \(\*ProcessEvent, error\)](<#ProcessHandle.Recv>)
+  - [func \(h \*ProcessHandle\) ResizeTTY\(ctx context.Context, cols, rows uint32\) error](<#ProcessHandle.ResizeTTY>)
   - [func \(h \*ProcessHandle\) SendSignal\(ctx context.Context, signal ProcessSignal\) error](<#ProcessHandle.SendSignal>)
+  - [func \(h \*ProcessHandle\) WriteStdin\(ctx context.Context, data \[\]byte\) error](<#ProcessHandle.WriteStdin>)
 - [type ProcessSignal](<#ProcessSignal>)
 - [type Runtime](<#Runtime>)
 - [type Sandbox](<#Sandbox>)
@@ -257,6 +261,15 @@ func WithMaxDepth(n int) CallOption
 
 WithMaxDepth limits how many directory levels a recursive Files.List descends, where 1 lists only the directory's own entries. Values \<= 0 are ignored. It has no effect without WithRecursive.
 
+<a name="WithPTY"></a>
+#### func [WithPTY](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
+
+```go
+func WithPTY(cols, rows uint32) CallOption
+```
+
+WithPTY allocates a pseudo\-terminal for Commands.Start and merges stderr into stdout. Both dimensions must be in \[1, 65535\]. Run rejects the option; other operations ignore it.
+
 <a name="WithRecursive"></a>
 #### func [WithRecursive](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)
 
@@ -395,7 +408,7 @@ result, err := client.Run(ctx, "cat /etc/hostname", sandbox.WithMaxAttempts(6))
 
 WithMaxAttempts applies only to the legacy runtime. With RuntimeSandboxd, Run issues a single gRPC Execute regardless of the configured attempts.
 
-WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them.
+WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime returns ErrUnsupportedByRuntime rather than silently ignoring them. Run rejects WithPTY with an InvalidArgument error because Execute has no terminal; use Start to run a command on a pseudo\-terminal.
 
 <a name="Commands.Start"></a>
 #### func \(\*Commands\) [Start](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/commands.go>)
@@ -404,7 +417,7 @@ WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime ret
 func (c *Commands) Start(ctx context.Context, command string, opts ...CallOption) (handle *ProcessHandle, err error)
 ```
 
-Start starts a sandboxd command and returns after receiving its process ID. It preserves Run's shell\-string, WithEnv and WithWorkingDir semantics. The caller must Recv through the exit event to io.EOF, or Close the handle. The context and an explicit WithTimeout cover the entire stream; there is no default RequestTimeout. Start never retries and rejects WithMaxAttempts \> 1. The legacy runtime and REST\-only connections return ErrUnsupportedByRuntime.
+Start starts a sandboxd command and returns after receiving its process ID. It preserves Run's shell\-string, WithEnv and WithWorkingDir semantics. Use WithPTY to allocate a pseudo\-terminal. The caller must Recv through the exit event to io.EOF, or Close the handle. The context and an explicit WithTimeout cover the entire stream; there is no default RequestTimeout. Start never retries and rejects WithMaxAttempts \> 1. The legacy runtime and REST\-only connections return ErrUnsupportedByRuntime.
 
 <a name="ConnectionStrategy"></a>
 ### type [ConnectionStrategy](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/strategy.go>)
@@ -1285,6 +1298,15 @@ func (h *ProcessHandle) Close() error
 
 Close cancels only this session and is idempotent. A nil error acknowledges local cleanup, not synchronous remote process termination. For graceful shutdown, send a signal before cancelling the stream instead.
 
+<a name="ProcessHandle.CloseStdin"></a>
+#### func \(\*ProcessHandle\) [CloseStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) CloseStdin(ctx context.Context) error
+```
+
+CloseStdin sends EOF on the process's standard input. The daemon rejects it with FailedPrecondition for a PTY process.
+
 <a name="ProcessHandle.ProcessID"></a>
 #### func \(\*ProcessHandle\) [ProcessID](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
 
@@ -1303,6 +1325,15 @@ func (h *ProcessHandle) Recv() (*ProcessEvent, error)
 
 Recv returns the next stdout, stderr or exit event. An exit event must be followed by io.EOF to confirm that the RPC also completed successfully. Nonzero exit codes are results; RPC and protocol failures remain errors. Only one Recv may be active; a second returns ErrConcurrentRecv without ending the stream. SendSignal and Close may run concurrently with Recv.
 
+<a name="ProcessHandle.ResizeTTY"></a>
+#### func \(\*ProcessHandle\) [ResizeTTY](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) ResizeTTY(ctx context.Context, cols, rows uint32) error
+```
+
+ResizeTTY sets the process's terminal size in columns and rows. Both dimensions must be in \[1, 65535\]. The daemon returns FailedPrecondition for a process without a PTY. The context controls only this RPC.
+
 <a name="ProcessHandle.SendSignal"></a>
 #### func \(\*ProcessHandle\) [SendSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
 
@@ -1311,6 +1342,15 @@ func (h *ProcessHandle) SendSignal(ctx context.Context, signal ProcessSignal) er
 ```
 
 SendSignal sends SIGINT, SIGTERM or SIGKILL to this process group using its original connection. Success means the signal was sent, not that the process exited. Its context controls only this RPC; failure does not cancel Start. Keep receiving events to observe the exit and the final RPC status.
+
+<a name="ProcessHandle.WriteStdin"></a>
+#### func \(\*ProcessHandle\) [WriteStdin](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/process.go>)
+
+```go
+func (h *ProcessHandle) WriteStdin(ctx context.Context, data []byte) error
+```
+
+WriteStdin sends data to the process's standard input in chunks of at most 1 MiB. Calls on one handle are serialized; a call waiting its turn returns when its context is done. It is not retried: if it fails partway, an unknown prefix of data has already been delivered. The context controls only these RPCs and does not cancel Start.
 
 <a name="ProcessSignal"></a>
 ### type [ProcessSignal](<https://github.com/kubernetes-sigs/agent-sandbox/blob/main/clients/go/sandbox/types.go>)

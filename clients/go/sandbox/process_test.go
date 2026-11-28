@@ -15,6 +15,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sync/atomic"
@@ -38,6 +39,8 @@ type streamingProcessService struct {
 	processv1.UnimplementedProcessServiceServer
 	start  func(*processv1.StartRequest, processv1.ProcessService_StartServer) error
 	signal func(context.Context, *processv1.SendSignalRequest) (*processv1.SendSignalResponse, error)
+	stdin  func(context.Context, *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error)
+	resize func(context.Context, *processv1.ResizeTTYRequest) (*processv1.ResizeTTYResponse, error)
 }
 
 func (s *streamingProcessService) Start(req *processv1.StartRequest, stream processv1.ProcessService_StartServer) error {
@@ -46,6 +49,14 @@ func (s *streamingProcessService) Start(req *processv1.StartRequest, stream proc
 
 func (s *streamingProcessService) SendSignal(ctx context.Context, req *processv1.SendSignalRequest) (*processv1.SendSignalResponse, error) {
 	return s.signal(ctx, req)
+}
+
+func (s *streamingProcessService) WriteStdin(ctx context.Context, req *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+	return s.stdin(ctx, req)
+}
+
+func (s *streamingProcessService) ResizeTTY(ctx context.Context, req *processv1.ResizeTTYRequest) (*processv1.ResizeTTYResponse, error) {
+	return s.resize(ctx, req)
 }
 
 func processTestContext(t *testing.T) context.Context {
@@ -163,7 +174,9 @@ func TestCommandsStart_EnvAndWorkingDir(t *testing.T) {
 		WithEnv(map[string]string{"B": "two"}), WithWorkingDir("project"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, handle.Close()) })
-	config := (<-requests).GetConfig()
+	req := <-requests
+	require.Nil(t, req.GetPty())
+	config := req.GetConfig()
 	require.Equal(t, []string{"/bin/sh", "-c", "printf hello"}, config.GetCommand())
 	require.Equal(t, map[string]string{"A": "one", "B": "two"}, config.GetEnvVars())
 	require.Equal(t, "project", config.GetCwd())
@@ -172,6 +185,50 @@ func TestCommandsStart_EnvAndWorkingDir(t *testing.T) {
 		require.ErrorContains(t, err, "invalid env key")
 	}
 	require.Empty(t, requests, "invalid configuration must not reach the service")
+}
+
+func TestProcessHandle_ResizeTTY(t *testing.T) {
+	starts := make(chan *processv1.StartRequest, 1)
+	resizes := make(chan *processv1.ResizeTTYRequest, 1)
+	svc := &streamingProcessService{
+		start: func(req *processv1.StartRequest, stream processv1.ProcessService_StartServer) error {
+			starts <- req
+			if err := stream.Send(processInit()); err != nil {
+				return err
+			}
+			<-stream.Context().Done()
+			return stream.Context().Err()
+		},
+		resize: func(_ context.Context, req *processv1.ResizeTTYRequest) (*processv1.ResizeTTYResponse, error) {
+			resizes <- req
+			return &processv1.ResizeTTYResponse{}, nil
+		},
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	_, err := sb.Commands().Start(ctx, "example", WithPTY(0, 24))
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+	require.Empty(t, starts)
+
+	handle, err := sb.Commands().Start(ctx, "example", WithPTY(80, 24))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+	pty := (<-starts).GetPty()
+	require.Equal(t, uint32(80), pty.GetCols())
+	require.Equal(t, uint32(24), pty.GetRows())
+
+	err = handle.ResizeTTY(ctx, 120, 65536)
+	require.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+	require.Empty(t, resizes)
+	require.NoError(t, handle.ResizeTTY(ctx, 120, 40))
+	resize := <-resizes
+	require.Equal(t, handle.ProcessID(), resize.GetProcessId())
+	require.Equal(t, uint32(120), resize.GetCols())
+	require.Equal(t, uint32(40), resize.GetRows())
+
+	require.NoError(t, handle.Close())
+	require.Error(t, handle.ResizeTTY(ctx, 80, 24))
+	require.Empty(t, resizes)
 }
 
 func TestCommandsStart_InitializationFailures(t *testing.T) {
@@ -539,6 +596,111 @@ func TestProcessHandle_SignalAfterExitOrCloseDoesNotSend(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.Equal(t, want, status.Code(handle.SendSignal(ctx, SignalSIGKILL)))
+			require.Zero(t, calls.Load())
+		})
+	}
+}
+
+func TestProcessHandle_WriteStdinChunksAndCloseStdin(t *testing.T) {
+	requests := make(chan *processv1.WriteStdinRequest, 8)
+	svc := blockingProcessService()
+	svc.stdin = func(_ context.Context, req *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+		requests <- req
+		return &processv1.WriteStdinResponse{}, nil
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "example")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+
+	data := bytes.Repeat([]byte("x"), 2*stdinChunkBytes+5)
+	require.NoError(t, handle.WriteStdin(ctx, data))
+	require.NoError(t, handle.WriteStdin(ctx, nil))
+	for _, want := range []int{stdinChunkBytes, stdinChunkBytes, 5} {
+		req := <-requests
+		require.Equal(t, int32(42), req.GetProcessId())
+		require.Len(t, req.GetInput(), want)
+	}
+	require.NoError(t, handle.CloseStdin(ctx))
+	req := <-requests
+	require.NotNil(t, req.GetEof())
+	require.Empty(t, requests, "an empty write must not send a request")
+}
+
+func TestProcessHandle_WriteStdinFailureKeepsStreamOpen(t *testing.T) {
+	var calls atomic.Int32
+	svc := blockingProcessService()
+	svc.stdin = func(_ context.Context, _ *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+		calls.Add(1)
+		return nil, status.Error(codes.FailedPrecondition, "stdin closed")
+	}
+	svc.signal = func(_ context.Context, _ *processv1.SendSignalRequest) (*processv1.SendSignalResponse, error) {
+		return &processv1.SendSignalResponse{}, nil
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "example")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+	require.Equal(t, codes.FailedPrecondition, status.Code(handle.WriteStdin(ctx, []byte("a"))))
+	require.Equal(t, codes.FailedPrecondition, status.Code(handle.CloseStdin(ctx)))
+	require.Equal(t, int32(2), calls.Load())
+	require.NoError(t, handle.SendSignal(ctx, SignalSIGTERM), "a failed write must not end the session")
+}
+
+func TestProcessHandle_StdinWaitHonorsContext(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	svc := blockingProcessService()
+	svc.stdin = func(_ context.Context, _ *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+		close(started)
+		<-release
+		return &processv1.WriteStdinResponse{}, nil
+	}
+	sb := newStreamingSandbox(t, svc)
+	ctx := processTestContext(t)
+	handle, err := sb.Commands().Start(ctx, "example")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, handle.Close()) })
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- handle.WriteStdin(ctx, []byte("a")) }()
+	<-started
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	require.Equal(t, codes.DeadlineExceeded, status.Code(handle.WriteStdin(waitCtx, []byte("b"))))
+	require.Equal(t, codes.DeadlineExceeded, status.Code(handle.CloseStdin(waitCtx)))
+	close(release)
+	require.NoError(t, <-firstDone)
+}
+
+func TestProcessHandle_StdinAfterExitOrCloseDoesNotSend(t *testing.T) {
+	for _, closed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "exit", true: "close"}[closed], func(t *testing.T) {
+			var calls atomic.Int32
+			svc := blockingProcessService()
+			if !closed {
+				svc = scriptedProcessService([]*processv1.StartResponse{processInit(), processExit(0)}, nil)
+			}
+			svc.stdin = func(_ context.Context, _ *processv1.WriteStdinRequest) (*processv1.WriteStdinResponse, error) {
+				calls.Add(1)
+				return &processv1.WriteStdinResponse{}, nil
+			}
+			sb := newStreamingSandbox(t, svc)
+			ctx := processTestContext(t)
+			handle, err := sb.Commands().Start(ctx, "example")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, handle.Close()) })
+			want := codes.NotFound
+			if closed {
+				require.NoError(t, handle.Close())
+				want = codes.Canceled
+			} else {
+				_, err = handle.Recv()
+				require.NoError(t, err)
+			}
+			require.Equal(t, want, status.Code(handle.WriteStdin(ctx, []byte("a"))))
+			require.Equal(t, want, status.Code(handle.CloseStdin(ctx)))
 			require.Zero(t, calls.Load())
 		})
 	}

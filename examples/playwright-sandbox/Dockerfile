@@ -1,7 +1,10 @@
 FROM debian:12-slim
 
 #----------------------
-# Install all prerequisite packages in one layer
+# Install all prerequisite packages in one layer.
+# libatomic1 is for the Node.js binary bundled in the Playwright Python
+# package. `playwright install --with-deps` runs that binary before it
+# installs any dependency, so the library must already be present.
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
@@ -10,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     git \
+    libatomic1 \
     nodejs \
     npm \
     --no-install-recommends \

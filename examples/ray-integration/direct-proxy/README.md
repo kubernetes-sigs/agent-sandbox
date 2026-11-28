@@ -93,7 +93,7 @@ helm install kuberay-operator kuberay/kuberay-operator --version 1.1.0 --namespa
 Verify the operator is running: `kubectl get po -l app.kubernetes.io/name=kuberay-operator`
 
 ### Step 4: Apply RBAC Permissions for the Ray Workers
-Because the Agent Sandbox Python SDK running inside your Ray Workers needs to communicate with the Kubernetes API to claim and delete sandboxes, we must grant the namespace's default `ServiceAccount` the proper permissions.
+Because the Agent Sandbox Python SDK running inside your Ray Workers needs to communicate with the Kubernetes API to claim and delete sandboxes, the Ray head and worker Pods run as a dedicated `ray-sandbox-manager` `ServiceAccount` that holds those permissions. The sandbox Pods do not use this `ServiceAccount` and mount no API token, so untrusted code cannot create or delete claims.
 
 Apply the RBAC policy located in this directory:
 

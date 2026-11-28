@@ -154,13 +154,34 @@ def _glob_release_yamls(k8s_dir="k8s"):
     ]
 
 
+def build_release_create_cmd(tag, asset_paths, notes_file=None):
+    """Builds the `gh release create` command for a draft release.
+
+    When a curated notes file is provided (which already includes New
+    Contributors and the Full Changelog link), omit `--generate-notes` so
+    GitHub does not append a duplicate raw `## What's Changed` PR list.
+    """
+    cmd = ["gh", "release", "create", tag, *asset_paths]
+    if notes_file:
+        cmd.extend(["--notes-file", notes_file])
+    else:
+        cmd.append("--generate-notes")
+    cmd.extend([
+        "--title", tag,
+        "--verify-tag",
+        "--draft",
+        "--repo", "kubernetes-sigs/agent-sandbox",
+    ])
+    return cmd
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate release manifests.")
     parser.add_argument("--tag", required=True, help="The git tag for the release.")
     parser.add_argument("--publish", action="store_true", help="Publish the release to GitHub.")
     parser.add_argument(
         "--model",
-        default=os.getenv("GEMINI_MODEL", "gemini-3.7-flash"),
+        default=os.getenv("GEMINI_MODEL", "gemini-4-neon"),
         help="Gemini model to use for generating release notes.",
     )
     args = parser.parse_args()
@@ -306,23 +327,11 @@ def main():
                 print("⚠️ Falling back to default GitHub notes on release creation.")
                 notes_file = None
 
-            cmd = [
-                "gh", "release", "create", tag,
-                core_path,
-                extensions_path,
-                all_in_one_path,
-            ]
-
-            if notes_file:
-                cmd.extend(["--notes-file", notes_file])
-
-            cmd.extend([
-                "--generate-notes",
-                "--title", tag,
-                "--verify-tag",
-                "--draft",
-                "--repo", "kubernetes-sigs/agent-sandbox",
-            ])
+            cmd = build_release_create_cmd(
+                tag,
+                [core_path, extensions_path, all_in_one_path],
+                notes_file=notes_file,
+            )
 
             run_command(cmd)
 

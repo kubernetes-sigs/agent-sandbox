@@ -13,12 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-
 export GEMINI_API_KEY=`cat /tokens/gemini`
 
 set -x
-
 
 # protection against running gemini on an unpause
 # if gemini-promt.txt dont run gemini else create and run it
@@ -30,5 +27,4 @@ else
   gemini -y  -p  "$AGENT_PROMPT" > gemini-output.txt || true
 fi
 
-#/usr/local/bin/code-server-entrypoint
-/usr/bin/code-server --auth=none --bind-addr=0.0.0.0:13337
+exec /usr/bin/code-server --auth=password --bind-addr=0.0.0.0:13337

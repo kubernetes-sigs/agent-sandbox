@@ -9972,3 +9972,291 @@ func TestWarmPoolTTLTimelinePreservesClaimedSandbox(t *testing.T) {
 	// pool's owner reference. A real cluster is needed to verify their removal.
 	require.Equal(t, 2, countPoolOwnedSandboxes(ctx, t, c, pool.Namespace, sandboxcontrollers.NameHash(pool.Name), pool.UID))
 }
+
+// TestSandboxClaimReplacesDeletedSandbox: status still names a deleted
+// cold-created Sandbox and no warm member is available. The claim must clear
+// the stale binding (including serviceFQDN) and create a replacement instead
+// of staying Ready with the dead Sandbox's values.
+func TestSandboxClaimReplacesDeletedSandbox(t *testing.T) {
+	scheme := newScheme(t)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-claim", Namespace: "default", UID: "claim-uid"},
+		Spec:       extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{
+				Name:        "test-claim",
+				PodIPs:      []string{"10.0.0.1"},
+				ServiceFQDN: "test-claim.default.svc.cluster.local",
+			},
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "SandboxReady",
+				LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+	_, err := reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	var sandbox sandboxv1beta1.Sandbox
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "test-claim"}, &sandbox),
+		"expected a replacement Sandbox for the deleted one")
+
+	var updated extensionsv1beta1.SandboxClaim
+	require.NoError(t, fakeClient.Get(ctx, req.NamespacedName, &updated))
+	require.Equal(t, "test-claim", updated.Status.SandboxStatus.Name)
+	require.Empty(t, updated.Status.SandboxStatus.ServiceFQDN, "stale serviceFQDN must not survive the deleted Sandbox")
+	require.Empty(t, updated.Status.SandboxStatus.PodIPs, "stale podIPs must not survive the deleted Sandbox")
+
+	ready := meta.FindStatusCondition(updated.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status, "claim must not stay Ready=True for a deleted Sandbox")
+}
+
+// TestSandboxClaimReplacesDeletedAdoptedSandbox: adopted binding recorded in
+// both the assigned-sandbox annotation and status. After that Sandbox is
+// deleted with an empty warm pool, both references clear and a cold
+// replacement is created.
+func TestSandboxClaimReplacesDeletedAdoptedSandbox(t *testing.T) {
+	scheme := newScheme(t)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "warm-sb-1",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{
+				Name:        "warm-sb-1",
+				ServiceFQDN: "warm-sb-1.default.svc.cluster.local",
+			},
+			Conditions: []metav1.Condition{{
+				Type:               string(sandboxv1beta1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "SandboxReady",
+				LastTransitionTime: metav1.Now(),
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(template, warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+	_, err := reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+
+	var sandbox sandboxv1beta1.Sandbox
+	require.NoError(t, fakeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "test-claim"}, &sandbox),
+		"expected a cold replacement after the adopted Sandbox was deleted")
+
+	var updated extensionsv1beta1.SandboxClaim
+	require.NoError(t, fakeClient.Get(ctx, req.NamespacedName, &updated))
+	require.Equal(t, "test-claim", updated.Status.SandboxStatus.Name)
+	require.Empty(t, updated.Status.SandboxStatus.ServiceFQDN, "stale serviceFQDN must not survive the deleted Sandbox")
+	require.NotContains(t, updated.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation,
+		"annotation pointing at the deleted Sandbox must be removed")
+}
+
+// TestSandboxClaimClearsDeletedAdoptedSandboxWithoutReplacement: adopted
+// Sandbox deleted and no template to create a replacement. The stale binding
+// must still be cleared.
+func TestSandboxClaimClearsDeletedAdoptedSandboxWithoutReplacement(t *testing.T) {
+	scheme := newScheme(t)
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "missing-template"}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "warm-sb-1",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{
+				Name:        "warm-sb-1",
+				PodIPs:      []string{"10.0.0.1"},
+				ServiceFQDN: "warm-sb-1.default.svc.cluster.local",
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(warmPool, claim).
+		WithStatusSubresource(claim).
+		Build()
+	reconciler := &SandboxClaimReconciler{
+		Client:           fakeClient,
+		Scheme:           scheme,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+	_, _ = reconciler.Reconcile(ctx, req)
+
+	var replacement sandboxv1beta1.Sandbox
+	err := fakeClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "test-claim"}, &replacement)
+	require.True(t, k8errors.IsNotFound(err), "no replacement can be created without a template")
+
+	var updated extensionsv1beta1.SandboxClaim
+	require.NoError(t, fakeClient.Get(ctx, req.NamespacedName, &updated))
+	require.NotContains(t, updated.Annotations, extensionsv1beta1.AssignedSandboxNameAnnotation,
+		"annotation pointing at the deleted Sandbox must be removed")
+	require.Empty(t, updated.Status.SandboxStatus.Name, "stale name must not survive the deleted Sandbox")
+	require.Empty(t, updated.Status.SandboxStatus.ServiceFQDN, "stale serviceFQDN must not survive the deleted Sandbox")
+	require.Empty(t, updated.Status.SandboxStatus.PodIPs, "stale podIPs must not survive the deleted Sandbox")
+}
+
+// TestSandboxClaimStatusBindingCacheLag: cached Get reports NotFound for the
+// status-named Sandbox while the API server still has it. Confirm via
+// APIReader and keep the binding instead of clearing and creating a duplicate.
+func TestSandboxClaimStatusBindingCacheLag(t *testing.T) {
+	scheme := newScheme(t)
+	template := &extensionsv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+		Spec: extensionsv1beta1.SandboxTemplateSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test-container", Image: "test-image"}}},
+		}}},
+	}
+	warmPool := &extensionsv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-warmpool", Namespace: "default"},
+		Spec:       extensionsv1beta1.SandboxWarmPoolSpec{TemplateRef: extensionsv1beta1.SandboxTemplateRef{Name: "test-template"}},
+	}
+	claim := &extensionsv1beta1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "default",
+			UID:       "claim-uid",
+			Annotations: map[string]string{
+				extensionsv1beta1.AssignedSandboxNameAnnotation: "warm-sb-1",
+			},
+		},
+		Spec: extensionsv1beta1.SandboxClaimSpec{WarmPoolRef: extensionsv1beta1.SandboxWarmPoolRef{Name: "test-warmpool"}},
+		Status: extensionsv1beta1.SandboxClaimStatus{
+			SandboxStatus: extensionsv1beta1.SandboxStatus{
+				Name:        "warm-sb-1",
+				ServiceFQDN: "warm-sb-1.default.svc.cluster.local",
+			},
+		},
+	}
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "warm-sb-1",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: extensionsv1beta1.GroupVersion.String(),
+				Kind:       extensionsv1beta1.SandboxClaimKind,
+				Name:       claim.Name,
+				UID:        claim.UID,
+				Controller: new(true),
+			}},
+		},
+	}
+
+	cachedKey := types.NamespacedName{Namespace: "default", Name: "warm-sb-1"}
+	lagActive := true
+	cachedClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(template, warmPool, claim, sandbox).
+		WithStatusSubresource(claim).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, inner client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if lagActive && key == cachedKey {
+					if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+						return k8errors.NewNotFound(schema.GroupResource{Group: sandboxv1beta1.GroupVersion.Group, Resource: "sandboxes"}, key.Name)
+					}
+				}
+				return inner.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(claim, sandbox).
+		Build()
+
+	reconciler := &SandboxClaimReconciler{
+		Client:           cachedClient,
+		APIReader:        apiReader,
+		Scheme:           scheme,
+		WarmSandboxQueue: queue.NewSimpleSandboxQueue(),
+		Recorder:         events.NewFakeRecorder(10),
+		Tracer:           asmetrics.NewNoOp(),
+	}
+
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: "default"}}
+	_, err := reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+	lagActive = false
+
+	var bound sandboxv1beta1.Sandbox
+	require.NoError(t, cachedClient.Get(ctx, cachedKey, &bound))
+	require.Equal(t, sandboxv1beta1.SandboxLaunchTypeWarm, bound.Labels[sandboxv1beta1.SandboxLaunchTypeLabel],
+		"Sandbox confirmed via APIReader must stay bound")
+
+	var replacement sandboxv1beta1.Sandbox
+	err = cachedClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "test-claim"}, &replacement)
+	require.True(t, k8errors.IsNotFound(err), "must not create a replacement while the bound Sandbox is alive")
+
+	var updated extensionsv1beta1.SandboxClaim
+	require.NoError(t, cachedClient.Get(ctx, req.NamespacedName, &updated))
+	require.Equal(t, "warm-sb-1", updated.Status.SandboxStatus.Name)
+	require.Equal(t, "warm-sb-1", updated.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation])
+}

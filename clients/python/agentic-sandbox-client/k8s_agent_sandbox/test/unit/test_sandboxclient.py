@@ -116,6 +116,17 @@ class TestSandboxClient(unittest.TestCase):
             # Ensure delete_sandbox_claim is called to cleanup orphan claim on failure
             self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
 
+    @patch('uuid.uuid4')
+    def test_create_sandbox_interrupt_cleanup(self, mock_uuid):
+        mock_uuid.return_value.hex = '1234abcd'
+        self.mock_k8s_helper.wait_for_claim_ready.side_effect = KeyboardInterrupt()
+
+        with patch.object(self.client, '_create_claim'):
+            with self.assertRaises(KeyboardInterrupt):
+                self.client.create_sandbox("test-warmpool", "test-namespace")
+
+        self.mock_k8s_helper.delete_sandbox_claim.assert_called_once_with("sandbox-claim-1234abcd", "test-namespace")
+
     def test_get_sandbox_existing_active(self):
         mock_sandbox = MagicMock()
         mock_sandbox.is_active = True
@@ -489,6 +500,16 @@ class TestSandboxClient(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.client.create_sandbox("test-warmpool", labels={"a" * 64: "value"})
         self.assertIn("exceeds max length", str(ctx.exception))
+
+    def test_validate_labels_rejects_trailing_newline(self):
+        # A regex "$" also matches before a trailing newline.
+        for labels in (
+            {"agent": "value\n"},
+            {"agent\n": "value"},
+            {"app.kubernetes.io\n/name": "value"},
+        ):
+            with self.subTest(labels=labels), self.assertRaises(ValueError):
+                validate_labels(labels)
 
     def test_validate_labels_accepts_prefixed_key(self):
         validate_labels({"app.kubernetes.io/name": "my-app"})
@@ -1003,6 +1024,7 @@ class TestConnectionConfigValidation(unittest.TestCase):
             "ns|sh",           # pipe attempt
             "ns&rm",           # ampersand attempt
             "",                # empty namespace
+            "default\n",       # trailing newline
         ]
         for ns in invalid_namespaces:
             with self.assertRaises(ValidationError):

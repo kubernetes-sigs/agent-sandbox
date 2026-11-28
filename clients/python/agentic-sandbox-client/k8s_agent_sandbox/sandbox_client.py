@@ -269,7 +269,7 @@ class SandboxClient(Generic[T]):
                 k8s_helper=self.k8s_helper,
                 **({"file_config": self.file_config} if self.file_config is not None else {}),
             )
-        except Exception:
+        except BaseException:
             if cleanup_generated:
                 # Preserve legacy rollback even if the create response was lost.
                 delete_kwargs = {"expected_uid": claim_uid} if claim_uid else {}

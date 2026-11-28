@@ -205,7 +205,7 @@ class SandboxClaimEnvVar(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
-        if not _ENV_VAR_NAME_RE.match(v):
+        if not _ENV_VAR_NAME_RE.fullmatch(v):
             raise ValueError(
                 "Invalid environment variable name: must consist of alphabetic "
                 "characters, digits, '_', '-', or '.', and must not start with a digit"
@@ -262,7 +262,7 @@ class SandboxLocalTunnelConnectionConfig(BaseModel):
     @field_validator("router_namespace")
     @classmethod
     def validate_namespace(cls, v: str) -> str:
-        if not re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", v):
+        if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", v):
             raise ValueError("Invalid Kubernetes namespace name format")
         return v
 

@@ -14,7 +14,7 @@
     "@kubernetes/client-node": "^2.0.0",
     "@types/node": "^22.0.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.12"
   },
   "dependencies": {
     "agentic-sandbox-client": "file:../../../../clients/typescript/agentic-sandbox-client"

@@ -599,8 +599,13 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				"sandbox", sb.Name,
 				"age", age.Round(time.Second))
 			r.exp().ExpectDeletion(poolKey, sb.UID)
-			if err := r.Delete(ctx, &sb); err != nil {
+			if err := r.deletePoolSandbox(ctx, &sb); err != nil {
 				r.exp().DeletionObserved(poolKey, sb.UID)
+				if k8serrors.IsConflict(err) {
+					logger.V(4).Info("Skipping delete of sandbox changed since it was listed", "sandbox", sb.Name)
+					inactiveReplicas++
+					continue
+				}
 				logger.Error(err, "Failed to delete stuck sandbox", "sandbox", sb.Name)
 				allErrors = errors.Join(allErrors, err)
 				// The sandbox still exists; keep counting it as active so the
@@ -790,7 +795,7 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 			_, deleteErr := slowStartBatch(ctx, int(toDeleteCount), 1, func(idx int) error {
 				sb := &activeSandboxes[idx]
 				r.exp().ExpectDeletion(poolKey, sb.UID)
-				err := r.Delete(ctx, sb)
+				err := r.deletePoolSandbox(ctx, sb)
 				if err == nil {
 					return nil
 				}
@@ -805,6 +810,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 				if k8serrors.IsNotFound(err) {
 					// Not an error for the batch: the desired outcome
 					// (sandbox gone) already holds.
+					return nil
+				}
+				if k8serrors.IsConflict(err) {
+					logger.V(4).Info("Skipping delete of sandbox changed since it was listed", "sandbox", sb.Name)
 					return nil
 				}
 				logger.Error(err, "Failed to delete sandbox", "sandbox", sb.Name, "namespace", sb.Namespace)
@@ -1079,12 +1088,23 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 				// Only pool-owned sandboxes get deletion expectations: the
 				// watch handler can only map owned delete events back to the
 				// pool, and only owned sandboxes count against the target.
+				// Orphans use a plain delete, because a SandboxClaim only
+				// adopts Sandboxes controlled by a SandboxWarmPool.
+				var err error
 				if isControlledByPool {
 					r.exp().ExpectDeletion(poolKey, sb.UID)
+					err = r.deletePoolSandbox(ctx, &sb)
+				} else {
+					err = r.Delete(ctx, &sb)
 				}
-				if err := r.Delete(ctx, &sb); err != nil {
+				if err != nil {
 					if isControlledByPool {
 						r.exp().DeletionObserved(poolKey, sb.UID)
+						if k8serrors.IsConflict(err) {
+							logger.V(4).Info("Skipping delete of sandbox changed since it was listed", "sandbox", sb.Name)
+							inactiveReplicas++
+							continue
+						}
 					}
 					logger.Error(err, "Failed to delete stale sandbox", "sandbox", sb.Name)
 					allErrors = errors.Join(allErrors, err)
@@ -1253,6 +1273,15 @@ func (r *SandboxWarmPoolReconciler) createPoolSandbox(ctx context.Context, warmP
 
 	logger.Info("Created new pool sandbox", "sandbox", sandbox.Name, "poolName", warmPool.Name)
 	return nil
+}
+
+// deletePoolSandbox deletes a pool-owned Sandbox only if the API server still
+// holds the version this pass decided on. A SandboxClaim can adopt the Sandbox
+// after that read, and the precondition then fails the DELETE with a Conflict
+// instead of deleting the claim's workload. Callers skip a Conflict instead of
+// returning it, because the watch event for the newer version requeues the pool.
+func (r *SandboxWarmPoolReconciler) deletePoolSandbox(ctx context.Context, sb *sandboxv1beta1.Sandbox) error {
+	return r.Delete(ctx, sb, client.Preconditions{UID: &sb.UID, ResourceVersion: &sb.ResourceVersion})
 }
 
 // updateStatus updates the status of the SandboxWarmPool if it has changed.

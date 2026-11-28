@@ -145,7 +145,8 @@ The runner talks to `sandboxd` through
 higher-level [`clients/go/sandbox`](../../clients/go/sandbox) package, and the
 reason is specific to this example.
 
-The high-level client's only hook for environment variables is `Options.Env`,
+When this example was written, the high-level client's only hook for
+environment variables was `Options.Env`,
 which injects them into the `SandboxClaim`. That puts the token in the pod spec
 for the life of the sandbox — readable by anyone with `get pod`, and inherited
 by every later run in that box. That is exactly the anti-pattern this example
@@ -158,20 +159,21 @@ the other manifest-driven examples here.
 
 ### Suggested follow-up upstream
 
-A `WithEnv(map[string]string)` call option on the high-level client's
-`Commands.Run` — per-call, landing in `ProcessConfig.env_vars` rather than in
-the claim — would let the high-level client express this pattern too, and would
-make this example's drop to the generated stubs unnecessary. It looks like a
-small, self-contained addition; happy to send it as a separate PR if
-maintainers want it.
+This follow-up has landed. The high-level client now has a
+`WithEnv(map[string]string)` call option for `Run` and `Commands.Start`. The
+option applies to one call and sets `ProcessConfig.env_vars`, not the claim.
+The runner predates the option and still uses the generated stubs.
 
 ## Why `sandboxd` is built locally, not pulled
 
-`sandboxd` has no released image. As of this PR the latest release (`v1.0.2`)
-ships manifests only, and `registry.k8s.io/agent-sandbox/sandboxd` has no
-`v1.0.2` tag. The only published builds are on the k8s staging registry
+`sandboxd` had no released image when this example was written. The latest
+release at the time (`v1.0.2`) shipped manifests only, and
+`registry.k8s.io/agent-sandbox/sandboxd` had no `v1.0.2` tag. The only
+published builds were on the k8s staging registry
 (`us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandboxd`),
-where the moving `latest-main` tag sits alongside per-commit tags.
+where the moving `latest-main` tag sits alongside per-commit tags. Release
+images now exist at `registry.k8s.io/agent-sandbox/sandboxd`, starting with
+`v1.0.10`. This example still builds `sandboxd` locally.
 
 An earlier version of this example pinned a per-commit staging tag by digest.
 That is not good enough: the staging registry is periodically
@@ -186,8 +188,8 @@ under the tag `sandboxd:execution-scoped-token-local`; `sandbox.yaml`
 references that exact tag with `imagePullPolicy: Never`, so it is never
 pulled from any registry. This costs one Docker build in the happy path, in
 exchange for the example still working years from now regardless of what the
-staging registry has garbage-collected. **When a release image exists, this
-should switch to that release tag** — it is the one piece of this example
+staging registry has garbage-collected. **Now that a release image exists,
+this should switch to that release tag** — it is the one piece of this example
 that is expected to change.
 
 The gateway image is a normal published release tag, pinned by digest —
@@ -272,8 +274,8 @@ holds them is not this one.
   token, which this example does not implement (see "The token travels in
   cleartext for this demo," below).
 - **Pin images by digest in production** (the gateway image already is;
-  `sandboxd` has no release image yet — see "Why `sandboxd` is built
-  locally", above — build and digest-pin your own once one exists).
+  for `sandboxd`, digest-pin a release image instead of the locally built tag
+  this example uses — see "Why `sandboxd` is built locally", above).
 - **Pair this with a `default-deny` egress policy** for the namespace, so a pod
   that is missing the label fails closed rather than open. See
   [composing-sandbox-nw-policies](../composing-sandbox-nw-policies).

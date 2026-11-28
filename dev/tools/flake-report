@@ -20,7 +20,8 @@ as flaky (intermittent), consistently failing, or an infrastructure failure
 (the job died before tests ran), and prints a markdown report. Red runs with
 no failing testcase are resolved against the run's GCS artifacts first:
 aborted runs, stale-PR clone failures, and pre-test PR breakage (compile,
-vet, mypy gates) are reported separately instead of being counted as infra.
+vet, mypy, and generated-file gates, or an image build the PR itself broke) are
+reported separately instead of being counted as infra.
 Per-test failures are not counted when the run was aborted, when a whole
 suite failed at once (broken fixture), or when the failing PR modified the
 test's own sources; such PR-local failures are listed but never filed. A test
@@ -31,7 +32,10 @@ Postsubmit and periodic jobs that write no junit (the image push job, the
 kops benchmark periodics) have no per-test rows, so their health only shows
 in the job-level Overall cell. When every recent run of such a job failed,
 the report lists the job as consistently failing and, with --update-issues,
-files a `kind/failing-test` issue that names the first failing commit. When
+files a `kind/failing-test` issue that names the first failing commit. A
+presubmit tab whose pre-test gates fail on at least three distinct PRs with no
+passing run in between is listed the same way, because that is a broken main or
+dependency, not one PR's own breakage. When
 such a job fails intermittently, the report lists it as flaky and files a
 `kind/flake` issue, because a flaky publish job can skip images a release
 promotes. The report skips junit-less presubmit tabs (lint, autogen): a red
@@ -51,6 +55,7 @@ Read-only preview:
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -75,6 +80,10 @@ RECENT_RUNS = 3
 # Inside a breakage window failures outnumber passes at least this many to
 # one. The few passes are PRs that carry the fix while main is still broken.
 BREAKAGE_FAIL_RATIO = 3
+
+# Pre-test failures on this many distinct PRs, with no run passing between
+# them, point at a broken main or dependency, not at one PR's own gate.
+PRETEST_OUTAGE_PRS = 3
 
 # Rows like "<job>.Overall" and "<job>.Pod" describe the prow job itself, not
 # an individual test.
@@ -203,13 +212,17 @@ def make_artifact_fetcher(gcs_query, build_id):
     def fetch(name):
         """Returns the parsed artifact, None when the run has no such file.
 
-        Raises FetchUnavailable when the server could not be reached, so a
-        network blip is never mistaken for a missing artifact.
+        JSON artifacts are parsed; a .txt artifact (build-log.txt) is
+        returned as text. Raises FetchUnavailable when the server could not
+        be reached, so a network blip is never mistaken for a missing
+        artifact.
         """
         base = resolve()
         if not base:
             return None
         try:
+            if name.endswith(".txt"):
+                return fetch_text(f"{base}/{name}")
             return fetch_json(f"{base}/{name}")
         except FetchUnavailable:
             raise
@@ -234,7 +247,52 @@ def clone_merge_conflict(record):
     return False
 
 
-def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
+# Error lines printed by junit-less gates when the PR's own change fails
+# them. dev/ci/presubmits/test-autogen-up-to-date writes no junit at all, so
+# a PR with stale generated files goes red in the same shape as a pod that
+# died, and only the build log tells them apart. analyze_tab classifies red
+# runs only on a tab that has a test row, so the markers matter when TestGrid
+# serves such a row for the gate's tab. A tab with only its job-level Overall
+# and Pod rows is skipped before any run is classified.
+PRETEST_GATE_MARKERS = ("ERROR: Generated files out-of-date",)
+
+# dev/tools/push-images names the images it could not build. The e2e lanes
+# build every image before any test runs, so a PR that breaks one image's
+# Dockerfile or requirements also goes red with no junit.
+IMAGE_BUILD_FAILURE = re.compile(r"ERROR: failed to build \d+ of \d+ image\(s\): \[([^\]]*)\]")
+
+
+# push-images prints each image's Dockerfile path and then its name before it
+# builds the image.
+IMAGE_DOCKERFILE = re.compile(
+    r"--- Found Dockerfile at: (\S+)\s+--- Service Name: (\S+)")
+
+
+def failed_image_dirs(build_log):
+    """Returns the Dockerfile directory of each image a push-images build
+    failure line lists, or None for an image the log does not locate."""
+    match = IMAGE_BUILD_FAILURE.search(build_log or "")
+    if not match:
+        return []
+    dirs = {name: os.path.normpath(os.path.dirname(dockerfile))
+            for dockerfile, name in IMAGE_DOCKERFILE.findall(build_log)}
+    return [dirs.get(name) for name in re.findall(r"'([^']+)'", match.group(1))]
+
+
+def pr_touches_images(files, image_dirs):
+    """True when the PR changed a file under the Dockerfile directory of every
+    failed image. This ties the build failure to the PR's own change; a
+    failure in an image the PR did not touch (a registry or module-proxy
+    error) stays infrastructure. The controller image's Dockerfile sits at the
+    repo root, where every PR changes a file, so it never counts as touched."""
+    return bool(image_dirs) and all(
+        image_dir not in (None, ".")
+        and any(path.startswith(image_dir + "/") for path in files)
+        for image_dir in image_dirs)
+
+
+def classify_red_run(has_failing_test, has_test_results, fetch_artifact,
+                     changed_files=None):
     """Classifies why one red Overall column went red.
 
     A red Overall cell with no failing junit testcase is not necessarily an
@@ -245,8 +303,11 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
       "aborted"         -- run was cancelled, not a failure at all
       "test_failure"    -- a junit testcase failed; the per-test rows tell
                            the story
-      "pretest_failure" -- junit exists with zero failing testcases: the PR
-                           broke a pre-test gate, author-actionable
+      "pretest_failure" -- junit exists with zero failing testcases, a
+                           junit-less gate printed one of
+                           PRETEST_GATE_MARKERS, or the image build failed
+                           only on images the PR itself changed: the PR
+                           broke a pre-test step, author-actionable
       "clone_failure"   -- the PR no longer merges cleanly onto main: a
                            merge conflict verified in clone-records.json
                            (rebase needed)
@@ -256,9 +317,11 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
                            verdict is possible; counted nowhere
 
     fetch_artifact(name) returns the parsed JSON artifact from the run's GCS
-    dir, None when the run has no such file, and raises FetchUnavailable
-    when the server could not be reached; only artifacts needed for the
-    verdict are fetched.
+    dir (the raw text for build-log.txt), None when the run has no such
+    file, and raises FetchUnavailable when the server could not be reached;
+    only artifacts needed for the verdict are fetched. changed_files() returns
+    the run's PR file paths, or None when unknown; it is only called when the
+    build log reports an image build failure.
     """
     try:
         finished = fetch_artifact("finished.json") or {}
@@ -285,8 +348,22 @@ def classify_red_run(has_failing_test, has_test_results, fetch_artifact):
             # The clone failed without a merge conflict (network error,
             # unreachable ref): that is infrastructure, not a stale PR.
             return "infra"
-    # Without clone-records.json the cause of a junit-less red run cannot
-    # be proven benign, so it stays in the infra count.
+    # A junit-less gate (autogen) writes no failing test to show that the
+    # PR's own change failed it; its build log ends with the gate's error line.
+    try:
+        build_log = fetch_artifact("build-log.txt")
+    except FetchUnavailable:
+        return "unknown"
+    if build_log and any(marker in build_log for marker in PRETEST_GATE_MARKERS):
+        return "pretest_failure"
+    image_dirs = failed_image_dirs(build_log)
+    if image_dirs and changed_files is not None:
+        files = changed_files()
+        if files and pr_touches_images(files, image_dirs):
+            return "pretest_failure"
+    # Without a gate marker, a PR-caused image build failure, or
+    # clone-records.json, the cause of a junit-less red run cannot be proven
+    # benign, so it stays in the infra count.
     return "infra"
 
 
@@ -428,6 +505,28 @@ def is_recovered_breakage(fail_cols, pass_cols, recent):
     passes_inside = sum(1 for i in pass_cols if first < i < last)
     dense = len(fail_cols) >= BREAKAGE_FAIL_RATIO * passes_inside
     return dense and bool(recent) and recent[0] in PASS_STATUSES
+
+
+def find_pretest_outage(cols, passed, col_class, pr_of):
+    """Returns (cols, prs, cleared) for the newest pre-test outage, or None.
+
+    cols are run columns, newest first, and passed(i) says whether run i
+    passed. An outage is a stretch of pre-test failures with no passing run
+    between them that spans at least PRETEST_OUTAGE_PRS distinct PRs. It has
+    cleared when a newer run passed.
+    """
+    group, cleared = [], False
+    for i in [*cols, None]:
+        if i is not None and not passed(i):
+            if col_class.get(i) == "pretest_failure":
+                group.append(i)
+            continue
+        prs = {pr_of(c) for c in group} - {None}
+        if len(prs) >= PRETEST_OUTAGE_PRS:
+            return group, prs, cleared
+        group = []
+        cleared = cleared or i is not None
+    return None
 
 
 def is_presubmit_tab(gcs_query, tab):
@@ -598,28 +697,6 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
     # a red run is indistinguishable from a legitimately failing PR.
     # A column whose artifacts could not be fetched is unknown: it might be
     # an aborted run, so it is kept out of every count rather than guessed.
-    col_class = {}
-    aborted_cols = set()
-    unknown_cols = set()
-    if test_rows:
-        for i in range(ncols):
-            red = overall is not None and cell(overall, i) in FAIL_STATUSES
-            has_fail = failing_in(i)
-            if red:
-                col_class[i] = classify_red_run(has_fail, ran_in(i), fetcher(i))
-                if col_class[i] == "aborted":
-                    aborted_cols.add(i)
-                elif col_class[i] == "unknown":
-                    unknown_cols.add(i)
-            elif has_fail:
-                try:
-                    finished = fetcher(i)("finished.json") or {}
-                except FetchUnavailable:
-                    unknown_cols.add(i)
-                    continue
-                if (finished.get("result") or "").upper() == "ABORTED":
-                    aborted_cols.add(i)
-
     col_pr = {}
 
     def pr_of(i):
@@ -632,6 +709,35 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
             except FetchUnavailable:
                 col_pr[i] = None
         return col_pr[i]
+
+    def changed_files_of(i):
+        """Changed files of a column's PR, None when unknown."""
+        pr = pr_of(i)
+        return pr_files(pr) if pr_files is not None and pr else None
+
+    col_class = {}
+    aborted_cols = set()
+    unknown_cols = set()
+    if test_rows:
+        for i in range(ncols):
+            red = overall is not None and cell(overall, i) in FAIL_STATUSES
+            has_fail = failing_in(i)
+            if red:
+                col_class[i] = classify_red_run(
+                    has_fail, ran_in(i), fetcher(i),
+                    changed_files=lambda i=i: changed_files_of(i))
+                if col_class[i] == "aborted":
+                    aborted_cols.add(i)
+                elif col_class[i] == "unknown":
+                    unknown_cols.add(i)
+            elif has_fail:
+                try:
+                    finished = fetcher(i)("finished.json") or {}
+                except FetchUnavailable:
+                    unknown_cols.add(i)
+                    continue
+                if (finished.get("result") or "").upper() == "ABORTED":
+                    aborted_cols.add(i)
 
     # Columns where a large fraction of tests failed at once are a broken PR
     # or an environment-wide breakage, not per-test flakiness; exclude them
@@ -817,6 +923,30 @@ def analyze_tab(dashboard, tab, window, pr_files=None):
             "job_history": job_history,
         }
 
+    # Pre-test failures on one PR are that PR's own breakage. The same
+    # failure on several PRs with no pass in between is a broken main or
+    # dependency, so it is reported like a broken job.
+    outage = find_pretest_outage(
+        range(ncols), lambda i: cell(overall, i) in PASS_STATUSES,
+        col_class, pr_of) if col_class else None
+    if outage:
+        group, prs, cleared = outage
+        first, last = group[-1], group[0]
+        finding = {
+            "job": "recovered" if cleared else "breakage",
+            "tab": tab,
+            "test": f"{tab}.Overall",
+            "short": tab,
+            "fails": len(group),
+            "pretest_prs": len(prs),
+            "distinct_changelists": len(prs),
+            "first_failure_ts": timestamps[first] if first < len(timestamps) else 0,
+            "first_failing_commit": "",
+            "last_failure_ts": timestamps[last] if last < len(timestamps) else 0,
+            "job_history": job_history,
+        }
+        (recovered if cleared else consistent).append(finding)
+
     # A junit-less postsubmit or periodic job has no test rows for the
     # per-test rules above to see, so the Overall row decides whether it is
     # broken or flaky. Presubmit tabs stay out: a red lint or autogen run is
@@ -868,7 +998,13 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
     lines += ["", "## Consistently failing (not flakes — investigate as breakage)"]
     if consistent:
         for f in consistent:
-            if f.get("job"):
+            if f.get("pretest_prs"):
+                lines.append(
+                    f"- `{f['tab']}` (job): {f['fails']} pre-test failure(s) "
+                    f"across {f['pretest_prs']} PRs since "
+                    f"{fmt_ts(f['first_failure_ts'])}, no run passed in "
+                    f"between — see {f['job_history']}")
+            elif f.get("job"):
                 lines.append(
                     f"- `{f['tab']}` (job): every run since "
                     f"{fmt_ts(f['first_failure_ts'])} failed ({f['fails']} run(s), "
@@ -924,7 +1060,7 @@ def render_report(dashboard, flaky, consistent, infra, window, pr_local=(),
         if i.get("pretest_failures"):
             lines.append(
                 f"- {i['tab']}: {i['pretest_failures']} red run(s) were "
-                f"pre-test PR breakage (compile/vet/mypy gates — "
+                f"pre-test PR breakage (compile/vet/mypy/autogen gates, own image build — "
                 f"author-actionable)")
         if i.get("unknown_runs"):
             lines.append(
@@ -1069,10 +1205,25 @@ or triage manually per [docs/testing.md](https://github.com/kubernetes-sigs/agen
 
 
 def issue_body_for_job(b, marker, repo):
-    """Issue text for a junit-less job whose recent runs all failed."""
-    sha = b["first_failing_commit"]
-    commit = (f"[`{sha[:12]}`](https://github.com/{repo}/commit/{sha})"
-              if sha else "unknown")
+    """Issue text for a job that is broken on every recent run, or whose
+    pre-test gates failed on several unrelated PRs in a row."""
+    if b.get("pretest_prs"):
+        first = f"{fmt_ts(b['first_failure_ts'])} ({b['pretest_prs']} distinct PRs)"
+        why = f"""Pre-test failures (compile, vet, mypy, or collection) hit {b['pretest_prs']}
+unrelated PRs with no passing run in between, so `main` or a dependency is
+broken, not one PR. Read a failed run's build log in the job history for the
+cause."""
+    else:
+        sha = b["first_failing_commit"]
+        commit = (f"[`{sha[:12]}`](https://github.com/{repo}/commit/{sha})"
+                  if sha else "unknown")
+        first = f"{fmt_ts(b['first_failure_ts'])} at commit {commit}"
+        why = """This job writes no per-test results, so every recent run failing means the
+job itself is broken, not one test. For a build or publish job that means
+`main` is broken for what it produces; start from the first failing commit.
+For the kops benchmark periodics it can also be cluster bring-up or GCP
+quota, so read the newest failed run's build log in the job history before
+bisecting."""
     return f"""{marker}
 **Job failing on every recent run, detected by [`dev/tools/flake-report`](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/dev/tools/flake-report).**
 
@@ -1080,16 +1231,11 @@ def issue_body_for_job(b, marker, repo):
 |---|---|
 | Job | `{b['tab']}` |
 | Consecutive failing runs | {b['fails']} |
-| First failing run | {fmt_ts(b['first_failure_ts'])} at commit {commit} |
+| First failing run | {first} |
 | Last failure | {fmt_ts(b['last_failure_ts'])} |
 | Job history | {b['job_history']} |
 
-This job writes no per-test results, so every recent run failing means the
-job itself is broken, not one test. For a build or publish job that means
-`main` is broken for what it produces; start from the first failing commit.
-For the kops benchmark periodics it can also be cluster bring-up or GCP
-quota, so read the newest failed run's build log in the job history before
-bisecting.
+{why}
 
 Close this issue once the job is green again. The report does not close it.
 
@@ -1204,8 +1350,8 @@ Job history: {i['job_history']}
 
 These are not fixed by editing tests; look at `dev/ci/shared/runner.py` retries,
 image prepulls, or job resources. Aborted runs, stale-PR clone failures, and
-PRs that break a pre-test gate (compile/vet/mypy) are already excluded from
-this count.
+PRs that break a pre-test step (compile/vet/mypy/generated files, or an image
+they changed) are already excluded from this count.
 
 /kind flake
 <!-- last-reported-failure={i['last_failure_ts']} -->

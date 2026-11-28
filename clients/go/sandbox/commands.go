@@ -26,6 +26,7 @@ import (
 	"github.com/go-logr/logr"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	processv1 "sigs.k8s.io/agent-sandbox/packages/sandboxd/spec/process/v1"
@@ -60,6 +61,8 @@ type Commands struct {
 //
 // WithEnv and WithWorkingDir apply only to RuntimeSandboxd; the legacy runtime
 // returns ErrUnsupportedByRuntime rather than silently ignoring them.
+// Run rejects WithPTY with an InvalidArgument error because Execute has no
+// terminal; use Start to run a command on a pseudo-terminal.
 func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) (*ExecutionResult, error) {
 	defer c.trackOp()()
 	co := resolveCallOpts(opts)
@@ -69,6 +72,13 @@ func (c *Commands) Run(ctx context.Context, command string, opts ...CallOption) 
 	ctx = withLifecycleSpan(ctx, c.lifecycleCtx())
 	ctx, span := startSpan(ctx, c.tracer, c.svcName, "run", AttrCommandExecutable.String(commandExecutable(command)))
 	defer func() { span.End() }()
+
+	if co.pty != nil {
+		err := fmt.Errorf("%s: run: %w", c.errPrefix(),
+			status.Error(codes.InvalidArgument, "WithPTY is not supported by Run; use Commands.Start"))
+		recordError(span, err)
+		return nil, err
+	}
 
 	if c.runtime == RuntimeSandboxd {
 		// The legacy path gets RequestTimeout from SendRequest. Apply it
@@ -164,6 +174,7 @@ func (c *Commands) runSandboxd(ctx context.Context, span trace.Span, command str
 
 // Start starts a sandboxd command and returns after receiving its process ID.
 // It preserves Run's shell-string, WithEnv and WithWorkingDir semantics.
+// Use WithPTY to allocate a pseudo-terminal.
 // The caller must Recv through the exit event to io.EOF, or Close the handle.
 // The context and an explicit WithTimeout cover the entire stream; there is
 // no default RequestTimeout. Start never retries and rejects WithMaxAttempts > 1.
@@ -197,13 +208,18 @@ func (c *Commands) Start(ctx context.Context, command string, opts ...CallOption
 	if err != nil {
 		return nil, fmt.Errorf("%s: start: %w", prefix, err)
 	}
+	if co.pty != nil {
+		if err := validatePTYSize(co.pty.Cols, co.pty.Rows); err != nil {
+			return nil, fmt.Errorf("%s: start: %w", prefix, err)
+		}
+	}
 	conn, err := c.connector.GRPCConn()
 	if err != nil {
 		return nil, fmt.Errorf("%s: start: %w", prefix, err)
 	}
 	client := processv1.NewProcessServiceClient(conn)
 	// Commit the sent request so service-config retries cannot start it twice.
-	stream, err := client.Start(ctx, &processv1.StartRequest{Config: config}, grpc.MaxRetryRPCBufferSize(0))
+	stream, err := client.Start(ctx, &processv1.StartRequest{Config: config, Pty: co.pty}, grpc.MaxRetryRPCBufferSize(0))
 	if err != nil {
 		return nil, fmt.Errorf("%s: start: %w", prefix, err)
 	}
@@ -219,7 +235,7 @@ func (c *Commands) Start(ctx context.Context, command string, opts ...CallOption
 	}
 	handle = &ProcessHandle{
 		stream: stream, client: client, pid: init.GetInit().GetProcessId(),
-		ctx: ctx, prefix: prefix, span: span,
+		ctx: ctx, prefix: prefix, span: span, writeSem: make(chan struct{}, 1),
 		cleanup: func() { cancel(); done(); span.End() },
 	}
 	// Cancellation and ClientConn.Close finish the stream even without Recv.

@@ -43,11 +43,11 @@ return-after-absence.
 ## Prerequisites
 
 - A Kubernetes cluster with a default StorageClass (kind and GKE both work
-  as-is). Nodes must be **amd64** (the Hermes image is amd64-only).
+  as-is). The Hermes image runs on amd64 and arm64 nodes.
 - agent-sandbox with extensions installed:
 
 ```sh
-VERSION=v0.5.3
+VERSION=v1.0.12
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${VERSION}/sandbox-with-extensions.yaml
 kubectl -n agent-sandbox-system rollout status deployment --timeout=180s
 ```
@@ -341,8 +341,6 @@ which hardens every piece shown here:
 - The walkthrough uses `kubectl port-forward`, which is **not supported for
   gVisor-sandboxed pods** — that's why this demo pins runc. Under GKE
   Sandbox, front the agents with an in-cluster gateway instead.
-- The Hermes image is amd64-only; on arm64 Macs use a kind-on-colima/amd64
-  setup or a cloud cluster.
 - Shared platform credentials (dashboard/API) are the warm-pool trade-off:
   pod env exists before the user does, so the same credentials reach every
   tenant sandbox. Generate them per install (step 1) and never commit

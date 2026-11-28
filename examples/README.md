@@ -23,7 +23,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**demo-cilium-egress**](./demo-cilium-egress): A demo of enforcing sandbox egress rules with Cilium network policies.
 - [**docker-sbx**](./docker-sbx): An example of running Docker Sandboxes (the `sbx` CLI) inside an Agent Sandbox, giving each coding agent its own microVM, network policy, and Docker daemon on a KVM-enabled node.
 - [**envd-sandbox**](./envd-sandbox): An example of running E2B's envd daemon as the container entrypoint, providing an E2B-compatible REST and gRPC API for filesystem, process execution, and metrics.
-- [**firecracker-sandbox**](./firecracker-sandbox): An example of running a sandbox on Kata Containers with the Firecracker VMM (`kata-fc`) plus an envd-compatible runtime that matches the E2B data-plane contract.
+- [**firecracker-sandbox**](./firecracker-sandbox): An example of running a sandbox on Kata Containers with the Firecracker VMM (`kata-fc`) plus a small Python HTTP runtime for command execution and file transfer.
 - [**gemini-cu-sandbox**](./gemini-cu-sandbox): An example of a Python runtime sandbox for Gemini Computer Use Agent.
 - [**gke-swap**](./gke-swap): Demonstrates how to configure GKE node memory swap with dedicated Local SSDs to drastically increase Chrome pod density from 120 to 200 pods per node.
 - [**gpu-l4-snapshot-sandbox**](./gpu-l4-snapshot-sandbox): Snapshot an L4 GPU sandbox on GKE, suspend it to release the GPU, and resume it with its process and GPU memory restored.
@@ -35,6 +35,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**hyperlight-sandbox**](./hyperlight-sandbox): An example of running the python runtime sandbox in a Hyperlight micro-VM, with a Unikraft guest kernel and no guest agent, in an ordinary pod that gets `/dev/kvm` from a device plugin, resumed from a saved snapshot in tens of milliseconds so warm pools refill quickly.
 - [**irsa-simulation-localstack**](./irsa-simulation-localstack): Simulating IAM Roles for Service Accounts (IRSA) credential flows for sandboxes using LocalStack.
 - [**jupyterlab**](./jupyterlab): An example of running JupyterLab on Agent-Sandbox.
+- [**jupyterlab-base-path**](./jupyterlab-base-path): An example of serving JupyterLab through the sandbox-router under a browser path prefix, so the browser needs no wildcard host or custom headers.
 - [**kata-aks**](./kata-aks): Full end-to-end example — Python agent, Go client, and sandbox-router — on AKS with Kata Containers (Hyper-V) VM isolation and the warm-pool/claim pattern.
 - [**kata-aks-sandbox**](./kata-aks-sandbox): An example of running a sandbox with Kata Containers hardware-virtualized isolation on AKS, using the built-in Pod Sandboxing feature.
 - [**kata-gke-sandbox**](./kata-gke-sandbox): An example of running a sandbox with Kata Containers hardware-virtualized isolation on GKE.
@@ -42,11 +43,11 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**kueue-agent-sandbox**](./kueue-agent-sandbox): An example of admission-controlling sandbox workloads with Kueue.
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**latebind-storage-gke-sandbox**](./latebind-storage-gke-sandbox): Late-binding persistent storage for sandboxes on GKE using the managed add-on APIs.
-- [**managed-agents**](./managed-agents): Run managed agent platforms' self-hosted work items — bash and file tool calls — inside Sandbox pods, with warm-pool claims, lease hand-off, and idle suspend/resume.
+- [**managed-agents**](./managed-agents): Run managed agent platforms' self-hosted work — bash and file tool calls — inside Sandbox pods, with warm-pool claims and idle suspend/resume. Bridges: Claude Managed Agents (leased work queue) and the OpenAI Agents API (self-hosted `codex exec-server`).
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
+- [**multi-cluster-fleet**](./multi-cluster-fleet): An example of pre-warming `SandboxWarmPool` capacity across many clusters from one fleet spec, where a `fleet-member` in each cluster reconciles its share of the plan from a shared object-storage bucket.
 - [**n8n-mcp**](./n8n-mcp): An example of connecting n8n workflows to sandboxes through the MCP server integration.
-- [**nemoclaw-sandbox**](./nemoclaw-sandbox): A tutorial on setting up a testing environment for AI agents using NemoClaw, OpenClaw, and OpenShell within a Kubernetes Agent Sandbox.
 - [**network-policy-api-sandbox**](./network-policy-api-sandbox): Cluster-wide default deny and FQDN egress allowlists for sandboxes with the official Kubernetes `ClusterNetworkPolicy` API, on top of the template-managed `NetworkPolicy`, enforced by kube-network-policies (the SIG Network reference implementation).
 - [**nitro-eks-sandbox**](./nitro-eks-sandbox): An example of running VS Code in a sandbox isolated by an AWS Nitro Sandbox on Amazon EKS Auto Mode, with its own VM and kernel, reached with `kubectl port-forward`.
 - [**nono-sandbox**](./nono-sandbox): An example of running nono inside an Agent Sandbox, with fine-grained filesystem isolation, network filtering, credential brokering, and ephemeral per-tool micro-sandboxes.
@@ -65,10 +66,12 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**quickstart**](./quickstart): An end-to-end getting-started walkthrough — controller install, warm pool, router, and SDK test client — plus gVisor and Kata isolation variants.
 - [**ray-integration**](./ray-integration): An example of integrating Ray with agent-sandbox for secure Proxy Execution during Agentic Reinforcement Learning (RL) training.
 - [**recall-memory**](./recall-memory): An example of agent memory that outlives the sandbox. Each sandbox trades its projected service account token for a short-lived key to a memory server, scoped to its SandboxClaim.
+- [**sandbox-headlamp-plugin**](./sandbox-headlamp-plugin): Inspect Agent Sandbox resources in Headlamp with a read-only plugin.
 - [**sandbox-ksa**](./sandbox-ksa): Examples of a sandbox with a service account, namespace, and a basic sandbox.
+- [**sandbox-router-grpc**](./sandbox-router-grpc): An example of calling sandboxd's gRPC API through the sandbox-router with sandboxd's generated Go client, over plaintext h2c or over TLS through Envoy Gateway.
 - [**sandbox-tilt-demo**](./sandbox-tilt-demo): A Tilt configuration that builds the controller from source, installs the Sandbox CRD and controller on a kind cluster, and runs a demo Sandbox to watch a pod be created and torn down.
 - [**sandboxd-sandbox**](./sandboxd-sandbox): An example of running the sandboxd runtime daemon inside a sandbox for command execution and file I/O.
-- [**sandboxed-tools**](./sandboxed-tools): An example of an agent executing its tools inside a sandbox via the Go SDK.
+- [**sandboxed-tools**](./sandboxed-tools): An example of an agent that keeps its loop outside the sandbox and executes its tools inside a `Sandbox` pod through the Kubernetes `pods/exec` API.
 - [**urunc-sandbox**](./urunc-sandbox): An example of running a sandbox on urunc, an OCI runtime for unikernels and single-application kernels, enabling extremely small sandboxes with various guest kernels.
 - [**vscode-sandbox**](./vscode-sandbox): An example of running VSCode in a sandbox.
 - [**warmpool-quickstart**](./warmpool-quickstart): Reference YAML for the three extension CRDs — SandboxTemplate, SandboxWarmPool, and SandboxClaim — including a secure template and an LLM-scoped network policy example.

@@ -93,7 +93,7 @@ support enabled), a direct dial to 8000 from a non-router pod times out.
 
 1. A Kubernetes cluster with the [Agent Sandbox controller](../../README.md#installation) installed (core CRDs only).
 2. `kubectl`, `docker`, `envsubst`, `go` (module-local — no separate install needed inside this repo), and Python 3.10+ on the host.
-3. This example deploys its own `sandbox-router` — the scoped-token authorizer isn't in any published router image yet, so `run-test-kind.sh` builds one from source.
+3. This example deploys its own `sandbox-router`. Released `sandbox-router-go` images from `v1.0.0` on include the scoped-token authorizer, but `run-test-kind.sh` still builds the router from source.
 
 ## Run it (local cluster, e.g. Kind)
 
@@ -135,10 +135,9 @@ the router deployment, and the shared secret).
 - **Secret rotation.** One static HMAC secret, matching how `sandbox-router`
   started with a single TLS cert before hot-reload was added. Multi-key
   verification during rotation is a follow-up.
-- **A published router image with this authorizer.** The `scoped-token`
-  authorizer is on `main` (#1243) but not in any released
-  `sandbox-router-go` image yet, so `run-test-kind.sh` builds one from
-  source. Once a release carries it, the build step can be dropped.
+- **Running a released router image.** The `scoped-token` authorizer
+  (#1243) ships in released `sandbox-router-go` images from `v1.0.0` on,
+  but `run-test-kind.sh` still builds the router from source.
 
 ## References
 

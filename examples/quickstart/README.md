@@ -18,7 +18,7 @@ This guide walks you through setting up Agent Sandbox from scratch. By default i
 - Docker (20.10+)
 - kubectl (1.28+)
 - [KIND](https://kind.sigs.k8s.io/) (0.20+) — default; or [minikube](https://minikube.sigs.k8s.io/) if using Kata Containers or gVisor on minikube
-- Python 3.9+
+- Python 3.11+
 - Git
 
 ---
@@ -32,10 +32,10 @@ cd agent-sandbox/
 
 ### 1.1 Choose Sandbox and Router Images
 
-Set the image references you will use throughout this quickstart:
+Set the image references you will use throughout this quickstart. `registry.k8s.io` publishes the router image under release tags only, so `ROUTER_IMAGE` names a release:
 
 ```bash
-export ROUTER_IMAGE=sandbox-router:local
+export ROUTER_IMAGE=registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.12
 export SANDBOX_NAMESPACE=agent-sandbox-demo
 export SANDBOX_TEMPLATE_NAME=python-runtime-template
 ```
@@ -143,47 +143,25 @@ Performance comparison:
 - **With WarmPool**: Sub-2 second allocation (pod already running)
 - **Without WarmPool**: 10-30 seconds (image pull + container/VM startup)
 
-## Step 6: Build and Deploy Router
+## Step 6: Deploy Router
 
-The Sandbox Router proxies HTTP requests from the SDK to sandbox pods. See the [Sandbox Router README](../../clients/python/agentic-sandbox-client/sandbox-router/README.md) for full details.
+The Sandbox Router proxies HTTP requests from the SDK to sandbox pods. See the [Sandbox Router README](../../sandbox-router/README.md) for full details.
 
-Build the router image locally:
-
-```bash
-cd clients/python/agentic-sandbox-client/sandbox-router
-docker build -t ${ROUTER_IMAGE} .
-cd ../../../../
-```
-
-The repository includes a ready-made router manifest at [`sandbox-router/sandbox_router.yaml`](../../clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml). We'll deploy it in the next step after loading the image into the cluster.
-
-## Step 7: Load Router Image and Deploy Router
-
-### 7.1 Load the Router Image into the Cluster
-
-**KIND (default / gVisor):**
+The repository includes ready-made router manifests at [`sandbox-router/deploy/`](../../sandbox-router/deploy/). They create the router in the `agent-sandbox-system` namespace and reference a `latest` image tag, so replace that tag with `ROUTER_IMAGE` when you apply them:
 
 ```bash
-kind load docker-image ${ROUTER_IMAGE} --name agent-sandbox-demo
+kubectl kustomize sandbox-router/deploy/ \
+    | sed "s|registry.k8s.io/agent-sandbox/sandbox-router-go:latest|${ROUTER_IMAGE}|" \
+    | kubectl apply -f -
+
+kubectl rollout status deployment/sandbox-router -n agent-sandbox-system --timeout=120s
 ```
 
-**minikube (Kata Containers):**
+The manifests leave the router at its default `--authz-mode=allow-all`, which accepts requests without credentials. Use this mode only for local testing.
 
-```bash
-minikube image load ${ROUTER_IMAGE} -p agent-sandbox-kata
-```
+## Step 7: Verify WarmPool and Router
 
-### 7.2 Deploy the Router
-
-Open `clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml` and uncomment the `imagePullPolicy: Never` line, then apply:
-
-```bash
-envsubst '${ROUTER_IMAGE}' \
-    < clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml \
-    | kubectl apply -n agent-sandbox-system -f -
-```
-
-### 7.3 Verify WarmPool
+### 7.1 Verify WarmPool
 
 ```bash
 # Check WarmPool status
@@ -204,7 +182,7 @@ python-warmpool-abcde     1/1     Running   0          15s
 python-warmpool-fghij     1/1     Running   0          15s
 ```
 
-### 7.4 Verify Router Deployment
+### 7.2 Verify Router Deployment
 
 ```bash
 # Check router pods

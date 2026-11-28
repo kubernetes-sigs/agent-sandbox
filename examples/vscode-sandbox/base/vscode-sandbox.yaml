@@ -15,9 +15,10 @@ spec:
             requests:
               cpu: "1000m"
               memory: "2Gi"
-              ephemeral-storage: "4Gi"
+              ephemeral-storage: "8Gi"
             limits:
-              ephemeral-storage: "4Gi"
+              # envbuilder stores image layers and build caches in the container filesystem.
+              ephemeral-storage: "8Gi"
           env:
             # URL to the repository where the .devcontainer folder we want to load is located
             # for a branch append "#refs/heads/branch-name"

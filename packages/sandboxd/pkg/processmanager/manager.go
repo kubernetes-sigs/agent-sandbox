@@ -26,12 +26,18 @@ type ProcessRegistry struct {
 	mu         sync.RWMutex
 	processes  map[int32]*ManagedProcess
 	pidCounter atomic.Int32
+
+	// childMu guards children, which counts the OS PIDs that StartChild
+	// started and WaitChild has not yet collected.
+	childMu  sync.Mutex
+	children map[int]int
 }
 
 // NewProcessRegistry returns an empty registry.
 func NewProcessRegistry() *ProcessRegistry {
 	return &ProcessRegistry{
 		processes: make(map[int32]*ManagedProcess),
+		children:  make(map[int]int),
 	}
 }
 

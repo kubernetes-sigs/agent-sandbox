@@ -1,7 +1,26 @@
+# VSCode and Gemini CLI in a Sandbox
+
+## Prerequisites
+
+- A Kubernetes cluster with a default StorageClass for the workspace PVC and
+  enough node storage for envbuilder's image layers and build caches. The manifest
+  sets both the ephemeral storage request and limit to 8Gi.
+- The Agent Sandbox controller installed. See the [installation guide](../../README.md#installation).
+- `kubectl` configured to use that cluster.
+
+Run the commands below from this example's directory:
+
+```shell
+cd examples/vscode-sandbox
+```
+
+The commands assume the sandbox is in the `default` namespace. The Router runs
+in `agent-sandbox-system`.
 
 ## Create a Sandbox with VSCode and Gemini CLI
 
-Apply the sandbox manifest with PVC
+Select the runtime before creating the Sandbox. Use `base` for the standard
+runtime, or apply one of the isolation overlays below instead of `base`:
 
 ```
 kubectl apply -k base
@@ -14,7 +33,7 @@ Verify sandbox and pod are running:
 kubectl get sandbox
 kubectl get pod sandbox-example
 
-kubectl wait --for=condition=Ready sandbox sandbox-example
+kubectl wait --for=condition=Ready sandbox/sandbox-example --timeout=5m
 ```
 
 ### Harden Agent Sandbox isolation using gVisor (Optional)
@@ -72,23 +91,29 @@ isolation features of CloudHypervisor + MSHV.
 The scripts directory contains shell scripts for provisioning, applying, and
 cleaning up Azure Kubernetes cluster resources.
 
-From the [./scripts](./scripts/) directory, execute the following.
+From this example's directory, create the cluster and deploy the example:
 
 ```shell
-./az-provision.sh
-# either bake a new sandbox-router image or use the pre-baked ghcr.io/devigned/sandbox-router:latest
-./apply.sh --sandbox-router-image ghcr.io/devigned/sandbox-router:latest
+./scripts/az-provision.sh
+./scripts/apply.sh --sandbox-router-image registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.12
+export KUBECONFIG="$PWD/scripts/kubeconfig"
 ```
 
-The `./apply.sh` script applies resources needed for ease of use, but at the heart
-of it, it's simply the following:
+The helper installs the Agent Sandbox controllers and the Go Sandbox Router,
+then applies `overlays/kata-mshv`. It uses `scripts/kubeconfig`, which
+`az-provision.sh` generates. Pass `--kubeconfig FILE` to choose a different
+cluster and export that same file as `KUBECONFIG` for subsequent `kubectl`
+commands. Set `VERSION` to use a different controller release.
+
+If you already have an AKS cluster with Pod Sandboxing enabled and the controller
+installed, apply the overlay directly and deploy the Router as described in
+[Access through the Sandbox Router](#option-b-access-through-the-sandbox-router):
 
 ```shell
-kubectl apply -k ./overlays/kata-mshv
+kubectl apply -k overlays/kata-mshv
 ```
 
-Which applies the overlay that includes the runtime class for Kata hypervisor
-isolation (MSHV).
+The overlay selects the Kata RuntimeClass for MSHV isolation:
 
 ```yaml
 runtimeClassName: kata-vm-isolation
@@ -100,7 +125,7 @@ Once you are done with your cluster, run the following command to deprovision
 all of the resources and delete the local kubeconfig file.
 
 ```shell
-./az-cleanup.sh
+./scripts/az-cleanup.sh
 ```
 
 ### Harden Agent Sandbox isolation using Kata Containers (Optional)
@@ -155,101 +180,94 @@ $ kubectl get pods -o jsonpath=$'{range .items[*]}{.metadata.name}: {.spec.runti
 
 The `sandbox-example` pod runs an initialization process (`envbuilder`) that clones the repository and installs dependencies before starting VSCode. You must wait for this process to finish.
 
-Watch the logs until you see `HTTP server listening`:
+Watch the logs for `HTTP server listening` and `Authentication is enabled`:
 
 ```bash
 # Wait for output similar to:
 $ kubectl logs -f sandbox-example
 
-[2025-...] info  Wrote default config file to /root/.config/code-server/config.yaml
-[2025-...] info  HTTP server listening on [http://0.0.0.0:13337/](http://0.0.0.0:13337/)
-[2025-...] info    - Authentication is disabled
+[2025-...] info  HTTP server listening on http://0.0.0.0:13337/
+[2025-...] info    - Authentication is enabled
 ```
 
-### 2. Connect to VSCode
+### 2. Get the VSCode password
 
-#### Option A: Simple Access (Standard Runtime)
+`code-server` generates a password on first startup. Read it from the running Pod:
 
-If you are running the standard example (without gVisor or Kata), you can port-forward directly to the pod.
+```shell
+kubectl exec sandbox-example -- sed -n 's/^password: //p' /root/.config/code-server/config.yaml
+```
+
+### 3. Connect to VSCode
+
+Enter the generated password when the browser opens the `code-server` login page.
+
+#### Option A: Direct Pod Access
+
+If your runtime supports direct pod port-forwarding, connect to the pod:
 
 ```bash
 # Forward local port 13337 to the pod
 kubectl port-forward pod/sandbox-example 13337:13337
 ```
 
-Open your browser to: http://localhost:13337 or `<machine-dns>`:13337
+Open your browser to http://localhost:13337.
 
 
-#### Option B: Secure Access (gVisor / Kata / Production)
+#### Option B: Access through the Sandbox Router
 
-If you are using gVisor or Kata Containers, direct pod port-forwarding isn't compatible. In this case, use the Sandbox Router.
+gVisor does not support direct pod port-forwarding. Use the Go Sandbox Router
+when direct access is unavailable. The Router forwards HTTP and WebSocket
+traffic to the sandbox pod.
 
-**Prerequisites:**
+If you deployed with `scripts/apply.sh`, skip the installation commands below.
+For a manual installation, run them from `examples/vscode-sandbox`. If you
+started from the repository root, first run `cd examples/vscode-sandbox`.
 
-1.  **Deploy the Router (Required for All Modes):**
-    ```bash
-    # Deploys the Deployment, Service, ServiceAccount, and RBAC
-    kubectl apply -f ../../sandbox-router/deploy/serviceaccount.yaml \
-      -f ../../sandbox-router/deploy/rbac.yaml \
-      -f ../../sandbox-router/deploy/deployment.yaml \
-      -f ../../sandbox-router/deploy/service.yaml
-    ```
+```shell
+kubectl apply -f ../../sandbox-router/deploy/serviceaccount.yaml \
+  -f ../../sandbox-router/deploy/rbac.yaml \
+  -f ../../sandbox-router/deploy/service.yaml
 
-2.  **Deploy the Gateway (Production Only):**
-    If you need external access via a public IP, apply the Gateway configuration.
-    This requires the Gateway API CRDs and a Gateway API controller
-    (e.g. Istio, GKE built-in, Envoy Gateway) — see the
-    [sandbox-router README](../../clients/python/agentic-sandbox-client/sandbox-router/README.md) for prerequisites.
-    Edit `spec.gatewayClassName` in the YAML to match your environment — see the
-    comments in `gateway.yaml` for options.
-    ```bash
-    # (GKE-only) Deploys Gateway, HTTPRoute, and HealthCheckPolicy
-    kubectl apply -f ../../sandbox-router/deploy/examples/gateway-gke.yaml
-    ```
-
-**Via Gateway**
-
-1. Get the Gateway IP:
-```bash
-export GATEWAY_IP=$(kubectl get gateway external-http-gateway -n agent-sandbox-system -o jsonpath='{.status.addresses[0].value}')
-echo "Gateway IP: $GATEWAY_IP"
+kubectl set image --local -f ../../sandbox-router/deploy/deployment.yaml \
+  sandbox-router=registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.12 \
+  -o yaml | kubectl apply -f -
 ```
 
-2. **Connect: (Curl Test):** You must inject the routing headers. Use `curl` to test:
-```bash
-curl -v -H "X-Sandbox-ID: sandbox-example" \
-        -H "X-Sandbox-Port: 13337" \
-        http://$GATEWAY_IP
+Wait for the Router Deployment before connecting:
+
+```shell
+kubectl -n agent-sandbox-system rollout status deployment/sandbox-router --timeout=180s
 ```
 
-3.  **Access via Browser (UI):**
-    To load the VSCode interface, your browser must send the routing headers.
-    
-    1.  Install a browser extension that can set request headers on HTTP and
-        WebSocket upgrade requests. It sees your traffic, so pick one you trust.
-    2.  Configure the extension to send, only to the Gateway IP:
-        * `X-Sandbox-ID`: `sandbox-example`
-        * `X-Sandbox-Port`: `13337`
-    3.  Navigate to **`http://<GATEWAY_IP>`** (replace with the IP from step 1).
+##### Via Router Port-Forward Tunnel
 
-    You should see the VSCode interface load immediately.
+Port-forward to the Router Service:
 
-**Via Router Port-Forward Tunnel**
-
-For local development, port-forward to the **Router Service** (do not port-forward to the pod directly, as it's not compatible with secure runtimes like gVisor/kata).
-
-1. Start the Tunnel: 
-```bash 
-# Forward local 8080 to the Router Service
-kubectl port-forward svc/sandbox-router-svc 8080:8080 -n agent-sandbox-system
+```shell
+kubectl -n agent-sandbox-system port-forward svc/sandbox-router-svc 8080:8080
 ```
 
-- **Access via Curl:** You need to send the correct headers to route traffic to your specific sandbox. Via curl, set:
+Check that the Router redirects you to the login page:
+
 ```bash
 curl -v -H "X-Sandbox-ID: sandbox-example" \
         -H "X-Sandbox-Port: 13337" \
         http://localhost:8080
 ```
+
+For browser access, use a browser extension you trust to set the same routing
+headers on HTTP and WebSocket upgrade requests to `http://localhost:8080`. Open
+that address and sign in.
+
+##### Via an HTTPS Gateway
+
+For external access, configure an [HTTPS Gateway listener](https://gateway-api.sigs.k8s.io/guides/user-guides/tls/)
+with a certificate for your hostname. Before routing external traffic to
+`sandbox-router-svc` on port `8080`, configure
+[Router authorization](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/sandbox-router/README.md#authorization)
+to limit access to the intended Sandbox and port. Scope the browser extension's
+routing headers to the HTTPS address, then open that address and sign in.
 
 #### Option C: Desktop VS Code (Optional)
 
@@ -263,17 +281,6 @@ desktop VS Code instead of `code-server`, attach it to the pod with `kubectl`:
 3. Open the `/workspaces` folder.
 
 See [Attach to a container in a Kubernetes cluster](https://code.visualstudio.com/docs/devcontainers/attach-container#_attach-to-a-container-in-a-kubernetes-cluster).
-
-#### Getting VSCode password
-
-If the logs indicate authentication is enabled, retrieve the password.
-In a separate terminal connect to the pod and get the password.
-
-```
-kubectl exec  sandbox-example --  cat /root/.config/code-server/config.yaml 
-```
-
-Use the password and connect to vscode.
 
 ## Use gemini-cli
 

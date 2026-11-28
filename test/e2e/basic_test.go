@@ -42,6 +42,10 @@ func simpleSandbox(ns string) *sandboxv1beta1.Sandbox {
 				},
 			},
 		},
+		ObjectMeta: sandboxv1beta1.PodMetadata{
+			Annotations: map[string]string{"test-anno-key": "val-1"},
+			Labels:      map[string]string{"test-label-key": "val-2"},
+		},
 	}
 	return sandboxObj
 }
@@ -64,7 +68,11 @@ func TestSimpleSandbox(t *testing.T) {
 	pod := &corev1.Pod{}
 	pod.Name = sandboxObj.Name
 	pod.Namespace = ns.Name
-	tc.MustExist(pod)
+	// A real API server must keep the template metadata instead of pruning it.
+	tc.MustMatchPredicates(pod,
+		predicates.HasAnnotation("test-anno-key", "val-1"),
+		predicates.HasLabel("test-label-key", "val-2"),
+	)
 
 	service := &corev1.Service{}
 	service.Name = sandboxObj.Name

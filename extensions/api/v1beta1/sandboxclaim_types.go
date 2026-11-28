@@ -116,6 +116,15 @@ type SandboxClaimSpec struct {
 	// +required
 	WarmPoolRef SandboxWarmPoolRef `json:"warmPoolRef"`
 
+	// warmPoolMaxRetries is the maximum number of retries after the initial
+	// write conflicts while recording or completing a warm pool adoption.
+	// Each write has its own retry limit.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +kubebuilder:default=5
+	// +optional
+	WarmPoolMaxRetries *int32 `json:"warmPoolMaxRetries,omitempty"`
+
 	// lifecycle defines when and how the SandboxClaim should be shut down.
 	// +optional
 	Lifecycle *Lifecycle `json:"lifecycle,omitempty"`

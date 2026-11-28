@@ -2629,6 +2629,9 @@ var schemaYAML = typed.YAMLObject(`types:
           elementType:
             namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.PersistentVolumeClaimTemplate
           elementRelationship: atomic
+    - name: warmPoolMaxRetries
+      type:
+        scalar: numeric
     - name: warmPoolRef
       type:
         namedType: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolRef

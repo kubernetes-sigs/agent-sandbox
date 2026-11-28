@@ -168,6 +168,7 @@ func TestComputeConditions(t *testing.T) {
 	// 63-character limit) must map to Ready=False/InvalidConfiguration rather than
 	// the generic ReconcilerError.
 	invalidNameErr := invalidServiceNameError("too-long-service-name")
+	forbiddenErr := k8serrors.NewForbidden(corev1.Resource("pods"), "p", errors.New("exceeded quota"))
 
 	testCases := []struct {
 		name               string
@@ -823,6 +824,16 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
 			},
 		},
+		{
+			name:    "28. Pod create refused by quota reports FailedCreate",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			err:     fmt.Errorf("create pod: %w", markCreate(forbiddenErr)),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "FailedCreate", Message: "Error seen: create pod: " + forbiddenErr.Error()},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -898,6 +909,64 @@ func TestReconcileInvalidServiceNameSurfacesConditionWithoutRequeue(t *testing.T
 	require.Equal(t, sandboxv1beta1.SandboxReasonInvalidConfiguration, ready.Reason)
 	require.Contains(t, ready.Message, "must be no more than 63 characters")
 	require.Empty(t, updated.Status.Service, "a rejected Service create must not be reflected in status.Service")
+}
+
+// A refused Pod create reads Ready=False/FailedCreate and is retried. A Forbidden
+// on a Pod get is missing controller RBAC, and a terminating namespace is teardown,
+// so both stay ReconcilerError.
+func TestReconcileRefusedPodCreateReason(t *testing.T) {
+	pods := corev1.Resource("pods")
+	testCases := []struct {
+		name       string
+		onCreate   error
+		onGet      error
+		wantReason string
+		wantErr    bool
+	}{
+		{name: "quota", onCreate: k8serrors.NewForbidden(pods, "sb", errors.New("exceeded quota")), wantReason: sandboxv1beta1.SandboxReasonFailedCreate, wantErr: true},
+		{name: "transient", onCreate: k8serrors.NewServerTimeout(pods, "create", 1), wantReason: sandboxv1beta1.SandboxReasonReconcilerError, wantErr: true},
+		{name: "get forbidden", onGet: k8serrors.NewForbidden(pods, "sb", errors.New("rbac")), wantReason: sandboxv1beta1.SandboxReasonReconcilerError, wantErr: true},
+		{name: "namespace terminating", onCreate: newNamespaceTerminatingError("default"), wantReason: sandboxv1beta1.SandboxReasonReconcilerError},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox := &sandboxv1beta1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sb", Namespace: "default", UID: "sb-uid", Generation: 1},
+				Spec: sandboxv1beta1.SandboxSpec{
+					SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+						PodTemplate: sandboxv1beta1.PodTemplate{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
+					},
+					OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+				},
+			}
+			fc := interceptor.NewClient(newFakeClient(sandbox), interceptor.Funcs{
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*corev1.Pod); ok && tc.onCreate != nil {
+						return tc.onCreate
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*corev1.Pod); ok && tc.onGet != nil {
+						return tc.onGet
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+			r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: sandbox.Name, Namespace: sandbox.Namespace}}
+
+			_, err := r.Reconcile(t.Context(), req)
+			require.Equal(t, tc.wantErr, err != nil)
+
+			got := &sandboxv1beta1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), req.NamespacedName, got))
+			ready := meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+			require.NotNil(t, ready)
+			require.Equal(t, tc.wantReason, ready.Reason)
+		})
+	}
 }
 
 func TestResolvePodName(t *testing.T) {

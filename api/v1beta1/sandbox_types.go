@@ -76,7 +76,7 @@ const (
 	// In all other states Status is False with a reason describing why: the Sandbox is
 	// still provisioning (DependenciesNotReady), suspended (SandboxSuspended), its Pod
 	// is terminating (PodTerminating) or terminal (PodSucceeded/PodFailed), it has
-	// expired (SandboxExpired), or the controller hit an error (ReconcilerError).
+	// expired (SandboxExpired), the API server refused a create (FailedCreate), or the controller hit an error (ReconcilerError).
 	SandboxConditionReady ConditionType = "Ready"
 	// SandboxReasonDependenciesReady is the Ready=True reason: the Pod (and Service, if
 	// requested) are provisioned and the Pod reports Ready with an assigned IP.
@@ -89,6 +89,11 @@ const (
 	// resource failed with an error that is not covered by a more specific reason.
 	// The controller retries, so this is typically transient.
 	SandboxReasonReconcilerError = "ReconcilerError"
+	// SandboxReasonFailedCreate is a Ready=False reason: the API server refused to
+	// create a child resource with Forbidden, for example because of a
+	// ResourceQuota or an admission policy. The controller retries, since a
+	// quota refusal can clear.
+	SandboxReasonFailedCreate = "FailedCreate"
 	// SandboxReasonMultiplePods indicates the Sandbox cannot become ready because
 	// more than one Pod is controlled by its UID and the controller cannot choose
 	// a canonical stateful Pod safely.

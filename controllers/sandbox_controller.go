@@ -758,6 +758,9 @@ func (r *SandboxReconciler) computeReadyCondition(sandbox *sandboxv1beta1.Sandbo
 			return readyCondition
 		}
 		readyCondition.Reason = sandboxv1beta1.SandboxReasonReconcilerError
+		if isRefusedCreate(err) {
+			readyCondition.Reason = sandboxv1beta1.SandboxReasonFailedCreate
+		}
 		readyCondition.Message = "Error seen: " + err.Error()
 		return readyCondition
 	}
@@ -1220,6 +1223,7 @@ func (r *SandboxReconciler) recordLifecycleMetrics(ctx context.Context, oldStatu
 
 	if newReady != nil {
 		isErrReason := newReady.Reason == sandboxv1beta1.SandboxReasonReconcilerError ||
+			newReady.Reason == sandboxv1beta1.SandboxReasonFailedCreate ||
 			newReady.Reason == sandboxv1beta1.SandboxReasonInvalidConfiguration ||
 			newReady.Reason == sandboxv1beta1.SandboxReasonMultiplePods
 		if isErrReason && r.resumeStartTimes.markError(key, sandbox.UID) {
@@ -1534,7 +1538,7 @@ func (r *SandboxReconciler) reconcileService(ctx context.Context, sandbox *sandb
 					return nil, err
 				}
 				logger.Error(err, "Failed to create", "Service.Namespace", service.Namespace, "Service.Name", service.Name)
-				return nil, err
+				return nil, markCreate(err)
 			}
 			r.setServiceStatus(sandbox, service)
 			return service, nil
@@ -2094,7 +2098,7 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		if r.Recorder != nil {
 			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, eventReasonSandboxPodCreateFailed, "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
 		}
-		return nil, 0, err
+		return nil, 0, markCreate(err)
 	}
 
 	if r.Recorder != nil {
@@ -2335,7 +2339,7 @@ func (r *SandboxReconciler) reconcilePVCs(ctx context.Context, sandbox *sandboxv
 		}
 		if err := r.Create(ctx, pvc, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
 			logger.Error(err, "Failed to create PVC", "PVC.Namespace", sandbox.Namespace, "PVC.Name", pvcName)
-			return err
+			return markCreate(err)
 		}
 	}
 	return nil

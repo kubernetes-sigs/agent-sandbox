@@ -26,6 +26,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -1648,4 +1649,267 @@ func TestWarmPoolSandboxEventHandler_ObservesOwnedEvents(t *testing.T) {
 	require.False(t, e.SatisfiedExpectations(poolKey))
 	h.Delete(ctx, event.DeleteEvent{Object: owned}, nil)
 	require.True(t, e.SatisfiedExpectations(poolKey))
+}
+
+// Repeated stuck replacements must leave time for kubelet retries while
+// unrelated claim adoption can still refill the pool.
+func TestObserveStuckBackoff_CountsRoundsAndStableReadiness(t *testing.T) {
+	r := &SandboxWarmPoolReconciler{}
+	key := types.NamespacedName{Namespace: "test", Name: "pool"}
+	start := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
+	grace := 10 * time.Second
+	observe := func(at time.Time, deleted bool, ready int32, lastReady time.Time, hash string) (time.Duration, bool) {
+		t.Helper()
+		return r.observeStuckBackoff(key, deleted, ready, 2, at, lastReady, grace, hash)
+	}
+
+	delay, repeated := observe(start, true, 0, time.Time{}, "template-a")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+
+	// A rate-limited pool can delete two members in separate reconciles
+	// within one readiness-grace window. This is one failure round.
+	delay, repeated = observe(start.Add(2*time.Second), true, 0, time.Time{}, "template-a")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+
+	delay, repeated = observe(start.Add(grace+time.Second), true, 0, time.Time{}, "template-a")
+	require.Equal(t, 2*stuckBackoffBase, delay)
+	require.True(t, repeated)
+
+	// A crashing member can briefly report Ready between restarts. That
+	// short interval must not erase the existing replacement history.
+	briefReady := start.Add(grace + 2*time.Second)
+	delay, repeated = observe(briefReady, false, 2, briefReady, "template-a")
+	require.Zero(t, delay)
+	require.False(t, repeated)
+	delay, repeated = observe(briefReady.Add(time.Second), false, 0, time.Time{}, "template-a")
+	require.Equal(t, 2*stuckBackoffBase, delay)
+	require.True(t, repeated)
+	// One member can be consistently healthy while the other keeps failing.
+	// Partial readiness cannot reset the pool-wide failure streak.
+	delay, repeated = observe(briefReady.Add(grace), false, 1, briefReady, "template-a")
+	require.Equal(t, 2*stuckBackoffBase, delay)
+	require.True(t, repeated)
+
+	// After a complete grace period of uninterrupted readiness, a fresh
+	// failure starts at the base delay again.
+	stableReady := briefReady.Add(grace)
+	delay, repeated = observe(stableReady, false, 2, briefReady, "template-a")
+	require.Zero(t, delay)
+	require.False(t, repeated)
+	delay, repeated = observe(stableReady.Add(time.Second), true, 0, time.Time{}, "template-a")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+
+	// Replacing the broken template gives the pool a new failure history.
+	delay, repeated = observe(stableReady.Add(2*time.Second), false, 0, time.Time{}, "template-b")
+	require.Zero(t, delay)
+	require.False(t, repeated)
+	delay, repeated = observe(stableReady.Add(3*time.Second), true, 0, time.Time{}, "template-b")
+	require.Equal(t, stuckBackoffBase, delay)
+	require.False(t, repeated)
+}
+
+func TestReconcilePool_StuckReplacementBackoff(t *testing.T) {
+	ctx := context.Background()
+	pool, template := newOverCreationFixture(1)
+	scheme := newTestScheme()
+	c := newFakeClient(scheme, pool, template)
+	now := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC)
+	grace := 10 * time.Second
+	recorder := events.NewFakeRecorder(20)
+	r := &SandboxWarmPoolReconciler{
+		Client: c, Scheme: scheme, MaxBatchSize: 10,
+		ReadinessGracePeriod: grace, Recorder: recorder,
+		now: func() time.Time { return now },
+	}
+	key := client.ObjectKeyFromObject(pool)
+	reconcile := func() time.Duration {
+		t.Helper()
+		result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+		syncPoolExpectations(r, pool)
+		return result.RequeueAfter
+	}
+	members := func() []sandboxv1beta1.Sandbox {
+		t.Helper()
+		var list sandboxv1beta1.SandboxList
+		require.NoError(t, c.List(ctx, &list, client.MatchingLabels{
+			warmPoolSandboxLabel: sandboxcontrollers.NameHash(pool.Name),
+		}))
+		return list.Items
+	}
+	ageMember := func() sandboxv1beta1.Sandbox {
+		t.Helper()
+		list := members()
+		require.Len(t, list, 1)
+		sb := list[0]
+		sb.CreationTimestamp = metav1.NewTime(now.Add(-grace - time.Second))
+		sb.Status.Conditions = []metav1.Condition{
+			{Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse},
+			{Type: string(sandboxv1beta1.SandboxConditionPodScheduled), Status: metav1.ConditionTrue,
+				Reason: sandboxv1beta1.SandboxReasonPodScheduled, LastTransitionTime: sb.CreationTimestamp},
+		}
+		require.NoError(t, c.Update(ctx, &sb))
+		return sb
+	}
+
+	reconcile() // Initial fill uses the actual sandbox producer.
+	ageMember()
+	reconcile() // First stuck deletion remains immediate.
+	require.Empty(t, members())
+	// Refill starts after the first backoff interval. The replacement must
+	// still get its own full grace period and delay, not inherit a deadline
+	// measured from the previous member's deletion.
+	now = now.Add(stuckBackoffBase + time.Second)
+	reconcile() // Watch observes deletion and refills.
+	require.Len(t, members(), 1)
+
+	now = now.Add(grace + time.Second)
+	second := ageMember()
+	delay := reconcile()
+	require.Len(t, members(), 1, "repeated stuck replacements must back off instead of deleting once per grace period")
+	require.Equal(t, second.Name, members()[0].Name)
+	require.Equal(t, stuckBackoffBase-time.Second, delay, "late refill must retain the full post-grace delay")
+	require.Positive(t, delay, "backoff must self-schedule its next evaluation")
+
+	now = now.Add(delay)
+	reconcile()
+	require.Empty(t, members(), "stuck replacement must resume when backoff expires")
+	reconcile()
+	require.Len(t, members(), 1)
+	select {
+	case event := <-recorder.Events:
+		require.Contains(t, event, reasonWarmPoolNotProgressing)
+		require.Contains(t, event, "stuck")
+	default:
+		t.Fatal("expected a pool warning after repeated stuck replacements without Ready members")
+	}
+
+	// Read the persisted wire status so this regression also runs against the
+	// API type that predates the conditions field.
+	condition := func(want metav1.ConditionStatus) metav1.Condition {
+		t.Helper()
+		var updated extensionsv1beta1.SandboxWarmPool
+		require.NoError(t, c.Get(ctx, key, &updated))
+		data, err := json.Marshal(updated.Status)
+		require.NoError(t, err)
+		var status struct {
+			Conditions []metav1.Condition `json:"conditions"`
+		}
+		require.NoError(t, json.Unmarshal(data, &status))
+		require.Len(t, status.Conditions, 1, "not-progressing condition must persist on the pool")
+		got := status.Conditions[0]
+		require.Equal(t, "WarmPoolNotProgressing", got.Type)
+		require.Equal(t, want, got.Status)
+		require.Equal(t, updated.Generation, got.ObservedGeneration)
+		return got
+	}
+	blocked := condition(metav1.ConditionTrue)
+	reconcile()
+	require.Equal(t, blocked.LastTransitionTime, condition(metav1.ConditionTrue).LastTransitionTime)
+
+	// An adopted member leaves a deficit independent of stuck replacement.
+	sb := members()[0]
+	require.NoError(t, c.Delete(ctx, &sb))
+	reconcile()
+	require.Len(t, members(), 1, "claim adoption refill must remain immediate during stuck backoff")
+	ageMember()
+	require.Positive(t, reconcile())
+	require.Len(t, members(), 1)
+
+	// Delays grow across replacement generations and then stay capped.
+	previous := time.Duration(0)
+	for range 9 {
+		wait := reconcile()
+		require.GreaterOrEqual(t, wait, previous)
+		require.LessOrEqual(t, wait, grace+5*time.Minute)
+		now = now.Add(wait)
+		reconcile()
+		require.Empty(t, members())
+		reconcile()
+		ageMember()
+		previous = wait
+	}
+	require.Equal(t, 5*time.Minute-time.Second, reconcile(), "stuck backoff must saturate")
+
+	// Readiness ends the failure streak and emits a recovery event.
+	sb = members()[0]
+	sb.Status.Conditions[0].Status = metav1.ConditionTrue
+	require.NoError(t, c.Update(ctx, &sb))
+	reconcile()
+	select {
+	case event := <-recorder.Events:
+		require.Contains(t, event, reasonWarmPoolProgressing)
+	default:
+		t.Fatal("expected recovery event when the pool becomes Ready")
+	}
+	condition(metav1.ConditionFalse)
+	ageMember()
+	reconcile()
+	require.Empty(t, members(), "a recovered pool must start a fresh replacement streak")
+
+	// A quiet interval also clears history when claims prevent full readiness.
+	reconcile()
+	ageMember()
+	require.Positive(t, reconcile())
+	now = now.Add(grace + 10*time.Minute + time.Second)
+	reconcile()
+	require.Empty(t, members())
+	reconcile()
+	ageMember()
+	require.Equal(t, 5*time.Second-time.Second, reconcile(), "quiet failures must start at the base delay")
+	condition(metav1.ConditionFalse)
+
+	// Scaling to zero clears failure history and must not wait for backoff.
+	var scaled extensionsv1beta1.SandboxWarmPool
+	require.NoError(t, c.Get(ctx, key, &scaled))
+	scaled.Spec.Replicas = new(int32(0))
+	require.NoError(t, c.Update(ctx, &scaled))
+	reconcile()
+	require.Empty(t, members())
+	require.NoError(t, c.Get(ctx, key, &scaled))
+	scaled.Spec.Replicas = new(int32(1))
+	require.NoError(t, c.Update(ctx, &scaled))
+	reconcile()
+	ageMember()
+	reconcile()
+	require.Empty(t, members(), "scale-up must start a fresh failure streak")
+
+	// Recreating a pool under the same name must not inherit its old backoff.
+	require.NoError(t, c.Delete(ctx, &scaled))
+	reconcile()
+	recreated := pool.DeepCopy()
+	recreated.ResourceVersion = ""
+	recreated.UID = "recreated-pool"
+	require.NoError(t, c.Create(ctx, recreated))
+	reconcile()
+	ageMember()
+	reconcile()
+	require.Empty(t, members(), "pool deletion must forget stuck replacement history")
+
+	// One newly Ready member is progress even before the pool reaches target.
+	reconcile()
+	ageMember()
+	require.NoError(t, c.Get(ctx, key, &scaled))
+	scaled.Spec.Replicas = new(int32(2))
+	require.NoError(t, c.Update(ctx, &scaled))
+	reconcile()
+	list := members()
+	require.Len(t, list, 2)
+	for i := range list {
+		if len(list[i].Status.Conditions) == 0 {
+			list[i].Status.Conditions = []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionTrue,
+				LastTransitionTime: metav1.NewTime(now.Add(time.Second)),
+			}}
+			require.NoError(t, c.Update(ctx, &list[i]))
+		}
+	}
+	now = now.Add(time.Second)
+	reconcile()
+	require.Len(t, members(), 1, "new readiness must reset backoff even while the pool is below target")
+	remaining := members()
+	require.True(t, isSandboxReady(&remaining[0]))
 }

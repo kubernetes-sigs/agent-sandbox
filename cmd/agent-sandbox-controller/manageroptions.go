@@ -15,12 +15,62 @@
 package main
 
 import (
+	"fmt"
+	"time"
+
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/leaderelection"
 	ctrl "sigs.k8s.io/controller-runtime"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Options, probeAddr string, enableLeaderElection bool, leaderElectionNamespace string) ctrl.Options {
+// The leader-election timing defaults match the controller-runtime defaults,
+// so leaving the flags unset keeps the previous behavior.
+const (
+	defaultLeaderElectionLeaseDuration = 15 * time.Second
+	defaultLeaderElectionRenewDeadline = 10 * time.Second
+	defaultLeaderElectionRetryPeriod   = 2 * time.Second
+)
+
+// leaderElectionTiming holds the leader-election Lease timings. Clusters
+// whose API server or etcd is slow at times can raise them so that the leader
+// keeps its Lease through a slow renewal instead of exiting.
+type leaderElectionTiming struct {
+	LeaseDuration time.Duration
+	RenewDeadline time.Duration
+	RetryPeriod   time.Duration
+}
+
+// validate applies the rules of client-go's leaderelection.NewLeaderElector,
+// so that a bad combination fails at startup with the flag names in the error
+// instead of when the manager starts leader election. It is stricter in one
+// case: the Lease stores the lease duration in whole seconds, and candidates
+// use that stored value to decide when the Lease has expired, so the lease
+// duration rounded down to whole seconds must exceed the renew deadline.
+// Otherwise a candidate could take over while the old leader is still
+// retrying its renewal, and both would reconcile for a short time.
+func (t leaderElectionTiming) validate() error {
+	if t.LeaseDuration <= 0 {
+		return fmt.Errorf("--leader-elect-lease-duration must be greater than zero, got %s", t.LeaseDuration)
+	}
+	if t.RenewDeadline <= 0 {
+		return fmt.Errorf("--leader-elect-renew-deadline must be greater than zero, got %s", t.RenewDeadline)
+	}
+	if t.RetryPeriod <= 0 {
+		return fmt.Errorf("--leader-elect-retry-period must be greater than zero, got %s", t.RetryPeriod)
+	}
+	if t.LeaseDuration.Truncate(time.Second) <= t.RenewDeadline {
+		return fmt.Errorf("--leader-elect-lease-duration (%s), rounded down to whole seconds as stored in the Lease, must be greater than --leader-elect-renew-deadline (%s)",
+			t.LeaseDuration, t.RenewDeadline)
+	}
+	if t.RenewDeadline <= time.Duration(leaderelection.JitterFactor*float64(t.RetryPeriod)) {
+		return fmt.Errorf("--leader-elect-renew-deadline (%s) must be greater than %.1f x --leader-elect-retry-period (%s)",
+			t.RenewDeadline, leaderelection.JitterFactor, t.RetryPeriod)
+	}
+	return nil
+}
+
+func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Options, probeAddr string, enableLeaderElection bool, leaderElectionNamespace string, timing leaderElectionTiming) ctrl.Options {
 	return ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsOpts,
@@ -28,9 +78,12 @@ func buildManagerOptions(scheme *runtime.Scheme, metricsOpts metricsserver.Optio
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionNamespace: leaderElectionNamespace,
 		LeaderElectionID:        "a3317529.agent-sandbox.x-k8s.io",
+		LeaseDuration:           &timing.LeaseDuration,
+		RenewDeadline:           &timing.RenewDeadline,
+		RetryPeriod:             &timing.RetryPeriod,
 		// Release the leader Lease on graceful shutdown so a rolling update
-		// hands over leadership in ~0-2s instead of waiting out the full 15s
-		// LeaseDuration with no active controller — at a sustained 500
+		// hands over leadership in ~0-2s instead of waiting out the full
+		// LeaseDuration (15s by default) with no active controller — at a sustained 500
 		// claims/s that gap is ~7,500 claims queueing during a routine
 		// deploy. Crash failover still pays lease expiry by design
 		// (split-brain safety); only clean exits release early. Safe here:

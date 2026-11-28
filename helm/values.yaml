@@ -36,6 +36,9 @@ controller:
   # clusterDomain: "cluster.local"
   leaderElect: true
   # leaderElectionNamespace: ""
+  # leaderElectLeaseDuration: 15s  # raise all three together on clusters with a slow API server or etcd
+  # leaderElectRenewDeadline: 10s  # must be less than leaderElectLeaseDuration
+  # leaderElectRetryPeriod: 2s
   extensions: false
   # enableTracing: false
   # enablePprof: false

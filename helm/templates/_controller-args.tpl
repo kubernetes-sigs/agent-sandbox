@@ -8,6 +8,15 @@
 {{- if hasKey .Values.controller "leaderElectionNamespace" }}
 - --leader-election-namespace={{ .Values.controller.leaderElectionNamespace }}
 {{- end }}
+{{- if hasKey .Values.controller "leaderElectLeaseDuration" }}
+- --leader-elect-lease-duration={{ .Values.controller.leaderElectLeaseDuration }}
+{{- end }}
+{{- if hasKey .Values.controller "leaderElectRenewDeadline" }}
+- --leader-elect-renew-deadline={{ .Values.controller.leaderElectRenewDeadline }}
+{{- end }}
+{{- if hasKey .Values.controller "leaderElectRetryPeriod" }}
+- --leader-elect-retry-period={{ .Values.controller.leaderElectRetryPeriod }}
+{{- end }}
 {{- if hasKey .Values.controller "extensions" }}
 - --extensions={{ .Values.controller.extensions }}
 {{- end }}

@@ -109,6 +109,12 @@ kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/downl
 
 You can also render it directly from source with `kubectl kustomize k8s/`.
 
+Or use the install script from a release tag. It asks before applying CRDs and cluster-wide RBAC to the target cluster, and rerunning it upgrades in place. Pass `--version vX.Y.Z` to pick the release, `--core-only` to skip the extensions, `--context NAME` to pick the cluster, and `--yes` to skip the prompt:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/vX.Y.Z/install.sh | sh -s -- --version vX.Y.Z
+```
+
 ### Selective Install
 
 If you prefer to install components separately:

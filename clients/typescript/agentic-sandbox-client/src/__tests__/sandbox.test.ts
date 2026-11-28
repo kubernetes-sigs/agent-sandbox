@@ -16,17 +16,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------- hoisted mock fns ----------
 
-const { mockDeleteNamespacedCustomObject, mockGetNamespacedCustomObject } =
-  vi.hoisted(() => ({
-    mockDeleteNamespacedCustomObject: vi.fn(),
-    mockGetNamespacedCustomObject: vi.fn(),
-  }));
+const {
+  mockDeleteNamespacedCustomObject,
+  mockGetNamespacedCustomObject,
+  mockListNamespacedPod,
+} = vi.hoisted(() => ({
+  mockDeleteNamespacedCustomObject: vi.fn(),
+  mockGetNamespacedCustomObject: vi.fn(),
+  mockListNamespacedPod: vi.fn(),
+}));
 
 // ---------- mock: @kubernetes/client-node ----------
 
 vi.mock("@kubernetes/client-node", () => {
   const CustomObjectsApi = vi.fn();
-  return { CustomObjectsApi };
+  return { CustomObjectsApi, CoreV1Api: vi.fn() };
 });
 
 // ---------- import SUT after mocks ----------
@@ -39,7 +43,7 @@ import {
   SANDBOX_API_VERSION,
   SANDBOX_PLURAL_NAME,
 } from "../constants.js";
-import { SandboxError } from "../exceptions.js";
+import { SandboxError, SandboxTimeoutError } from "../exceptions.js";
 import type { SandboxInit } from "../sandbox.js";
 import {
   findReadyCondition,
@@ -59,7 +63,9 @@ function makeMockCustomObjectsApi() {
 }
 
 function makeMockKubeConfig() {
-  return {} as unknown as import("@kubernetes/client-node").KubeConfig;
+  return {
+    makeApiClient: vi.fn(() => ({ listNamespacedPod: mockListNamespacedPod })),
+  } as unknown as import("@kubernetes/client-node").KubeConfig;
 }
 
 function makeFakeTracingManager() {
@@ -161,6 +167,9 @@ describe("Sandbox", () => {
       expect(args.plural).toBe(CLAIM_PLURAL_NAME);
       expect(args.namespace).toBe("default");
       expect(args.name).toBe("test-claim");
+      expect(args.body).toBeUndefined();
+      expect(mockGetNamespacedCustomObject).not.toHaveBeenCalled();
+      expect(mockListNamespacedPod).not.toHaveBeenCalled();
     });
 
     it("ends the tracing lifecycle span", async () => {
@@ -216,6 +225,164 @@ describe("Sandbox", () => {
       await assertion;
 
       expect(sandbox.isActive).toBe(false);
+    });
+  });
+
+  describe("close({ waitForTermination: true })", () => {
+    const notFound = Object.assign(new Error("not found"), { code: 404 });
+    const claim = { metadata: { uid: "claim-uid" } };
+    const sandboxObject = { metadata: { uid: "sandbox-uid" } };
+    const pod = { metadata: { ownerReferences: [{ uid: "sandbox-uid" }] } };
+    const makeSandbox = () =>
+      new Sandbox(
+        createTestInit({ claimUid: "claim-uid", sandboxUid: "sandbox-uid" }),
+      );
+
+    afterEach(() => {
+      mockGetNamespacedCustomObject.mockReset();
+      mockListNamespacedPod.mockReset();
+    });
+
+    it("waits for each resource, including a Pod that outlives its owners", async () => {
+      vi.useFakeTimers();
+      let claimExists = true;
+      let sandboxExists = true;
+      let podExists = true;
+      mockGetNamespacedCustomObject.mockImplementation(async ({ plural }) => {
+        if (plural === CLAIM_PLURAL_NAME && claimExists) return claim;
+        if (plural === SANDBOX_PLURAL_NAME && sandboxExists)
+          return sandboxObject;
+        throw notFound;
+      });
+      mockListNamespacedPod.mockImplementation(async ({ _continue }) => {
+        if (!_continue) return { items: [], metadata: { _continue: "next" } };
+        return { items: podExists ? [pod] : [] };
+      });
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = makeSandbox();
+      const finished = vi.fn();
+      const waiting = sandbox
+        .close({ waitForTermination: true })
+        .then(finished);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          body: {
+            propagationPolicy: "Foreground",
+            preconditions: { uid: "claim-uid" },
+          },
+        }),
+      );
+      await sandbox.close();
+      expect(finished).not.toHaveBeenCalled();
+      claimExists = false;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(finished).not.toHaveBeenCalled();
+      sandboxExists = false;
+      await vi.advanceTimersByTimeAsync(500);
+      expect(finished).not.toHaveBeenCalled();
+      podExists = false;
+      await vi.advanceTimersByTimeAsync(500);
+      await waiting;
+      expect(mockListNamespacedPod).toHaveBeenLastCalledWith({
+        namespace: "default",
+        limit: 250,
+        _continue: "next",
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("ignores same-name resources with different owners", async () => {
+      mockGetNamespacedCustomObject
+        .mockResolvedValueOnce({ metadata: { uid: "new-claim" } })
+        .mockResolvedValueOnce({ metadata: { uid: "new-claim" } })
+        .mockResolvedValueOnce({ metadata: { uid: "new-sandbox" } });
+      mockDeleteNamespacedCustomObject.mockRejectedValueOnce(
+        Object.assign(new Error("UID precondition failed"), { code: 409 }),
+      );
+      mockListNamespacedPod.mockResolvedValue({
+        items: [{ metadata: { ownerReferences: [{ uid: "new-sandbox" }] } }],
+      });
+
+      await makeSandbox().close({ waitForTermination: true });
+      expect(mockListNamespacedPod).toHaveBeenCalledOnce();
+    });
+
+    it("bounds the wait and can retry without deleting the Claim again", async () => {
+      vi.useFakeTimers();
+      mockGetNamespacedCustomObject.mockRejectedValue(notFound);
+      mockListNamespacedPod.mockResolvedValueOnce({ items: [pod] });
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      const sandbox = makeSandbox();
+      const timedOut = expect(
+        sandbox.close({ waitForTermination: true, timeoutMs: 100 }),
+      ).rejects.toBeInstanceOf(SandboxTimeoutError);
+      await vi.advanceTimersByTimeAsync(100);
+      await timedOut;
+      expect(vi.getTimerCount()).toBe(0);
+
+      mockGetNamespacedCustomObject.mockRejectedValue(notFound);
+      mockListNamespacedPod.mockResolvedValue({ items: [] });
+      await sandbox.close({ waitForTermination: true });
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
+    });
+
+    it("propagates lookup errors rather than treating them as deletion", async () => {
+      mockGetNamespacedCustomObject.mockRejectedValue(notFound);
+      mockDeleteNamespacedCustomObject.mockRejectedValueOnce(notFound);
+      const forbidden = Object.assign(new Error("forbidden"), { code: 403 });
+      mockListNamespacedPod.mockRejectedValueOnce(forbidden);
+
+      await expect(
+        makeSandbox().close({ waitForTermination: true }),
+      ).rejects.toMatchObject({ cause: forbidden });
+    });
+
+    it("times out a stuck DELETE using the opt-in budget and can retry", async () => {
+      vi.useFakeTimers();
+      mockDeleteNamespacedCustomObject.mockReturnValueOnce(
+        new Promise(() => {}),
+      );
+      const sandbox = makeSandbox();
+      const waiting = sandbox.close({
+        waitForTermination: true,
+        timeoutMs: 6000,
+      });
+      const timedOut =
+        expect(waiting).rejects.toBeInstanceOf(SandboxTimeoutError);
+      const finished = vi.fn();
+      void waiting.then(finished, finished);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(finished).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      await timedOut;
+
+      mockDeleteNamespacedCustomObject.mockResolvedValueOnce({});
+      mockGetNamespacedCustomObject.mockRejectedValue(notFound);
+      mockListNamespacedPod.mockResolvedValue({ items: [] });
+      await sandbox.close({ waitForTermination: true });
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps waiting when a concurrent plain close hits its shorter timeout", async () => {
+      vi.useFakeTimers();
+      const deletion = Promise.withResolvers<unknown>();
+      mockDeleteNamespacedCustomObject.mockReturnValueOnce(deletion.promise);
+      const sandbox = makeSandbox();
+      const waiting = sandbox.close({
+        waitForTermination: true,
+        timeoutMs: 6000,
+      });
+      const ordinary = sandbox.close().catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(5000);
+      const error = await ordinary;
+      expect(error).toBeInstanceOf(SandboxError);
+      expect(error).not.toBeInstanceOf(SandboxTimeoutError);
+      mockGetNamespacedCustomObject.mockRejectedValue(notFound);
+      mockListNamespacedPod.mockResolvedValue({ items: [] });
+      deletion.resolve({});
+      await waiting;
+      expect(mockDeleteNamespacedCustomObject).toHaveBeenCalledOnce();
     });
   });
 

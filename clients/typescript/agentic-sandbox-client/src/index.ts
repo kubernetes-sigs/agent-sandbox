@@ -56,6 +56,7 @@ export type {
   RunOptions,
   RuntimeCallOptions,
   SandboxClientOptions,
+  SandboxCloseOptions,
   SandboxdConnectivity,
   SandboxdOptions,
   SandboxHealth,

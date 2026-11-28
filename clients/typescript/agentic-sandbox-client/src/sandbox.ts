@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import type * as k8s from "@kubernetes/client-node";
+import { CoreV1Api } from "@kubernetes/client-node";
 import {
   ProcessHandle,
   type ProcessSession,
@@ -47,6 +48,7 @@ import {
 } from "./constants.js";
 import {
   isK8s404,
+  isK8s409,
   SandboxClosedError,
   SandboxConnectionError,
   SandboxdApiError,
@@ -86,6 +88,7 @@ import type {
   ProcessOptions,
   RunOptions,
   RuntimeCallOptions,
+  SandboxCloseOptions,
   SandboxdConnectivity,
   SandboxdOptions,
   SandboxHealth,
@@ -466,13 +469,20 @@ interface ConnectionGeneration {
   abortController: AbortController;
 }
 
+interface ClaimDeletion {
+  promise: Promise<void>;
+  accepted: boolean;
+}
+
 /**
  * Internal initialisation bag passed from SandboxClient to Sandbox constructor.
  * Not part of the public API.
  */
 export interface SandboxInit {
   claimName: string;
+  claimUid?: string;
   sandboxName: string;
+  sandboxUid?: string;
   podName: string;
   /** Pod IP chosen from status.podIPs; "" when unknown. */
   podIP?: string;
@@ -532,7 +542,9 @@ export class Sandbox {
   private connectionEpoch = 0;
   private invalidationPromise: Promise<void> | null = null;
   private releaseLocalPromise: Promise<void> | null = null;
-  private deletionPromise: Promise<void> | null = null;
+  private claimDeletion?: ClaimDeletion;
+  private readonly claimUid?: string;
+  private readonly sandboxUid?: string;
   private lifecycleTail: Promise<unknown> = Promise.resolve();
   private lastModePatch: Promise<unknown> = Promise.resolve();
   private lifecycleUid?: string;
@@ -543,7 +555,9 @@ export class Sandbox {
 
   constructor(init: SandboxInit) {
     this.claimName = init.claimName;
+    this.claimUid = init.claimUid;
     this.sandboxName = init.sandboxName;
+    this.sandboxUid = init.sandboxUid;
     this._podName = init.podName;
     this._podIP = init.podIP ?? "";
     this.serviceFQDN = init.serviceFQDN ?? "";
@@ -1058,15 +1072,34 @@ export class Sandbox {
     await this.releaseLocal();
   }
 
+  /** @internal Used by SandboxClient to validate cached handles. */
+  matchesClaimUid(uid?: string): boolean {
+    return this.claimUid === uid;
+  }
+
+  /** @internal Used by SandboxClient to validate cached handles. */
+  matchesSandboxUid(uid?: string): boolean {
+    return this.sandboxUid === uid;
+  }
+
   /**
-   * Closes the handle and deletes the SandboxClaim.
+   * Closes the handle and deletes the SandboxClaim. With
+   * `waitForTermination: true`, requests foreground deletion and waits for
+   * Kubernetes to remove the Claim, Sandbox, and Pod.
    *
    * A missing claim (404) is treated as success. Any other failure — including
    * the cleanup timeout — is re-thrown as a {@link SandboxError} so callers can
    * retry; the handle is still marked closed and the claim may be re-deleted
    * via {@link SandboxClient.deleteSandbox}.
    */
-  async close(): Promise<void> {
+  async close(opts?: SandboxCloseOptions): Promise<void> {
+    const wait = this.claimName !== "" && opts?.waitForTermination === true;
+    const timeoutMs = wait ? lifecycleBudget(opts).timeoutMs : undefined;
+    if (wait && (!this.claimUid || !this.sandboxUid)) {
+      throw new SandboxError(
+        "Cannot wait for termination without the SandboxClaim and Sandbox UIDs.",
+      );
+    }
     // Prevent new work immediately so the in-flight count stabilises.
     this._isClosed = true;
     this.connectAbortController.abort(
@@ -1089,37 +1122,173 @@ export class Sandbox {
 
     await this.releaseLocal();
 
-    if (this.claimName) {
-      if (!this.deletionPromise) {
-        this.deletionPromise = this.deleteClaim();
-      }
-      await this.deletionPromise;
+    if (timeoutMs !== undefined && this.claimUid && this.sandboxUid) {
+      await this.waitForTermination(this.claimUid, this.sandboxUid, timeoutMs);
+    } else if (this.claimName) {
+      const attempt = this.requestClaimDeletion();
+      await raceWithTimeout(attempt.promise, CLEANUP_TIMEOUT_MS, () => {
+        this.forgetPendingDeletion(attempt);
+        throw new SandboxError(
+          `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
+        );
+      });
     }
   }
 
-  private async deleteClaim(): Promise<void> {
-    this.logger.info(`Deleting SandboxClaim: ${this.claimName}`);
+  private async readClaim(): Promise<
+    { metadata?: k8s.V1ObjectMeta } | undefined
+  > {
     try {
-      await raceWithTimeout(
-        this.customObjectsApi.deleteNamespacedCustomObject({
-          group: CLAIM_API_GROUP,
-          version: CLAIM_API_VERSION,
-          namespace: this.namespace,
-          plural: CLAIM_PLURAL_NAME,
-          name: this.claimName,
-        }),
-        CLEANUP_TIMEOUT_MS,
-        () => {
-          throw new SandboxError(
-            `SandboxClaim cleanup timed out after ${CLEANUP_TIMEOUT_MS}ms`,
-          );
+      return (await this.customObjectsApi.getNamespacedCustomObject({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: this.namespace,
+        plural: CLAIM_PLURAL_NAME,
+        name: this.claimName,
+      })) as { metadata?: k8s.V1ObjectMeta };
+    } catch (err) {
+      if (isK8s404(err)) return undefined;
+      throw new SandboxError(
+        `Failed to read SandboxClaim '${this.claimName}'.`,
+        {
+          cause: err,
         },
       );
+    }
+  }
+
+  private async waitForTermination(
+    claimUid: string,
+    sandboxUid: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const pods = this.kubeConfig.makeApiClient(CoreV1Api);
+    const attempt = this.requestClaimDeletion(claimUid);
+
+    const observe = async () => {
+      await attempt.promise;
+      while (!signal.aborted) {
+        const [claim, sandbox] = await Promise.all([
+          this.readClaim(),
+          this.readSandboxObject(),
+        ]);
+        signal.throwIfAborted();
+        const metadata = sandbox?.metadata as k8s.V1ObjectMeta | undefined;
+        if (
+          claim?.metadata?.uid !== claimUid &&
+          metadata?.uid !== sandboxUid &&
+          !(await this.hasOwnedPods(pods, sandboxUid, signal))
+        ) {
+          return;
+        }
+        await this.sleep(LIFECYCLE_POLL_INTERVAL_MS, signal);
+      }
+    };
+
+    try {
+      await raceWithTimeout(observe(), timeoutMs, () => {
+        this.forgetPendingDeletion(attempt);
+        throw new SandboxTimeoutError(
+          `SandboxClaim '${this.claimName}' and its Sandbox and Pod did not finish deleting within ${timeoutMs}ms.`,
+        );
+      });
+    } finally {
+      controller.abort();
+    }
+  }
+
+  private async hasOwnedPods(
+    pods: k8s.CoreV1Api,
+    sandboxUid: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    // Pod names and labels are not an ownership test. A Pod can outlive
+    // its Sandbox even when the handle never saw that Pod's name.
+    let nextPage: string | undefined;
+    do {
+      signal.throwIfAborted();
+      let page: k8s.V1PodList;
+      try {
+        page = await pods.listNamespacedPod({
+          namespace: this.namespace,
+          limit: 250,
+          _continue: nextPage,
+        });
+      } catch (err) {
+        throw new SandboxError(
+          `Failed to list Pods in namespace '${this.namespace}'.`,
+          {
+            cause: err,
+          },
+        );
+      }
+      if (
+        page.items.some((pod) =>
+          pod.metadata?.ownerReferences?.some(
+            (owner) => owner.uid === sandboxUid,
+          ),
+        )
+      ) {
+        return true;
+      }
+      nextPage = page.metadata?._continue;
+    } while (nextPage);
+    return false;
+  }
+
+  private requestClaimDeletion(foregroundUid?: string): ClaimDeletion {
+    if (this.claimDeletion) return this.claimDeletion;
+    const attempt = {
+      promise: this.deleteClaim(foregroundUid),
+      accepted: false,
+    };
+    this.claimDeletion = attempt;
+    // Share the request, but give each caller its own timeout. Once deletion
+    // is accepted, later callers only need to wait for the resources to go.
+    void attempt.promise.then(
+      () => {
+        attempt.accepted = true;
+      },
+      () => {
+        this.forgetPendingDeletion(attempt);
+      },
+    );
+    return attempt;
+  }
+
+  private forgetPendingDeletion(attempt: ClaimDeletion): void {
+    if (this.claimDeletion === attempt && !attempt.accepted) {
+      this.claimDeletion = undefined;
+    }
+  }
+
+  private async deleteClaim(foregroundUid?: string): Promise<void> {
+    this.logger.info(`Deleting SandboxClaim: ${this.claimName}`);
+    try {
+      await this.customObjectsApi.deleteNamespacedCustomObject({
+        group: CLAIM_API_GROUP,
+        version: CLAIM_API_VERSION,
+        namespace: this.namespace,
+        plural: CLAIM_PLURAL_NAME,
+        name: this.claimName,
+        ...(foregroundUid
+          ? {
+              body: {
+                propagationPolicy: "Foreground",
+                preconditions: { uid: foregroundUid },
+              },
+            }
+          : {}),
+      });
     } catch (err: unknown) {
-      // Allow a later close() call to retry deletion only.
-      this.deletionPromise = null;
       if (isK8s404(err)) {
         return;
+      }
+      if (foregroundUid && isK8s409(err)) {
+        const claim = await this.readClaim();
+        if (claim?.metadata?.uid !== foregroundUid) return;
       }
       this.logger.error(`Error deleting sandbox claim: ${err}`);
       throw new SandboxError(

@@ -169,6 +169,14 @@ export interface SuspendResumeOptions {
   signal?: AbortSignal;
 }
 
+/** Options for sandbox.close(). */
+export interface SandboxCloseOptions {
+  /** Wait for the Claim, Sandbox, and Pod to disappear. Defaults to false. */
+  waitForTermination?: boolean;
+  /** Bounds Kubernetes deletion and waiting after local cleanup. Defaults to 180,000. */
+  timeoutMs?: number;
+}
+
 /**
  * Options accepted by every sandbox.files.* method. Kept as an alias of
  * {@link RuntimeCallOptions} so existing callers keep compiling.

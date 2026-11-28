@@ -382,6 +382,7 @@ type WatchPassResult<V> =
 /** What a Ready Sandbox object tells us about how to reach it. */
 interface ReadySandbox {
   sandboxName: string;
+  sandboxUid?: string;
   podName: string;
   /** True when podName came from the pod-name annotation. */
   podNameFromAnnotation: boolean;
@@ -417,6 +418,7 @@ function readSandbox(
   const podIPs = Array.isArray(status.podIPs) ? status.podIPs : [];
   return {
     sandboxName,
+    sandboxUid: typeof metadata.uid === "string" ? metadata.uid : undefined,
     podName: podNameAnnotation || sandboxName,
     podNameFromAnnotation: Boolean(podNameAnnotation),
     podIP: selectPodIP(podIPs),
@@ -657,13 +659,13 @@ export class SandboxClient {
       await this.beginSandboxTracing();
 
     let ready: ReadySandbox;
+    let expectedUid: string | undefined;
     const named = opts?.claimName !== undefined;
     let swept = false;
 
     try {
       const traceContextStr =
         sandboxTracingManager?.getTraceContextJson() ?? "";
-      let expectedUid: string | undefined;
       try {
         const created = await this.createClaim(
           claimName,
@@ -744,13 +746,24 @@ export class SandboxClient {
       throw err;
     }
 
-    const init = this.sandboxInit(claimName, ns, ready, sandboxTracingManager);
+    const init = this.sandboxInit(
+      claimName,
+      ns,
+      ready,
+      sandboxTracingManager,
+      expectedUid,
+    );
 
     // A repeated create of a named claim finds its handle already registered.
-    // Keep it, so its connections survive, unless the claim now has a new Sandbox.
+    // Keep its connections only while the Claim and Sandbox still match.
     const key = `${ns}/${claimName}`;
     const prior = this.registry.get(key);
-    if (prior?.isActive && prior.sandboxName === ready.sandboxName) {
+    if (
+      prior?.isActive &&
+      prior.sandboxName === ready.sandboxName &&
+      prior.matchesClaimUid(expectedUid) &&
+      prior.matchesSandboxUid(ready.sandboxUid)
+    ) {
       sandboxTracingManager?.endLifecycleSpan();
       return prior;
     }
@@ -816,16 +829,21 @@ export class SandboxClient {
   ): Promise<Sandbox> {
     const existing = this.registry.get(key);
     if (existing?.isActive) {
-      // Verify the claim still exists and check if the sandbox name has changed.
-      let claimObj: unknown;
+      // Verify that the name still refers to the same Claim and Sandbox.
+      let claimObj:
+        | {
+            metadata?: { uid?: string };
+            status?: { sandbox?: { name?: string } };
+          }
+        | undefined;
       try {
-        claimObj = await this.customObjectsApi.getNamespacedCustomObject({
+        claimObj = (await this.customObjectsApi.getNamespacedCustomObject({
           group: CLAIM_API_GROUP,
           version: CLAIM_API_VERSION,
           namespace: ns,
           plural: CLAIM_PLURAL_NAME,
           name: claimName,
-        });
+        })) as typeof claimObj;
       } catch (err) {
         // Only a confirmed 404 proves the handle is stale, so only then is it
         // closed and evicted. Any other error (network, auth, 5xx) says nothing
@@ -846,29 +864,31 @@ export class SandboxClient {
         );
       }
 
-      // Detect sandboxRef name change since the handle was cached.
-      const claimStatus =
-        ((claimObj as Record<string, unknown>)?.status as Record<
-          string,
-          unknown
-        >) ?? {};
-      const sandboxStatus =
-        (claimStatus.sandbox as Record<string, unknown>) ?? {};
-      const currentSandboxName = sandboxStatus.name as string | undefined;
+      const currentSandboxName = claimObj?.status?.sandbox?.name;
 
-      if (!currentSandboxName || currentSandboxName === existing.sandboxName) {
+      if (!existing.matchesClaimUid(claimObj?.metadata?.uid)) {
+        this.logger.info(
+          `SandboxClaim '${claimName}' was replaced; re-attaching.`,
+        );
+      } else if (
+        !currentSandboxName ||
+        currentSandboxName === existing.sandboxName
+      ) {
         // Name unchanged (or not yet set) — additionally verify that the
         // underlying Sandbox object still exists. The claim and the sandbox
         // can drift if the Sandbox CR is externally deleted while the claim
         // status has not yet been reconciled.
+        let sandboxUid: string | undefined;
         try {
-          await this.customObjectsApi.getNamespacedCustomObject({
-            group: SANDBOX_API_GROUP,
-            version: SANDBOX_API_VERSION,
-            namespace: ns,
-            plural: SANDBOX_PLURAL_NAME,
-            name: existing.sandboxName,
-          });
+          const sandbox =
+            (await this.customObjectsApi.getNamespacedCustomObject({
+              group: SANDBOX_API_GROUP,
+              version: SANDBOX_API_VERSION,
+              namespace: ns,
+              plural: SANDBOX_PLURAL_NAME,
+              name: existing.sandboxName,
+            })) as { metadata?: { uid?: string } } | undefined;
+          sandboxUid = sandbox?.metadata?.uid;
         } catch (err) {
           // As above: evict only on a confirmed 404, keep the handle otherwise.
           if (isK8s404(err)) {
@@ -886,14 +906,18 @@ export class SandboxClient {
             { cause: err },
           );
         }
-        if (this.hasConnectionAddress(existing)) {
+        if (!existing.matchesSandboxUid(sandboxUid)) {
+          this.logger.info(
+            `Sandbox '${existing.sandboxName}' was replaced; re-attaching.`,
+          );
+        } else if (this.hasConnectionAddress(existing)) {
           return existing;
+        } else {
+          // A handle attached before its address was ready needs a new connection target.
+          this.logger.info(
+            `Sandbox '${existing.sandboxName}' handle has no in-cluster address; re-attaching.`,
+          );
         }
-        // Attached with waitForReady: false before the Sandbox had an address.
-        // A handle's connection target is fixed when it is built, so replace it.
-        this.logger.info(
-          `Sandbox '${existing.sandboxName}' handle has no in-cluster address; re-attaching.`,
-        );
       } else {
         // The sandbox name has changed; evict and fall through to re-attach below.
         this.logger.info(
@@ -910,15 +934,17 @@ export class SandboxClient {
       this.registry.delete(key);
     }
 
-    // Verify the claim exists in Kubernetes
+    // Verify the claim exists in Kubernetes and pin the handle to its UID.
+    let claimUid: string | undefined;
     try {
-      await this.customObjectsApi.getNamespacedCustomObject({
+      const claim = (await this.customObjectsApi.getNamespacedCustomObject({
         group: CLAIM_API_GROUP,
         version: CLAIM_API_VERSION,
         namespace: ns,
         plural: CLAIM_PLURAL_NAME,
         name: claimName,
-      });
+      })) as { metadata?: { uid?: string } };
+      claimUid = claim?.metadata?.uid;
     } catch (err) {
       // Distinguish 404 (not found) from other K8s errors.
       if (isK8s404(err)) {
@@ -949,6 +975,7 @@ export class SandboxClient {
           ? opts.resolveTimeout * 1000
           : undefined,
         opts?.waitForReady ?? true,
+        claimUid,
       );
     } catch (err) {
       sandboxTracingManager?.endLifecycleSpan();
@@ -956,7 +983,7 @@ export class SandboxClient {
     }
 
     const sandbox = new Sandbox(
-      this.sandboxInit(claimName, ns, ready, sandboxTracingManager),
+      this.sandboxInit(claimName, ns, ready, sandboxTracingManager, claimUid),
     );
 
     this.registry.set(key, sandbox);
@@ -1384,10 +1411,13 @@ export class SandboxClient {
     namespace: string,
     ready: ReadySandbox,
     tracingManager: TracerManager | null,
+    claimUid?: string,
   ): SandboxInit {
     return {
       claimName,
+      claimUid,
       sandboxName: ready.sandboxName,
+      sandboxUid: ready.sandboxUid,
       podName: ready.podName,
       podIP: ready.podIP,
       serviceFQDN: ready.serviceFQDN,

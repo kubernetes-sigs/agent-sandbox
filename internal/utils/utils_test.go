@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
@@ -117,6 +118,64 @@ func TestGetGroupKind(t *testing.T) {
 			g, k := GetGroupKind(tc.ref)
 			require.Equal(t, tc.wantGroup, g)
 			require.Equal(t, tc.wantKind, k)
+		})
+	}
+}
+
+func TestRefreshedOwnerReferences(t *testing.T) {
+	const owner = types.UID("owner-uid")
+	const beta = "agents.x-k8s.io/v1beta1"
+	testCases := []struct {
+		name        string
+		refs        []metav1.OwnerReference
+		wantChanged bool
+		wantVersion []string
+	}{
+		{
+			name:        "v1alpha1 reference to the owner is refreshed",
+			refs:        []metav1.OwnerReference{{APIVersion: "agents.x-k8s.io/v1alpha1", Kind: "Sandbox", Name: "sb", UID: owner}},
+			wantChanged: true,
+			wantVersion: []string{beta},
+		},
+		{
+			name:        "current reference is left alone",
+			refs:        []metav1.OwnerReference{{APIVersion: beta, Kind: "Sandbox", Name: "sb", UID: owner}},
+			wantChanged: false,
+		},
+		{
+			name: "references to other owners are left alone",
+			refs: []metav1.OwnerReference{
+				{APIVersion: "agents.x-k8s.io/v1alpha1", Kind: "Sandbox", Name: "other", UID: "other-uid"},
+				{APIVersion: "agents.x-k8s.io/v1alpha1", Kind: "Sandbox", Name: "sb", UID: owner},
+			},
+			wantChanged: true,
+			wantVersion: []string{"agents.x-k8s.io/v1alpha1", beta},
+		},
+		{
+			name:        "a reference with the owner's UID in another group is left alone",
+			refs:        []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: owner}},
+			wantChanged: false,
+		},
+		{
+			name:        "no owner references",
+			wantChanged: false,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := append([]metav1.OwnerReference(nil), tc.refs...)
+			refreshed, changed := RefreshedOwnerReferences(tc.refs, owner, beta)
+			require.Equal(t, tc.wantChanged, changed)
+			require.Equal(t, original, tc.refs, "the input must not be modified")
+			if !tc.wantChanged {
+				require.Nil(t, refreshed)
+				return
+			}
+			var got []string
+			for _, ref := range refreshed {
+				got = append(got, ref.APIVersion)
+			}
+			require.Equal(t, tc.wantVersion, got)
 		})
 	}
 }

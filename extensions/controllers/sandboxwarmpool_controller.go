@@ -50,6 +50,7 @@ import (
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	sandboxcontrollers "sigs.k8s.io/agent-sandbox/controllers"
 	extensionsv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/internal/utils"
 )
 
 const (
@@ -91,6 +92,10 @@ const (
 	// re-evaluation lands strictly after the deadline despite clock jitter.
 	graceRequeueSlack = 2 * time.Second
 )
+
+// errOwnerRefreshInventoryIncomplete marks a pass stopped by a concurrent owner
+// change. It must be checked independently of APIStatus errors joined earlier.
+var errOwnerRefreshInventoryIncomplete = errors.New("owner refresh left sandbox inventory incomplete")
 
 // graceRequeueJitterFactor spreads the self-scheduled post-grace requeues of
 // a fleet warmed together (whose grace deadlines therefore cluster) across a
@@ -528,6 +533,10 @@ func (r *SandboxWarmPoolReconciler) reconcilePool(ctx context.Context, warmPool 
 	// paths but still occupy capacity: terminating members and unadopted
 	// orphans.
 	activeSandboxes, inactiveReplicas, allErrors := r.filterActiveSandboxes(ctx, poolKey, warmPool, sandboxList.Items, template, currentSandboxBlueprintHash, tmplErr)
+	if errors.Is(allErrors, errOwnerRefreshInventoryIncomplete) {
+		// Retry from the next observed ownership view before sizing the pool.
+		return 0, allErrors
+	}
 
 	now := r.clockNow()
 	var healthySandboxes []sandboxv1beta1.Sandbox
@@ -1060,6 +1069,20 @@ func (r *SandboxWarmPoolReconciler) filterActiveSandboxes(ctx context.Context, p
 		if !isOrphan && !isControlledByPool {
 			logger.Info("Ignoring sandbox with different controller", "sandbox", sb.Name, "controller", controllerRef.Name)
 			continue
+		}
+
+		// A pool Sandbox created before v1.0 still names its SandboxWarmPool as v1alpha1.
+		if refs, changed := utils.RefreshedOwnerReferences(sb.OwnerReferences, warmPool.UID, extensionsv1beta1.GroupVersion.String()); changed {
+			patch := client.MergeFromWithOptions(sb.DeepCopy(), client.MergeFromWithOptimisticLock{})
+			sb.OwnerReferences = refs
+			if err := r.Patch(ctx, &sb, patch); err != nil {
+				allErrors = errors.Join(allErrors, fmt.Errorf("failed to refresh owner reference on sandbox %q: %w", sb.Name, err))
+				if k8serrors.IsConflict(err) {
+					// Ownership may have changed through claim adoption. Stop
+					// this pass rather than update or delete the stale object.
+					return nil, inactiveReplicas, errors.Join(allErrors, errOwnerRefreshInventoryIncomplete)
+				}
+			}
 		}
 
 		if tmplErr == nil && (updateStrategy == extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType || isOrphan) {

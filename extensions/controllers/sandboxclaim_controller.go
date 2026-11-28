@@ -601,6 +601,14 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 		return nil, err
 	}
 	if sandbox != nil {
+		// A Sandbox adopted before v1.0 still names its SandboxClaim as v1alpha1.
+		if refs, changed := utils.RefreshedOwnerReferences(sandbox.OwnerReferences, claim.UID, extensionsv1beta1.GroupVersion.String()); changed {
+			ownerPatch := client.MergeFromWithOptions(sandbox.DeepCopy(), client.MergeFromWithOptimisticLock{})
+			sandbox.OwnerReferences = refs
+			if err := r.Patch(ctx, sandbox, ownerPatch); err != nil {
+				return sandbox, fmt.Errorf("failed to refresh owner reference on sandbox %q: %w", sandbox.Name, err)
+			}
+		}
 		logger.V(4).Info("Fast path: sandbox found or adopted, propagating metadata", "claim", claim.Name)
 		template, templateErr := r.getTemplate(ctx, claim)
 		if templateErr != nil {

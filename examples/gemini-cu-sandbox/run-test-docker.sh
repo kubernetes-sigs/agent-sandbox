@@ -50,12 +50,14 @@ if [ "$NO_BUILD" = false ]; then
     docker build --load -t sandbox-gemini-runtime "$SCRIPT_DIR"
 fi
 
-xhost +local:docker
+if [ -n "$INTERACTIVE_FLAG" ]; then
+    xhost +local:docker
+fi
 echo "Stopping any existing sandbox-gemini-runtime container..."
 docker rm -f sandbox-gemini-runtime || true
 echo "Starting sandbox-gemini-runtime container..."
 echo "Make sure to set GEMINI_API_KEY environment variable before running the script"
-docker run $DOCKER_RUN_FLAGS --rm --name sandbox-gemini-runtime -p 8080:8080 $NON_INTERACTIVE_FLAG -e GEMINI_API_KEY=$GEMINI_API_KEY sandbox-gemini-runtime 
+docker run $DOCKER_RUN_FLAGS --rm --name sandbox-gemini-runtime -p 8080:8888 $NON_INTERACTIVE_FLAG -e GEMINI_API_KEY=$GEMINI_API_KEY sandbox-gemini-runtime
 
 cleanup() {
     echo "Stopping sandbox-runtime container..."

@@ -68,7 +68,7 @@ func (p *ManagedProcess) IsCompleted() bool {
 
 // Signal delivers sig to the process group when possible (-pid), falling
 // back to the single process. Signalling an already-completed process is a
-// no-op so shutdown sweeps don't race with process exit.
+// no-op.
 func (p *ManagedProcess) Signal(sig syscall.Signal) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

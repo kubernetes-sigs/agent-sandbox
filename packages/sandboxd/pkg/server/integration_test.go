@@ -22,6 +22,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -197,6 +199,39 @@ func TestShutdownProcessesTerminatesChildren(t *testing.T) {
 	require.NoError(t, conn.Close())
 	grpcServer.GracefulStop()
 	_ = lis.Close()
+}
+
+// TestShutdownProcessesTerminatesExecute verifies that daemon shutdown also
+// SIGTERMs Execute commands, so they exit on their own and return their result.
+func TestShutdownProcessesTerminatesExecute(t *testing.T) {
+	skipIfGVisor(t)
+	root := t.TempDir()
+	srv, err := New(Options{RootDir: root, Log: logr.Discard()})
+	require.NoError(t, err)
+	client := newAuthGRPCClient(t, srv)
+
+	started := filepath.Join(root, "started")
+	script := "trap 'echo terminated; exit 7' TERM; touch started; sleep 300 & wait"
+	var resp *processv1.ExecuteResponse
+	var execErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, execErr = client.Execute(testCtx(t), &processv1.ExecuteRequest{
+			Config: &processv1.ProcessConfig{Command: []string{"sh", "-c", script}},
+		})
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, 10*time.Second, 20*time.Millisecond)
+
+	srv.ShutdownProcesses(context.Background())
+
+	<-done
+	require.NoError(t, execErr)
+	require.Equal(t, int32(7), resp.GetExitCode())
+	require.Equal(t, "terminated\n", string(resp.GetStdout()))
 }
 
 func TestNewServerEmptyRootDirError(t *testing.T) {

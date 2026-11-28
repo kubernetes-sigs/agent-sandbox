@@ -70,11 +70,15 @@ func (r *ProcessRegistry) Remove(pid int32) {
 	delete(r.processes, pid)
 }
 
-// SignalAll sends a signal to all currently active processes in the registry.
+// SignalAll sends sig to the process group of every child recorded by
+// StartChild, which covers both Start processes and Execute commands. If the
+// group signal fails, it signals the child's PID instead.
 func (r *ProcessRegistry) SignalAll(sig syscall.Signal) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, p := range r.processes {
-		_ = p.Signal(sig)
+	r.childMu.Lock()
+	defer r.childMu.Unlock()
+	for pid := range r.children {
+		if err := syscall.Kill(-pid, sig); err != nil {
+			_ = syscall.Kill(pid, sig)
+		}
 	}
 }

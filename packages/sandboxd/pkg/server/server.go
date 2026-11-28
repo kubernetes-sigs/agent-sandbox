@@ -38,7 +38,7 @@ import (
 // (HTTP timeouts, shutdown budget) live in cmd/sandboxd/main.go, mirroring
 // how envd organizes its constants.
 const (
-	// processShutdownGrace is how long managed processes get to exit after
+	// processShutdownGrace is how long child processes get to exit after
 	// SIGTERM before being SIGKILLed during daemon shutdown.
 	processShutdownGrace = 2 * time.Second
 	// pipeDrainGrace bounds how long Start waits for the stdout/stderr pipe
@@ -144,9 +144,9 @@ func (s *Server) SetReady(ready bool) {
 	s.restServer.SetReady(ready)
 }
 
-// ShutdownProcesses terminates all managed processes: SIGTERM, a grace
-// period, then SIGKILL for stragglers. Ending the processes also ends their
-// Start streams, unblocking a subsequent grpc GracefulStop.
+// ShutdownProcesses terminates every command sandboxd started: SIGTERM, a
+// grace period, then SIGKILL for stragglers. Ending them also ends their Start
+// streams and Execute calls, unblocking a subsequent grpc GracefulStop.
 func (s *Server) ShutdownProcesses(ctx context.Context) {
 	s.registry.SignalAll(syscall.SIGTERM)
 

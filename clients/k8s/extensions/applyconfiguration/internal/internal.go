@@ -2747,6 +2747,9 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.extensions.api.v1beta1.SandboxWarmPoolSpec
   map:
     fields:
+    - name: priorityClassName
+      type:
+        scalar: string
     - name: readinessGracePeriodSeconds
       type:
         scalar: numeric

@@ -1299,7 +1299,23 @@ func (r *SandboxWarmPoolReconciler) getTemplate(ctx context.Context, warmPool *e
 		return nil, err
 	}
 
-	return template, nil
+	return withPoolPriorityClass(template, warmPool), nil
+}
+
+// withPoolPriorityClass returns the template as the pool's Pods see it: with
+// the pool's priorityClassName, when set, replacing the template's. It also
+// clears the template's priority and preemptionPolicy so admission resolves
+// them from the new class. The hash, the staleness check and the Pod build all
+// use this view so they agree.
+func withPoolPriorityClass(template *extensionsv1beta1.SandboxTemplate, warmPool *extensionsv1beta1.SandboxWarmPool) *extensionsv1beta1.SandboxTemplate {
+	if warmPool.Spec.PriorityClassName == "" {
+		return template
+	}
+	template = template.DeepCopy()
+	template.Spec.PodTemplate.Spec.PriorityClassName = warmPool.Spec.PriorityClassName
+	template.Spec.PodTemplate.Spec.Priority = nil
+	template.Spec.PodTemplate.Spec.PreemptionPolicy = nil
+	return template
 }
 
 // isSandboxStale checks if the sandbox version matches the current template.

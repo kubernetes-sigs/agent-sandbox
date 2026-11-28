@@ -79,6 +79,18 @@ type SandboxWarmPoolSpec struct {
 	// +kubebuilder:validation:Minimum=30
 	// +optional
 	ReadinessGracePeriodSeconds *int32 `json:"readinessGracePeriodSeconds,omitempty"`
+
+	// priorityClassName overrides the PriorityClass of the pool's Pods. Give
+	// the pool a lower class than your other workloads so the scheduler can
+	// preempt idle warm Pods instead of the cluster adding a node.
+	// Pod priority is immutable, so a running Pod keeps this class after a
+	// SandboxClaim adopts it and can still be preempted while in use. A Pod
+	// recreated on resume uses the SandboxTemplate's class.
+	// If unset, the SandboxTemplate's priorityClassName applies.
+	// Changing this field marks existing sandboxes stale.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 }
 
 // SandboxWarmPoolUpdateStrategyType is a string enumeration type that enumerates

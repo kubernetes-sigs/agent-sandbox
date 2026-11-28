@@ -42,6 +42,9 @@ spec:
             type: object
           spec:
             properties:
+              priorityClassName:
+                maxLength: 253
+                type: string
               readinessGracePeriodSeconds:
                 format: int32
                 minimum: 30

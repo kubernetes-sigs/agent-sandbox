@@ -2321,6 +2321,22 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		return sb
 	}
 
+	// A pool with priorityClassName stamps the blueprint hash of the template
+	// with that class applied, so Recreate must hash it the same way.
+	priorityPool := warmPool.DeepCopy()
+	priorityPool.Spec.PriorityClassName = "warm-low"
+	priorityBlueprintHash, hashErr := computeSandboxBlueprintHash(withPoolPriorityClass(template, priorityPool))
+	if hashErr != nil {
+		t.Fatalf("failed to compute blueprint hash: %v", hashErr)
+	}
+
+	withPoolPriority := func(sb *sandboxv1beta1.Sandbox) *sandboxv1beta1.Sandbox {
+		sb.Spec.PodTemplate.Spec.PriorityClassName = "warm-low"
+		sb.Spec.PodTemplate.Spec.Priority = new(int32(-10))
+		sb.Spec.PodTemplate.Spec.PreemptionPolicy = new(corev1.PreemptNever)
+		return sb
+	}
+
 	recreateStrategy := &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: extensionsv1beta1.RecreateSandboxWarmPoolUpdateStrategyType}
 	onReplenishStrategy := &extensionsv1beta1.SandboxWarmPoolUpdateStrategy{Type: extensionsv1beta1.OnReplenishSandboxWarmPoolUpdateStrategyType}
 
@@ -2328,6 +2344,8 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 		name                    string
 		existingObjects         []client.Object
 		warmPoolStrategy        *extensionsv1beta1.SandboxWarmPoolUpdateStrategy
+		warmPoolPriorityClass   string
+		expectedPriorityClass   string
 		expectSandboxAdoption   bool
 		expectedAdoptedSandbox  string
 		expectedAnnotations     map[string]string
@@ -2621,6 +2639,19 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
+			name:                  "adopts fresh candidate under Recreate when the pool sets priorityClassName",
+			warmPoolStrategy:      recreateStrategy,
+			warmPoolPriorityClass: "warm-low",
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withPoolPriority(withBlueprintHash(createWarmPoolSandbox("fresh-priority", metav1.Now(), true), priorityBlueprintHash)),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "fresh-priority",
+			expectNewSandboxCreated: false,
+		},
+		{
 			// Regression for issue #764: a candidate whose blueprint-hash label is missing (e.g. a
 			// sandbox created by an older controller version before the label existed) but whose
 			// blueprint is still semantically current must be adopted, not dropped. The pool
@@ -2658,6 +2689,19 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			expectNewSandboxCreated: false,
 		},
 		{
+			name:             "keeps the candidate's priority when the pool leaves priorityClassName unset",
+			warmPoolStrategy: onReplenishStrategy,
+			existingObjects: []client.Object{
+				template,
+				claim,
+				withPoolPriority(withBlueprintHash(createWarmPoolSandbox("stale-priority", metav1.Now(), true), "stale-hash")),
+			},
+			expectSandboxAdoption:   true,
+			expectedAdoptedSandbox:  "stale-priority",
+			expectedPriorityClass:   "warm-low",
+			expectNewSandboxCreated: false,
+		},
+		{
 			name:             "adopts stale candidate when warm pool strategy unset (defaults to OnReplenish)",
 			warmPoolStrategy: nil,
 			existingObjects: []client.Object{
@@ -2678,6 +2722,7 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 			// the claim controller reads the intended strategy (issue #764).
 			caseWarmPool := warmPool.DeepCopy()
 			caseWarmPool.Spec.UpdateStrategy = tc.warmPoolStrategy
+			caseWarmPool.Spec.PriorityClassName = tc.warmPoolPriorityClass
 			var fakeClient client.Client = fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(append(tc.existingObjects, caseWarmPool)...).
@@ -2770,6 +2815,10 @@ func TestSandboxClaimSandboxAdoption(t *testing.T) {
 						t.Errorf("expected eviction annotation to be removed from adopted sandbox")
 					}
 				}
+
+				// A pool priorityClassName is for idle Pods, so adoption swaps in the
+				// template's priority. Without one, the candidate keeps its own.
+				require.Equal(t, tc.expectedPriorityClass, adoptedSandbox.Spec.PodTemplate.Spec.PriorityClassName)
 
 				// 2. Verify SandboxID label was added to pod template
 				expectedUID := string(types.UID("claim-uid"))

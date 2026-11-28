@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 # Make the test importable regardless of how it is invoked (pytest, unittest, etc.)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from scrape_controller_metrics import main, parse_histogram, write_junit
+from scrape_controller_metrics import format_ms, main, parse_histogram, write_junit
 
 import http.server
 import threading
@@ -43,9 +43,10 @@ agent_sandbox_claim_controller_startup_latency_ms_bucket{scale="large",idle="fal
 """
         res = parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", mock_data)
         self.assertIsNotNone(res)
-        p50, p90, p99, count = res
+        p50, p90, p99, count, first_le = res
         self.assertEqual(count, 100)
         self.assertEqual(p50, 100.0)
+        self.assertEqual(first_le, 100.0)
 
     def test_multiple_label_sets_aggregated(self):
         """Verify that bucket counts across multiple label combinations are correctly aggregated."""
@@ -59,10 +60,24 @@ agent_sandbox_claim_controller_startup_latency_ms_bucket{launch_type="cold",le="
 """
         res = parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", mock_data)
         self.assertIsNotNone(res)
-        p50, p90, p99, count = res
+        p50, p90, p99, count, first_le = res
         self.assertEqual(count, 100)
         self.assertEqual(p50, 100.0)
         self.assertAlmostEqual(p90, 260.0)
+
+    def test_percentiles_in_lowest_bucket_are_its_upper_bound(self):
+        """Verify that samples under the lowest bucket are not reported as 50, 90 and 99."""
+        mock_data = """
+agent_sandbox_claim_controller_startup_latency_ms_bucket{le="100"} 64
+agent_sandbox_claim_controller_startup_latency_ms_bucket{le="250"} 64
+agent_sandbox_claim_controller_startup_latency_ms_bucket{le="+Inf"} 64
+"""
+        res = parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", mock_data)
+        self.assertEqual(tuple(res), (100.0, 100.0, 100.0, 64, 100.0))
+
+    def test_format_ms_marks_lowest_bucket_as_upper_bound(self):
+        self.assertEqual(format_ms(100.0, 100.0), "<= 100.0")
+        self.assertEqual(format_ms(260.0, 100.0), "~260.0")
 
     def test_empty_or_zero_counts(self):
         """Verify that empty data or 0-count histograms return None."""

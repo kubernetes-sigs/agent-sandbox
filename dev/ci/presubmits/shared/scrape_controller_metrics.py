@@ -17,12 +17,26 @@ import argparse
 import os
 import re
 import sys
+from typing import NamedTuple
 import urllib.request
 import xml.etree.ElementTree as ET
 
 
+class Percentiles(NamedTuple):
+    p50: float
+    p90: float
+    p99: float
+    count: int
+    # Upper bound of the lowest bucket. A percentile equal to it only means "at most this".
+    first_le: float
+
+
 def parse_histogram(metric_name, data):
     """Parses Prometheus histogram buckets and computes interpolated percentiles.
+
+    A percentile in the lowest bucket is reported as that bucket's upper bound. The
+    histogram cannot say where in the bucket the samples fall, so interpolating from 0
+    would print numbers like 50, 90 and 99 that the samples do not support.
 
     The controller histograms are labeled (e.g. launch_type, sandbox_template). This parser
     aggregates bucket counts across all label sets (equivalent to PromQL `sum(...) by (le)`).
@@ -54,7 +68,7 @@ def parse_histogram(metric_name, data):
         prev_le, prev_count = 0.0, 0.0
         for le, count in buckets:
             if count >= target:
-                if count == prev_count:
+                if count == prev_count or prev_le == 0.0:
                     return le
                 # Linear interpolation between adjacent histogram buckets
                 fraction = (target - prev_count) / (count - prev_count)
@@ -62,7 +76,14 @@ def parse_histogram(metric_name, data):
             prev_le, prev_count = le, count
         return float("inf")
 
-    return get_percentile(0.50), get_percentile(0.90), get_percentile(0.99), int(total)
+    return Percentiles(
+        get_percentile(0.50), get_percentile(0.90), get_percentile(0.99), int(total), buckets[0][0] if buckets else 0.0
+    )
+
+
+def format_ms(value, first_le):
+    """Formats a percentile, marking a value in the lowest bucket as an upper bound."""
+    return f"<= {value:.1f}" if value <= first_le else f"~{value:.1f}"
 
 
 def write_junit(path, testcases):
@@ -133,26 +154,28 @@ def main():
         res = parse_histogram("agent_sandbox_claim_controller_startup_latency_ms", raw)
         print("  • Controller Claim Adoption Latency (ms):")
         if res:
-            p50, p90, p99, count = res
-            v50 = " [VIOLATION]" if p50 > args.threshold_50 else ""
-            v90 = " [VIOLATION]" if p90 > args.threshold_90 else ""
-            v99 = " [VIOLATION]" if p99 > args.threshold_99 else ""
+            p50, p90, p99, count, first_le = res
             print(f"      Sample Size: {count}")
-            print(f"      P50: ~{p50:.1f} ms (Target: <= {args.threshold_50:.1f} ms){v50}")
-            print(f"      P90: ~{p90:.1f} ms (Target: <= {args.threshold_90:.1f} ms){v90}")
-            print(f"      P99: ~{p99:.1f} ms (Target: <= {args.threshold_99:.1f} ms){v99}")
+            violated = False
             for label, value, threshold in (
                 ("p50", p50, args.threshold_50),
                 ("p90", p90, args.threshold_90),
                 ("p99", p99, args.threshold_99),
             ):
                 failure = None
+                violation = ""
                 if value > threshold:
+                    violated = True
+                    violation = " [VIOLATION]"
                     failure = (
-                        f"{label.upper()}: ~{value:.1f} ms exceeded target <= {threshold:.1f} ms"
+                        f"{label.upper()}: {format_ms(value, first_le)} ms exceeded target <= {threshold:.1f} ms"
                     )
+                print(
+                    f"      {label.upper()}: {format_ms(value, first_le)} ms"
+                    f" (Target: <= {threshold:.1f} ms){violation}"
+                )
                 testcases.append((f"claim-adoption-latency-{label}", failure))
-            if p50 > args.threshold_50 or p90 > args.threshold_90 or p99 > args.threshold_99:
+            if violated:
                 print("      Status: [FAILED] ❌ (Latency exceeded threshold)")
                 all_passed = False
             else:
@@ -168,9 +191,12 @@ def main():
         # 2. Sandbox Pod Provisioning Latency (Informational Telemetry)
         res_prov = parse_histogram("agent_sandbox_creation_latency_ms", raw)
         if res_prov:
-            p50, p90, p99, count = res_prov
+            p50, p90, p99, count, first_le = res_prov
             print(f"  • Sandbox Pod Provisioning Latency (ms) (Sample Size: {count}):")
-            print(f"      P50: ~{p50:.1f} ms | P90: ~{p90:.1f} ms | P99: ~{p99:.1f} ms")
+            print(
+                f"      P50: {format_ms(p50, first_le)} ms | P90: {format_ms(p90, first_le)} ms"
+                f" | P99: {format_ms(p99, first_le)} ms"
+            )
         else:
             print("  • Sandbox Pod Provisioning Latency (ms): No metrics recorded")
 

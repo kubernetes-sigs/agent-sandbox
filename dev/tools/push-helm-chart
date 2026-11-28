@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Packages the helm/ chart and optionally pushes it as an OCI artifact.
+
+The chart is packaged with a prebuilt, version-pinned helm binary (or HELM_BIN
+when set). When `--git-tag` is supplied (as in cloudbuild.yaml), the chart's
+`version` and `appVersion` are derived from the git tag so published chart
+versions follow release tags. With `--push`, the resulting .tgz is pushed to
+`${IMAGE_PREFIX}/charts` as an OCI artifact.
+
+Without `--push` the script only packages the chart into a temporary directory
+to validate it, so it is safe to run locally at any time.
+"""
+
+import argparse
+import hashlib
+import io
+import os
+import platform
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+
+from shared import utils
+
+# Where published agent-sandbox artifacts live in the staging registry.
+DEFAULT_IMAGE_PREFIX = "us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox"
+
+HELM_VERSION = "v3.20.0"
+HELM_SHA256 = {
+    ("linux", "amd64"): "dbb4c8fc8e19d159d1a63dda8db655f9ffa4aac1b9a6b188b34a40957119b286",
+    ("linux", "arm64"): "bfb14953295d5324d47ab55f3dfba6da28d46c848978c8fbf412d4271bdc29f1",
+    ("darwin", "amd64"): "724aef60f737ca73cfcc77924219dbfb229dde8492b2722cb372da617fd77367",
+    ("darwin", "arm64"): "1cb8022ef9c88026adf236cbdf02a80bf7678632d1c39d3d8045e815959ab20e",
+}
+
+CHART_NAME_RE = re.compile(r"^name:\s*(.+?)\s*$", re.MULTILINE)
+CHART_VERSION_RE = re.compile(
+    r"^version:\s*[\"']?(\d+\.\d+\.\d+)[\"']?\s*$", re.MULTILINE)
+PROW_DATE_PREFIX_RE = re.compile(r"^v\d{8}-")
+RELEASE_TAG_RE = re.compile(
+    r"^v?(?P<core>\d+\.\d+\.\d+)"
+    r"(?:[-.]?(?P<rc>rc\.?\d+))?"
+    r"(?:[-.]?(?P<post>post\.?\d+))?$"
+)
+
+
+def chart_info(chart_yaml):
+    """Parses (name, version) from Chart.yaml contents."""
+    name = CHART_NAME_RE.search(chart_yaml)
+    version = CHART_VERSION_RE.search(chart_yaml)
+    if not name:
+        raise ValueError("Chart.yaml has no 'name:' field")
+    if not version:
+        raise ValueError("Chart.yaml has no 'version: X.Y.Z' field")
+    return name.group(1).strip(), version.group(1)
+
+
+def resolve_versions(default_chart_version, git_tag=None):
+    """Returns (chart_version, app_version) for packaging.
+
+    When git_tag is omitted, returns (default_chart_version, None) so local
+    packaging uses Chart.yaml as-is. When git_tag is a release, RC, or post tag
+    (with or without Prow's `vYYYYMMDD-` prefix), chart_version strips any
+    `vYYYYMMDD-` prefix and normalizes `rc`/`post` suffixes to strict SemVer 2.0
+    for `helm package`, while app_version preserves the full tag (including
+    `vYYYYMMDD-` when present) so it matches the container image tag published
+    in the staging registry. Non-release tags (such as `git describe` postsubmit
+    tags) keep the full tag as app_version with a `0.0.0-<tag>` chart_version.
+    """
+    if not git_tag:
+        return default_chart_version, None
+
+    raw = git_tag.strip()
+    stripped = PROW_DATE_PREFIX_RE.sub("", raw)
+    match = RELEASE_TAG_RE.match(stripped)
+    if match:
+        prerelease = "-".join(
+            part for part in (match.group("rc"), match.group("post")) if part
+        )
+        chart_version = (
+            f"{match.group('core')}-{prerelease}"
+            if prerelease else match.group("core")
+        )
+        app_version = raw if raw.startswith("v") else f"v{raw}"
+        return chart_version, app_version
+
+    return f"0.0.0-{raw}", raw
+
+
+def registry_host(image_prefix):
+    """The registry host of an image prefix (its first path component)."""
+    return image_prefix.split("/", 1)[0]
+
+
+def oci_charts_repo(image_prefix):
+    """The OCI repository URI passed to `helm push`.
+
+    helm push appends "/${chart_name}:${version}" to this reference.
+    """
+    return f"oci://{image_prefix}/charts"
+
+
+def retry(fn, description, attempts=3, initial_delay=2.0):
+    """Runs fn up to attempts times with exponential backoff on transient failures."""
+    delay = initial_delay
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except (subprocess.CalledProcessError, OSError) as exc:
+            if attempt == attempts:
+                raise
+            print(
+                f"{description} failed (attempt {attempt}/{attempts}): {exc}; "
+                f"retrying in {delay:.1f}s..."
+            )
+            time.sleep(delay)
+            delay *= 2
+
+
+def host_platform():
+    """Returns normalized (os_name, arch) for fetching prebuilt Helm binaries."""
+    os_name = platform.system().lower()
+    machine = platform.machine().lower()
+    arch_map = {
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }
+    arch = arch_map.get(machine, machine)
+    if (os_name, arch) not in HELM_SHA256:
+        raise RuntimeError(f"Unsupported platform for pinned helm: {os_name}/{arch}")
+    return os_name, arch
+
+
+def ensure_helm(repo_root):
+    """Returns path to a pinned prebuilt helm binary, downloading if needed."""
+    env_bin = os.getenv("HELM_BIN")
+    if env_bin:
+        return env_bin
+
+    os_name, arch = host_platform()
+    expected_sha = HELM_SHA256[(os_name, arch)]
+    cache_dir = os.path.join(
+        repo_root, "dev", "tools", "tmp", f"helm-{HELM_VERSION}-{os_name}-{arch}"
+    )
+    helm_path = os.path.join(cache_dir, "helm")
+    if os.path.isfile(helm_path) and os.access(helm_path, os.X_OK):
+        return helm_path
+
+    url = f"https://get.helm.sh/helm-{HELM_VERSION}-{os_name}-{arch}.tar.gz"
+    print(f"downloading pinned helm {HELM_VERSION} for {os_name}/{arch}...")
+
+    def download():
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            return resp.read()
+
+    data = retry(download, f"download {url}")
+    actual_sha = hashlib.sha256(data).hexdigest()
+    if actual_sha != expected_sha:
+        raise RuntimeError(
+            f"SHA-256 mismatch for {url}: expected {expected_sha}, got {actual_sha}"
+        )
+
+    member_name = f"{os_name}-{arch}/helm"
+    os.makedirs(cache_dir, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        member = tf.extractfile(member_name)
+        if member is None:
+            raise RuntimeError(f"{member_name} not found in {url}")
+        fd, tmp_path = tempfile.mkstemp(prefix=".helm-", dir=cache_dir)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(member.read())
+            os.chmod(tmp_path, 0o755)
+            os.replace(tmp_path, helm_path)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+
+    return helm_path
+
+
+def package_chart(repo_root, chart_dir, out_dir, chart_version=None, app_version=None, helm_bin=None):
+    """Packages the chart into out_dir."""
+    helm = helm_bin or ensure_helm(repo_root)
+    cmd = [helm, "package", chart_dir, "--destination", out_dir]
+    if chart_version:
+        cmd.extend(["--version", chart_version])
+    if app_version:
+        cmd.extend(["--app-version", app_version])
+    subprocess.check_call(cmd, cwd=repo_root)
+
+
+def configure_gcloud_for_registry(image_prefix):
+    """Authenticates the Docker credential helper for the artifact registry."""
+    subprocess.check_call(
+        ["gcloud", "auth", "configure-docker",
+         registry_host(image_prefix), "--quiet"],
+    )
+
+
+def push_chart(repo_root, out_dir, image_prefix, chart_name, chart_version, helm_bin=None):
+    """Pushes the packaged .tgz as an OCI artifact."""
+    helm = helm_bin or ensure_helm(repo_root)
+    tgz = os.path.join(out_dir, f"{chart_name}-{chart_version}.tgz")
+    repo = oci_charts_repo(image_prefix)
+    retry(
+        lambda: subprocess.check_call([helm, "push", tgz, repo], cwd=repo_root),
+        description=f"helm push {chart_name}-{chart_version}",
+    )
+
+
+def main(args):
+    repo_root = utils.get_repo_root()
+    chart_dir = os.path.join(repo_root, "helm")
+    chart_path = os.path.join(chart_dir, "Chart.yaml")
+    if not os.path.isfile(chart_path):
+        sys.exit(f"ERROR: {chart_path} does not exist.")
+
+    try:
+        with open(chart_path) as f:
+            chart_name, default_version = chart_info(f.read())
+    except ValueError as exc:
+        sys.exit(f"ERROR: {exc}")
+
+    chart_version, app_version = resolve_versions(default_version, args.git_tag)
+    image_prefix = (args.image_prefix or DEFAULT_IMAGE_PREFIX).rstrip("/")
+    oci_ref = f"{oci_charts_repo(image_prefix)}/{chart_name}:{chart_version}"
+    helm_bin = ensure_helm(repo_root)
+
+    # Package into a throwaway directory so the worktree stays clean whether
+    # or not the push fails partway through.
+    with tempfile.TemporaryDirectory(prefix="agent-sandbox-chart-") as out_dir:
+        print(f"packaging chart {chart_name}-{chart_version}...")
+        package_chart(repo_root, chart_dir, out_dir,
+                      chart_version=chart_version, app_version=app_version,
+                      helm_bin=helm_bin)
+
+        if not args.push:
+            print(
+                f"dry run: validated package {chart_name}-{chart_version}.tgz "
+                f"(temp dir cleaned up); not pushing {oci_ref}."
+            )
+            return 0
+
+        print(f"authenticating docker for {registry_host(image_prefix)}...")
+        configure_gcloud_for_registry(image_prefix)
+        push_chart(repo_root, out_dir, image_prefix, chart_name, chart_version,
+                   helm_bin=helm_bin)
+        print(f"pushed chart to {oci_ref}")
+
+    return 0
+
+
+def make_parser():
+    """Argument parser for push-helm-chart."""
+    parser = argparse.ArgumentParser(
+        description="Package and optionally push the helm chart as an OCI artifact")
+    parser.add_argument(
+        "--image-prefix",
+        dest="image_prefix",
+        type=str,
+        default=os.getenv("IMAGE_PREFIX"),
+        help=f"Registry path under which the chart is stored "
+             f"(defaults to {DEFAULT_IMAGE_PREFIX}; a trailing slash is ignored).")
+    parser.add_argument(
+        "--git-tag",
+        dest="git_tag",
+        type=str,
+        default=os.getenv("GIT_TAG"),
+        help="Git/Prow tag (e.g. vYYYYMMDD-v0.3.10 or v0.3.10) used to stamp "
+             "the chart version and appVersion. Falls back to Chart.yaml version.")
+    parser.add_argument(
+        "--push",
+        dest="push",
+        action="store_true",
+        default=os.getenv("PUSH_CHART", "false").lower() in ("1", "true", "yes", "on"),
+        help="Push the packaged chart to --image-prefix instead of only packaging "
+             "it. Also read from the PUSH_CHART environment variable.")
+    return parser
+
+
+if __name__ == "__main__":
+    sys.exit(main(make_parser().parse_args()))

@@ -22,6 +22,15 @@ from k8s_agent_sandbox.exceptions import SandboxRequestError
 TEST_MANIFESTS_DIR = "test/e2e/clients/python/test_manifests"
 TEMPLATE_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_template.yaml")
 WARMPOOL_YAML_PATH = os.path.join(TEST_MANIFESTS_DIR, "sandbox_warmpool.yaml")
+SANDBOXD_TEMPLATE_YAML_PATH = os.path.join(
+    TEST_MANIFESTS_DIR, "sandboxd_template.yaml"
+)
+SANDBOXD_WARMPOOL_YAML_PATH = os.path.join(
+    TEST_MANIFESTS_DIR, "sandboxd_warmpool.yaml"
+)
+SANDBOXD_COLDPOOL_YAML_PATH = os.path.join(
+    TEST_MANIFESTS_DIR, "sandboxd_coldpool.yaml"
+)
 
 ROUTER_YAML_PATH = (
     "clients/python/agentic-sandbox-client/sandbox-router/sandbox_router.yaml"

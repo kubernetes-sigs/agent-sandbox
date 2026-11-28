@@ -21,6 +21,9 @@ from test.e2e.clients.python.framework.sdk_helpers import (
     GATEWAY_ROUTE_NAME,
     GATEWAY_YAML_PATH,
     ROUTER_YAML_PATH,
+    SANDBOXD_COLDPOOL_YAML_PATH,
+    SANDBOXD_TEMPLATE_YAML_PATH,
+    SANDBOXD_WARMPOOL_YAML_PATH,
     TEMPLATE_YAML_PATH,
     WARMPOOL_YAML_PATH,
     get_image_prefix,
@@ -194,3 +197,34 @@ spec:
     tc.apply_manifest_text(manifest, namespace=temp_namespace)
     print("Coldpool manifest applied.")
     return "python-sdk-coldpool"
+
+
+@pytest.fixture
+def sandboxd_template(tc, temp_namespace):
+    """Deploys the sandboxd SandboxTemplate into the test namespace"""
+    with open(SANDBOXD_TEMPLATE_YAML_PATH, "r") as f:
+        manifest = f.read().format(
+            image_prefix=get_image_prefix(), image_tag=get_image_tag()
+        )
+    tc.apply_manifest_text(manifest, namespace=temp_namespace)
+    return "python-sdk-sandboxd-template"
+
+
+@pytest.fixture
+def sandboxd_warmpool(tc, temp_namespace, sandboxd_template):
+    """Deploys a sandboxd SandboxWarmPool and waits until it is ready"""
+    with open(SANDBOXD_WARMPOOL_YAML_PATH, "r") as f:
+        manifest = yaml.safe_load(f)
+    tc.apply_manifest_text(yaml.safe_dump(manifest), namespace=temp_namespace)
+    warmpool_name = manifest["metadata"]["name"]
+    tc.wait_for_warmpool_ready(warmpool_name, namespace=temp_namespace)
+    return warmpool_name
+
+
+@pytest.fixture
+def sandboxd_coldpool(tc, temp_namespace, sandboxd_template):
+    """Deploys a zero-replica sandboxd SandboxWarmPool for cold start tests"""
+    with open(SANDBOXD_COLDPOOL_YAML_PATH, "r") as f:
+        manifest = yaml.safe_load(f)
+    tc.apply_manifest_text(yaml.safe_dump(manifest), namespace=temp_namespace)
+    return manifest["metadata"]["name"]

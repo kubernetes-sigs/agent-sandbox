@@ -1,0 +1,3 @@
+# Pins the image by digest; image.tag only sets the version label.
+image:
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

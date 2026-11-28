@@ -75,7 +75,8 @@ The following table lists the configurable parameters and their defaults. For fl
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `image.tag` | Controller image tag — **required** | `""` |
+| `image.tag` | Controller image tag — **required** unless `image.digest` is set | `""` |
+| `image.digest` | Controller image digest (e.g. `sha256:<hex>`). When set, the image is `<repository>@<digest>` and `image.tag` only sets the `app.kubernetes.io/version` label | `""` |
 | `image.repository` | Controller image repository | `registry.k8s.io/agent-sandbox/agent-sandbox-controller` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `imagePullSecrets` | List of image pull secrets (e.g. `[{name: my-secret}]`) to add to the Deployment | `[]` |

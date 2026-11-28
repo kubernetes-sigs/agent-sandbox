@@ -7,7 +7,10 @@ namespace:
 
 image:
   repository: registry.k8s.io/agent-sandbox/sandbox-router-go
-  tag: ""  # required, eg. v1.0.8
+  tag: ""  # required unless digest is set, eg. v1.0.8
+  # digest pins the image, eg. sha256:<hex>. When set, the image is
+  # <repository>@<digest> and tag only sets the app.kubernetes.io/version label.
+  digest: ""
   pullPolicy: IfNotPresent
 
 # imagePullSecrets adds image pull secrets to the router PodSpec.

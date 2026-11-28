@@ -146,7 +146,7 @@ func (s *Server) SetReady(ready bool) {
 
 // ShutdownProcesses terminates every command sandboxd started: SIGTERM, a
 // grace period, then SIGKILL for stragglers. Ending them also ends their Start
-// streams and lets Execute calls return, unblocking a subsequent grpc GracefulStop.
+// streams and Execute calls, unblocking a subsequent grpc GracefulStop.
 func (s *Server) ShutdownProcesses(ctx context.Context) {
 	s.registry.SignalAll(syscall.SIGTERM)
 

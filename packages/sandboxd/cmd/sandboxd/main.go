@@ -255,7 +255,8 @@ func run(cfg *config, log logr.Logger) error {
 
 		// Flip readiness first so Kubernetes stops routing, then end child
 		// processes and active watches — that closes their Start and
-		// WatchDir streams, which is what allows GracefulStop to complete.
+		// WatchDir streams and ends Execute calls, which is what allows
+		// GracefulStop to complete.
 		// Without ShutdownWatches an open watch would ride out the full
 		// shutdown timeout and then be force-closed by Stop, which the
 		// client observes as UNAVAILABLE instead of a clean end of stream.

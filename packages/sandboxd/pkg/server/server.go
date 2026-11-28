@@ -38,7 +38,7 @@ import (
 // (HTTP timeouts, shutdown budget) live in cmd/sandboxd/main.go, mirroring
 // how envd organizes its constants.
 const (
-	// processShutdownGrace is how long managed processes get to exit after
+	// processShutdownGrace is how long child processes get to exit after
 	// SIGTERM before being SIGKILLed during daemon shutdown.
 	processShutdownGrace = 2 * time.Second
 	// pipeDrainGrace bounds how long Start waits for the stdout/stderr pipe

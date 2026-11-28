@@ -11,10 +11,13 @@ A `Sandbox` reports its observed state in `status.conditions`. This page maps co
 
 `Ready` is the authoritative signal. There is deliberately no `Running` condition: whether the Pod is up is part of `Ready`. `spec.operatingMode: Running` only states the desired state.
 
+`Ready` and `Serving` answer different questions. Read `Ready` to decide whether to send new work to a Sandbox. SDK ready-waits, SandboxClaim and the warm pool all read `Ready`. Read `Serving` only to keep reaching work that is already bound to the Pod, for example a router that reconnects a client to its running session while the Pod drains. The pair `Ready=False`, `Serving=True` has the same meaning as an EndpointSlice endpoint with `ready: false` and `serving: true`.
+
 | Question | Check | Command |
 | --- | --- | --- |
 | Is the sandbox ready to use? | `Ready=True` | `kubectl wait sandbox/<name> --for=condition=Ready --timeout=2m` |
 | Why isn't it ready? | `Ready` reason and message, plus `PodScheduled` (for example `Unschedulable`) | `kubectl get sandbox <name> -o jsonpath='{range .status.conditions[*]}{.type}{"\t"}{.status}{"\t"}{.reason}{"\t"}{.message}{"\n"}{end}'` |
+| Can the Pod still serve sessions it holds while it terminates? | `Serving=True` (with `Ready=False`, reason `PodTerminating`) | `kubectl get sandbox <name> -o jsonpath='{.status.conditions[?(@.type=="Serving")].status}'` |
 | Has suspension finished? | `Suspended=True` | `kubectl wait sandbox/<name> --for=condition=Suspended --timeout=2m` |
 | Did the workload exit? | `Finished=True`, reason `PodSucceeded` or `PodFailed` | `kubectl get sandbox <name> -o jsonpath='{.status.conditions[?(@.type=="Finished")].reason}'` |
 | Has it expired? | `Ready=False` with reason `SandboxExpired` | `kubectl get sandbox <name> -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}'` |
@@ -24,7 +27,7 @@ A `Sandbox` reports its observed state in `status.conditions`. This page maps co
 
 ### Ready
 
-Summarizes whether the Sandbox can serve traffic. It is `True` only when the backing Pod is `Running` and Ready with a pod IP, and its Service exists if one is required.
+Summarizes whether the Sandbox can take new work. It is `True` only when the backing Pod is `Running` and Ready with a pod IP, and its Service exists if one is required.
 
 | Status | Reason | Meaning |
 | --- | --- | --- |
@@ -38,6 +41,19 @@ Summarizes whether the Sandbox can serve traffic. It is `True` only when the bac
 | `False` | `PodFailed` | The Pod failed. |
 | `False` | `PodTerminating` | The Pod has a deletion timestamp, even if it already reached Failed or Succeeded. `Finished` stays unchanged rather than reporting that phase. With `spec.failedPodPolicy: Recreate`, the controller replaces a Failed Pod instead, so Ready is `DependenciesNotReady` and `Finished` stays absent unless it was already set. |
 | `False` | `SandboxExpired` | `spec.shutdownTime` was reached. Resource cleanup may still be pending or in progress. See [shutdown time]({{< ref "/docs/sandbox/lifecycle" >}}). |
+
+### Serving
+
+Reports whether the backing Pod can serve the work it already holds. It mirrors the Pod's readiness and ignores termination, like the `serving` condition of an EndpointSlice endpoint. `Ready` turns `False` with reason `PodTerminating` as soon as the Pod has a deletion timestamp. A Pod with a graceful shutdown (a `preStop` hook and a long `terminationGracePeriodSeconds`) can stay Ready for much longer, and during that window `Serving` stays `True`. The Sandbox creates its replacement Pod only after the old one is gone, so the terminating Pod is the only one that can serve during the window. A `Ready` Sandbox is always `Serving`.
+
+| Status | Reason | Meaning |
+| --- | --- | --- |
+| `True` | `PodReady` | The Pod is `Running` and Ready with a pod IP. The message says whether it is terminating. |
+| `False` | `PodNotReady` | The Pod exists but is not `Running` and Ready with a pod IP. |
+| `False` | `PodNotFound` | The Sandbox has no Pod, for example while it is suspended or before the Pod is created. |
+| `False` | `PodNotOwned` | The Sandbox is suspended and a Pod it does not own holds its name. |
+| `False` | `SandboxExpired` | `spec.shutdownTime` was reached and the Pod no longer serves. Until then, `Serving` follows the deleted Pod while it drains. |
+| `Unknown` | `PodStateUnknown` | Reconciling the Pod failed, so its state cannot be determined. A running Sandbox reports this when a Pod it does not own holds its name, or when it controls more than one Pod. |
 
 ### Suspended
 

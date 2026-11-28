@@ -187,6 +187,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service does not exist"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -198,6 +199,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -209,6 +211,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -229,6 +232,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Running but not Ready; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -250,6 +254,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod is Ready but has no podIPs yet; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -282,6 +287,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is suspending"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -304,6 +310,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodNotOwned", Message: "Refused to delete pod because it is not owned by this sandbox"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotOwned", Message: "Pod is not owned by this sandbox"},
 			},
 		},
 		{
@@ -334,6 +341,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is suspending"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: failed to delete pod: boom"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -352,6 +360,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Finished", Status: "False", ObservedGeneration: gen, Reason: "NotFinished", Message: "Pod has not reached a terminal phase"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -363,6 +372,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "True", ObservedGeneration: gen, Reason: "PodTerminated", Message: "Pod has been terminated. Sandbox is suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -381,6 +391,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspended"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -395,6 +406,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "Unknown", ObservedGeneration: gen, Reason: "PodStateUnknown", Message: "Pod state is unknown. Sandbox suspension cannot be confirmed"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod state is unknown. Pod scheduling cannot be determined"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: pod get failed"},
+				{Type: "Serving", Status: "Unknown", ObservedGeneration: gen, Reason: "PodStateUnknown", Message: "Pod state is unknown. Serving cannot be determined"},
 			},
 		},
 		{
@@ -411,6 +423,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod state is unknown. Pod scheduling cannot be determined"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: pod list failed"},
+				{Type: "Serving", Status: "Unknown", ObservedGeneration: gen, Reason: "PodStateUnknown", Message: "Pod state is unknown. Serving cannot be determined"},
 			},
 		},
 		{
@@ -431,6 +444,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod state is unknown. Pod scheduling cannot be determined"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: pod get failed"},
+				{Type: "Serving", Status: "Unknown", ObservedGeneration: gen, Reason: "PodStateUnknown", Message: "Pod state is unknown. Serving cannot be determined"},
 			},
 		},
 		{
@@ -455,6 +469,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Finished", Status: "False", ObservedGeneration: gen, Reason: "NotFinished", Message: "Pod has not reached a terminal phase"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -475,6 +490,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Finished", Status: "False", ObservedGeneration: gen, Reason: "NotFinished", Message: "Sandbox has no backing Pod"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -492,6 +508,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod does not exist; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -503,6 +520,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Unknown; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -527,6 +545,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodFailed", Message: "Pod failed"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -551,6 +570,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Finished", Status: "True", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodSucceeded", Message: "Pod completed successfully"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -567,6 +587,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodNotOwned", Message: "Refused to delete pod because it is not owned by this sandbox"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotOwned", Message: "Pod is not owned by this sandbox"},
 			},
 		},
 		{
@@ -579,6 +600,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "ReconcilerError", Message: "Error seen: something went wrong"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -600,6 +622,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "Unschedulable", Message: "0/3 nodes are available: 3 Insufficient cpu."},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -621,6 +644,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "SchedulingGated", Message: "Scheduling is blocked due to non-empty scheduling gates"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -640,6 +664,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodSchedulingUnknown"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending; Service Exists"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -654,6 +679,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod state is unknown. Pod scheduling cannot be determined"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "MultiplePods", Message: "multiple Pods (2) are controlled by this Sandbox; refusing to choose or create a Pod"},
+				{Type: "Serving", Status: "Unknown", ObservedGeneration: gen, Reason: "PodStateUnknown", Message: "Pod state is unknown. Serving cannot be determined"},
 			},
 		},
 		{
@@ -667,6 +693,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "InvalidConfiguration", Message: invalidNameErr.Error()},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotFound", Message: "Pod does not exist"},
 			},
 		},
 		{
@@ -677,6 +704,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod exists with phase: Pending; container "app" is waiting: ImagePullBackOff`},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -691,6 +719,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod exists with phase: Pending; init container "setup" is waiting: CreateContainerConfigError`},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -701,6 +730,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod is Running but not Ready; container "app" is in CrashLoopBackOff (last exit: Error)`},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -711,6 +741,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -721,6 +752,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodAbsent", Message: "Sandbox has no backing Pod"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: "Pod exists with phase: Pending"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotOwned", Message: "Pod is not owned by this sandbox"},
 			},
 		},
 		{
@@ -731,6 +763,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "Unknown", ObservedGeneration: gen, Reason: "PodSchedulingUnknown", Message: "Pod has not reported a PodScheduled condition yet"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "DependenciesNotReady", Message: `Pod is Running but not Ready; container "app" is in CrashLoopBackOff`},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -757,6 +790,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
@@ -778,10 +812,11 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
 			},
 		},
 		{
-			name:    "26. Running Ready Pod with deletionTimestamp is not ready",
+			name:    "26. Running Ready Pod with deletionTimestamp is not ready but still serving",
 			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
 			pod: ownedPod(&corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -800,6 +835,7 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+				{Type: "Serving", Status: "True", ObservedGeneration: gen, Reason: "PodReady", Message: "Pod is terminating and still Ready"},
 			},
 		},
 		{
@@ -821,6 +857,73 @@ func TestComputeConditions(t *testing.T) {
 				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
 				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
 				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
+			},
+		},
+		{
+			name:    "28. Running Ready Pod is Ready and Serving",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(&corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "True", ObservedGeneration: gen, Reason: "DependenciesReady", Message: "Pod is Ready"},
+				{Type: "Serving", Status: "True", ObservedGeneration: gen, Reason: "PodReady", Message: "Pod is Ready"},
+			},
+		},
+		{
+			name:    "29. Terminating Running Pod whose Ready condition turned False stops serving",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeRunning),
+			pod: ownedPod(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: new(metav1.Now()),
+				},
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "NotSuspended", Message: "Sandbox is not suspended"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating"},
+				{Type: "Serving", Status: "False", ObservedGeneration: gen, Reason: "PodNotReady", Message: "Pod is not Running and Ready with an assigned IP"},
+			},
+		},
+		{
+			name:    "30. Suspending Sandbox whose Pod is still Ready keeps serving",
+			sandbox: sbWithMode(sandboxv1beta1.SandboxOperatingModeSuspended),
+			pod: ownedPod(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					DeletionTimestamp: new(metav1.Now()),
+				},
+				Status: corev1.PodStatus{
+					Phase:  corev1.PodRunning,
+					PodIPs: []corev1.PodIP{{IP: "10.244.0.1"}},
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			}),
+			expectedConditions: []metav1.Condition{
+				{Type: "Suspended", Status: "False", ObservedGeneration: gen, Reason: "PodTerminating", Message: "Pod is terminating. Sandbox is suspending"},
+				{Type: "PodScheduled", Status: "True", ObservedGeneration: gen, Reason: "PodScheduled"},
+				{Type: "Ready", Status: "False", ObservedGeneration: gen, Reason: "SandboxSuspended", Message: "Sandbox is suspending"},
+				{Type: "Serving", Status: "True", ObservedGeneration: gen, Reason: "PodReady", Message: "Pod is terminating and still Ready"},
 			},
 		},
 	}
@@ -834,6 +937,281 @@ func TestComputeConditions(t *testing.T) {
 			if diff := cmp.Diff(tc.expectedConditions, conditions, opts...); diff != "" {
 				t.Fatalf("unexpected conditions (-want,+got):\n%s", diff)
 			}
+			// Serving drops only the Service and termination checks from Ready,
+			// so a Ready Sandbox is always Serving.
+			if meta.IsStatusConditionTrue(conditions, string(sandboxv1beta1.SandboxConditionReady)) &&
+				!meta.IsStatusConditionTrue(conditions, string(sandboxv1beta1.SandboxConditionServing)) {
+				t.Fatalf("Ready=True must imply Serving=True: %+v", conditions)
+			}
+		})
+	}
+}
+
+// TestReconcileTerminatingReadyPodKeepsServing runs the real reconcile path for
+// a running Sandbox whose Pod has a deletion timestamp and still reports Ready.
+// The Sandbox must report Ready=False/PodTerminating, as #2021 made it, and
+// Serving=True. Once the Pod reports Ready=False, Serving turns False too.
+func TestReconcileTerminatingReadyPodKeepsServing(t *testing.T) {
+	sbName := "terminating-serving"
+	sbNs := "default"
+	nameHash := NameHash(sbName)
+
+	sandbox := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sbName, Namespace: sbNs,
+			UID:        sandboxUID,
+			Generation: 1,
+		},
+		Spec: sandboxv1beta1.SandboxSpec{SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "c", Image: "img"}},
+			},
+		}}, OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: sbName, Namespace: sbNs,
+			// The finalizer keeps the deleted Pod in the fake client, the way a
+			// graceful shutdown keeps it on a real cluster.
+			Finalizers:        []string{"agents.x-k8s.io/test-hold"},
+			DeletionTimestamp: new(metav1.Now()),
+			Labels:            map[string]string{sandboxv1beta1.SandboxNameHashLabel: nameHash},
+			OwnerReferences:   []metav1.OwnerReference{sandboxControllerRef(sbName)},
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "c", Image: "img"}},
+		},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	fc := newFakeClient(sandbox, pod)
+	r := &SandboxReconciler{
+		Client: fc,
+		Scheme: Scheme,
+		Tracer: asmetrics.NewNoOp(),
+	}
+	ctx := t.Context()
+	key := types.NamespacedName{Name: sbName, Namespace: sbNs}
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	var got sandboxv1beta1.Sandbox
+	require.NoError(t, fc.Get(ctx, key, &got))
+
+	ready := meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonPodTerminating, ready.Reason)
+	serving := meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+	require.NotNil(t, serving)
+	require.Equal(t, metav1.ConditionTrue, serving.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonServingPodReady, serving.Reason)
+
+	// The Pod's readiness probe starts failing (or its containers exit).
+	var livePod corev1.Pod
+	require.NoError(t, fc.Get(ctx, key, &livePod))
+	livePod.Status.Conditions[1].Status = corev1.ConditionFalse
+	require.NoError(t, fc.Status().Update(ctx, &livePod))
+
+	_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, fc.Get(ctx, key, &got))
+	serving = meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+	require.NotNil(t, serving)
+	require.Equal(t, metav1.ConditionFalse, serving.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonServingPodNotReady, serving.Reason)
+	ready = meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, sandboxv1beta1.SandboxReasonPodTerminating, ready.Reason)
+}
+
+// servingTestPod returns a Running, Ready Pod with an IP that the named
+// Sandbox owns. The finalizer keeps a deleted Pod in the fake client, the way
+// a preStop drain keeps it on a real cluster.
+func servingTestPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default",
+			Finalizers:      []string{"agents.x-k8s.io/test-hold"},
+			Labels:          map[string]string{sandboxv1beta1.SandboxNameHashLabel: NameHash(name)},
+			OwnerReferences: []metav1.OwnerReference{sandboxControllerRef(name)},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+		Status: corev1.PodStatus{
+			Phase:  corev1.PodRunning,
+			PodIPs: []corev1.PodIP{{IP: "10.0.0.1"}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+}
+
+func servingTestSandbox(name string, shutdownTime *metav1.Time) *sandboxv1beta1.Sandbox {
+	return &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: sandboxUID, Generation: 1},
+		Spec: sandboxv1beta1.SandboxSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{PodTemplate: sandboxv1beta1.PodTemplate{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img"}}},
+			}},
+			OperatingMode: sandboxv1beta1.SandboxOperatingModeRunning,
+			Lifecycle: sandboxv1beta1.Lifecycle{
+				ShutdownTime:   shutdownTime,
+				ShutdownPolicy: ptr.To(sandboxv1beta1.ShutdownPolicyRetain),
+			},
+		},
+	}
+}
+
+func reconcileAndGetConditions(t *testing.T, r *SandboxReconciler, key types.NamespacedName) (ready, serving *metav1.Condition) {
+	t.Helper()
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	var got sandboxv1beta1.Sandbox
+	require.NoError(t, r.Get(t.Context(), key, &got))
+	return meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionReady)),
+		meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+}
+
+// TestReconcileExpiryKeepsServingWhileDrainingPod checks that expiry does not
+// turn Serving False while the deleted Pod still drains and reports Ready.
+// Serving turns False with reason SandboxExpired once the Pod is gone.
+func TestReconcileExpiryKeepsServingWhileDrainingPod(t *testing.T) {
+	name := "expiry-drain"
+	key := types.NamespacedName{Name: name, Namespace: "default"}
+	past := metav1.NewTime(time.Now().Add(-time.Minute))
+	fc := newFakeClient(servingTestSandbox(name, &past), servingTestPod(name))
+	r := &SandboxReconciler{Client: fc, Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+	// The first pass marks the Sandbox expired. The Pod is untouched.
+	ready, serving := reconcileAndGetConditions(t, r, key)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, ready.Reason)
+	require.NotNil(t, serving)
+	require.Equal(t, metav1.ConditionTrue, serving.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonServingPodReady, serving.Reason)
+
+	// The second pass deletes the Pod, which keeps running its preStop drain.
+	ready, serving = reconcileAndGetConditions(t, r, key)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, ready.Reason)
+	require.Equal(t, metav1.ConditionTrue, serving.Status)
+	var pod corev1.Pod
+	require.NoError(t, fc.Get(t.Context(), key, &pod))
+	require.False(t, pod.DeletionTimestamp.IsZero(), "expiry should have deleted the Pod")
+
+	// The Pod reports the deletion, and a later pass sees it draining.
+	_, serving = reconcileAndGetConditions(t, r, key)
+	require.Equal(t, metav1.ConditionTrue, serving.Status)
+	require.Equal(t, "Pod is terminating and still Ready", serving.Message)
+
+	// The drain ends and the Pod goes away.
+	require.NoError(t, fc.Get(t.Context(), key, &pod))
+	pod.Finalizers = nil
+	require.NoError(t, fc.Update(t.Context(), &pod))
+	ready, serving = reconcileAndGetConditions(t, r, key)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, ready.Reason)
+	require.Equal(t, metav1.ConditionFalse, serving.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonExpired, serving.Reason)
+}
+
+// TestReconcileExpiredBeforeUpgradeGetsServing covers a Sandbox that expired
+// under a controller without the Serving condition. Its Ready condition
+// already carries reason SandboxExpired, so the first-expiry pass never runs
+// again, yet Serving must still appear.
+func TestReconcileExpiredBeforeUpgradeGetsServing(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		drainingPod bool
+		wantStatus  metav1.ConditionStatus
+		wantReason  string
+	}{
+		{name: "pod gone", wantStatus: metav1.ConditionFalse, wantReason: sandboxv1beta1.SandboxReasonExpired},
+		{name: "pod still draining", drainingPod: true, wantStatus: metav1.ConditionTrue, wantReason: sandboxv1beta1.SandboxReasonServingPodReady},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "expired-before-upgrade"
+			key := types.NamespacedName{Name: name, Namespace: "default"}
+			past := metav1.NewTime(time.Now().Add(-time.Hour))
+			sandbox := servingTestSandbox(name, &past)
+			sandbox.Status.Conditions = []metav1.Condition{{
+				Type: string(sandboxv1beta1.SandboxConditionReady), Status: metav1.ConditionFalse,
+				ObservedGeneration: 1, Reason: sandboxv1beta1.SandboxReasonExpired,
+				Message: "Sandbox has expired", LastTransitionTime: past,
+			}}
+			objs := []runtime.Object{sandbox}
+			if tc.drainingPod {
+				pod := servingTestPod(name)
+				pod.DeletionTimestamp = &past
+				objs = append(objs, pod)
+			}
+			r := &SandboxReconciler{Client: newFakeClient(objs...), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+			_, serving := reconcileAndGetConditions(t, r, key)
+			require.NotNil(t, serving, "an expired Sandbox must gain the Serving condition")
+			require.Equal(t, tc.wantStatus, serving.Status)
+			require.Equal(t, tc.wantReason, serving.Reason)
+		})
+	}
+}
+
+// TestSetSandboxExpiredConditionLeavesServing checks that marking a Sandbox
+// expired does not overwrite Serving. The controller can notice expiry at the
+// end of a pass, right after it computed Serving from the live Pod.
+func TestSetSandboxExpiredConditionLeavesServing(t *testing.T) {
+	sandbox := servingTestSandbox("expired-mid-pass", nil)
+	serving := metav1.Condition{
+		Type: string(sandboxv1beta1.SandboxConditionServing), Status: metav1.ConditionTrue,
+		ObservedGeneration: 1, Reason: sandboxv1beta1.SandboxReasonServingPodReady, Message: "Pod is Ready",
+	}
+	meta.SetStatusCondition(&sandbox.Status.Conditions, serving)
+
+	setSandboxExpiredCondition(sandbox)
+
+	got := meta.FindStatusCondition(sandbox.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+	require.NotNil(t, got)
+	require.Equal(t, metav1.ConditionTrue, got.Status)
+	require.Equal(t, sandboxv1beta1.SandboxReasonServingPodReady, got.Reason)
+}
+
+// TestReconcileServingForPodOwnedByAnotherController pins which reason a Pod
+// owned by another controller produces. While the Sandbox runs, reconciling
+// its Pod fails, so Serving is Unknown. Only a suspended Sandbox reads the Pod
+// without that error and reports PodNotOwned.
+func TestReconcileServingForPodOwnedByAnotherController(t *testing.T) {
+	for _, tc := range []struct {
+		mode       sandboxv1beta1.SandboxOperatingMode
+		wantStatus metav1.ConditionStatus
+		wantReason string
+	}{
+		{sandboxv1beta1.SandboxOperatingModeRunning, metav1.ConditionUnknown, sandboxv1beta1.SandboxReasonServingPodStateUnknown},
+		{sandboxv1beta1.SandboxOperatingModeSuspended, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonServingPodNotOwned},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			name := "foreign-pod"
+			key := types.NamespacedName{Name: name, Namespace: "default"}
+			sandbox := servingTestSandbox(name, nil)
+			sandbox.Spec.OperatingMode = tc.mode
+			pod := servingTestPod(name)
+			pod.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "other", UID: "other-uid", Controller: new(true),
+			}}
+			r := &SandboxReconciler{Client: newFakeClient(sandbox, pod), Scheme: Scheme, Tracer: asmetrics.NewNoOp()}
+
+			_, _ = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
+			var got sandboxv1beta1.Sandbox
+			require.NoError(t, r.Get(t.Context(), key, &got))
+			serving := meta.FindStatusCondition(got.Status.Conditions, string(sandboxv1beta1.SandboxConditionServing))
+			require.NotNil(t, serving)
+			require.Equal(t, tc.wantStatus, serving.Status)
+			require.Equal(t, tc.wantReason, serving.Reason)
 		})
 	}
 }
@@ -998,6 +1376,13 @@ func TestReconcile(t *testing.T) {
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
 						Message:            "Pod exists with phase: ",
 					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodNotReady,
+						Message:            "Pod is not Running and Ready with an assigned IP",
+					},
 				},
 			},
 			wantObjs: []client.Object{
@@ -1062,6 +1447,13 @@ func TestReconcile(t *testing.T) {
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
 						Message:            "Pod exists with phase: ; Service Exists",
+					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodNotReady,
+						Message:            "Pod is not Running and Ready with an assigned IP",
 					},
 				},
 			},
@@ -1170,6 +1562,13 @@ func TestReconcile(t *testing.T) {
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesNotReady,
 						Message:            "Pod exists with phase: ; Service Exists",
+					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodNotReady,
+						Message:            "Pod is not Running and Ready with an assigned IP",
 					},
 				},
 			},
@@ -1312,6 +1711,13 @@ func TestReconcile(t *testing.T) {
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 						Message:            "Pod is Ready; Service Exists",
 					},
+					{
+						Type:               "Serving",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodReady,
+						Message:            "Pod is Ready",
+					},
 				},
 			},
 			wantObjs: []client.Object{
@@ -1392,6 +1798,13 @@ func TestReconcile(t *testing.T) {
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 						Message:            "Pod is Ready; Service Exists",
 					},
+					{
+						Type:               "Serving",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodReady,
+						Message:            "Pod is Ready",
+					},
 				},
 			},
 			wantObjs: []client.Object{
@@ -1471,6 +1884,13 @@ func TestReconcile(t *testing.T) {
 						Reason:             sandboxv1beta1.SandboxReasonDependenciesReady,
 						Message:            "Pod is Ready",
 					},
+					{
+						Type:               "Serving",
+						Status:             "True",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodReady,
+						Message:            "Pod is Ready",
+					},
 				},
 			},
 		},
@@ -1518,6 +1938,13 @@ func TestReconcile(t *testing.T) {
 					{
 						Type:               string(sandboxv1beta1.SandboxConditionPodScheduled),
 						Status:             metav1.ConditionFalse,
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonExpired,
+						Message:            "Sandbox has expired",
+					},
+					{
+						Type:               "Serving",
+						Status:             "False",
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonExpired,
 						Message:            "Sandbox has expired",
@@ -1578,6 +2005,13 @@ func TestReconcile(t *testing.T) {
 						Status:             "False",
 						ObservedGeneration: 1,
 						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonExpired,
 						Message:            "Sandbox has expired",
 					},
 				},
@@ -1679,6 +2113,13 @@ func TestReconcile(t *testing.T) {
 						Reason:             "SandboxExpired",
 						Message:            "Sandbox has expired",
 					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonExpired,
+						Message:            "Sandbox has expired",
+					},
 				},
 			},
 			// Pod should NOT be deleted (owned by other), Service SHOULD be deleted (owned by sandbox)
@@ -1733,6 +2174,13 @@ func TestReconcile(t *testing.T) {
 						Reason:             "SandboxExpired",
 						Message:            "Sandbox has expired",
 					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonExpired,
+						Message:            "Sandbox has expired",
+					},
 				},
 			},
 			wantDeletedObjs: []client.Object{
@@ -1767,6 +2215,13 @@ func TestReconcile(t *testing.T) {
 						Status:             "False",
 						ObservedGeneration: 1,
 						Reason:             "SandboxExpired",
+						Message:            "Sandbox has expired",
+					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonExpired,
 						Message:            "Sandbox has expired",
 					},
 				},
@@ -1823,6 +2278,13 @@ func TestReconcile(t *testing.T) {
 						Reason:             sandboxv1beta1.SandboxReasonSuspended,
 						Message:            "Sandbox is suspending",
 					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodNotReady,
+						Message:            "Pod is not Running and Ready with an assigned IP",
+					},
 				},
 			},
 			wantSurvivingObjs: []client.Object{
@@ -1861,6 +2323,13 @@ func TestReconcile(t *testing.T) {
 						ObservedGeneration: 1,
 						Reason:             sandboxv1beta1.SandboxReasonSuspended,
 						Message:            "Sandbox is suspended",
+					},
+					{
+						Type:               "Serving",
+						Status:             "False",
+						ObservedGeneration: 1,
+						Reason:             sandboxv1beta1.SandboxReasonServingPodNotFound,
+						Message:            "Pod does not exist",
 					},
 				},
 			},
@@ -7011,8 +7480,8 @@ func TestSandboxReconcile_ConditionsDoNotAccumulate(t *testing.T) {
 
 	var got sandboxv1beta1.Sandbox
 	require.NoError(t, fc.Get(ctx, types.NamespacedName{Name: sbName, Namespace: sbNs}, &got))
-	// Steady state for a running, ready sandbox: Suspended, PodScheduled, Ready.
-	require.Len(t, got.Status.Conditions, 3,
+	// Steady state for a running, ready sandbox: Suspended, PodScheduled, Ready, Serving.
+	require.Len(t, got.Status.Conditions, 4,
 		"conditions slice must not grow across %d reconcile iterations — controller must upsert not append", iters)
 }
 

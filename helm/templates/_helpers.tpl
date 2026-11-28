@@ -47,3 +47,12 @@ The controller image reference.
 {{- $tag := required "image.tag is required" .Values.image.tag }}
 {{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
+
+{{/*
+An integer flag value. Values files decode numbers as float64, so a whole
+float in the int64 range renders as an integer instead of 1e+06. Anything
+else renders as given so the binary still rejects invalid input.
+*/}}
+{{- define "agent-sandbox.int" -}}
+{{- if and (kindIs "float64" .) (eq . (floor .)) (ge . -9.223372036854775808e18) (lt . 9.223372036854775808e18) }}{{ int64 . }}{{ else }}{{ . }}{{ end }}
+{{- end }}

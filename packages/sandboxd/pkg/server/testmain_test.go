@@ -15,11 +15,17 @@
 package server
 
 import (
+	"os"
 	"testing"
 
 	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
+	// A ProcessServer under test starts its own binary as the run-as helper,
+	// and here that binary is this test binary.
+	if len(os.Args) > 1 && os.Args[1] == RunAsHelperArg {
+		RunAsHelper(os.Args[2:])
+	}
 	goleak.VerifyTestMain(m)
 }

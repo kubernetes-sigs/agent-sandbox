@@ -40,6 +40,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,7 +48,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
-	ctrl "sigs.k8s.io/controller-runtime"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"sigs.k8s.io/agent-sandbox/internal/version"
@@ -87,11 +88,20 @@ type config struct {
 	streamChunkSize   int
 	authTokenSHA256   string
 	authTokenFile     string
+	runAsUIDRange     string
+	runAsGIDRange     string
+	runAsDefaultUser  string
 	printVersion      bool
 	executionPolicy   server.ExecutionPolicy
 }
 
 func main() {
+	// sandboxd starts itself again with this argument to run a command as
+	// another user. The helper never returns.
+	if len(os.Args) > 1 && os.Args[1] == server.RunAsHelperArg {
+		server.RunAsHelper(os.Args[2:])
+	}
+
 	var cfg config
 	zapOpts := zap.Options{Development: false}
 
@@ -127,6 +137,12 @@ func main() {
 		"Hex SHA-256 digest of a bearer token required on every gRPC call and REST request except GET /v1/health. The token itself never reaches the daemon. Mutually exclusive with --auth-token-file; both empty disables authentication.")
 	flag.StringVar(&cfg.authTokenFile, "auth-token-file", "",
 		"File holding a bearer token (e.g. a mounted Secret), required like --auth-token-sha256. Mutually exclusive with it.")
+	flag.StringVar(&cfg.runAsUIDRange, "run-as-uid-range", "",
+		"Inclusive range of user IDs, as <min>-<max>, that a request may run its command as. 0 is never allowed. Requires --run-as-gid-range, --run-as-default-user, --auth-token-sha256, and a daemon that runs as root with CAP_SETUID, CAP_SETGID, CAP_KILL and CAP_CHOWN. Empty refuses every request that names a user.")
+	flag.StringVar(&cfg.runAsGIDRange, "run-as-gid-range", "",
+		"Inclusive range of group IDs, as <min>-<max>, that a request may give its command. 0 is never allowed. Requires --run-as-uid-range.")
+	flag.StringVar(&cfg.runAsDefaultUser, "run-as-default-user", "",
+		"User and group, as <uid>:<gid>, of a command whose request names no user. Both must be inside the ranges. Requires --run-as-uid-range.")
 	flag.BoolVar(&cfg.printVersion, "version", false, "Print version information and exit.")
 	zapOpts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -136,8 +152,8 @@ func main() {
 		return
 	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
-	log := ctrl.Log.WithName("sandboxd")
+	ctrllog.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
+	log := ctrllog.Log.WithName("sandboxd")
 
 	if err := run(&cfg, log); err != nil {
 		log.Error(err, "exited with error")
@@ -168,6 +184,58 @@ func authTokenDigest(cfg *config) ([]byte, error) {
 	return nil, nil
 }
 
+// parseUser parses a "<uid>:<gid>" flag value such as "1000:1000".
+func parseUser(value string) (uid, gid uint32, err error) {
+	u, g, ok := strings.Cut(value, ":")
+	if !ok {
+		return 0, 0, fmt.Errorf("user %q must be <uid>:<gid>", value)
+	}
+	parsedUID, err := strconv.ParseUint(u, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("user %q: %w", value, err)
+	}
+	parsedGID, err := strconv.ParseUint(g, 10, 32)
+	if err != nil {
+		return 0, 0, fmt.Errorf("user %q: %w", value, err)
+	}
+	return uint32(parsedUID), uint32(parsedGID), nil
+}
+
+// runAsPolicy returns the users and groups a request may run its command as
+// and the user of a command whose request names none, or nil when none of the
+// run-as flags is set.
+func runAsPolicy(cfg *config) (*server.RunAsPolicy, error) {
+	if cfg.runAsUIDRange == "" && cfg.runAsGIDRange == "" && cfg.runAsDefaultUser == "" {
+		return nil, nil
+	}
+	if cfg.runAsUIDRange == "" || cfg.runAsGIDRange == "" || cfg.runAsDefaultUser == "" {
+		return nil, errors.New("--run-as-uid-range, --run-as-gid-range and --run-as-default-user must be set together")
+	}
+	// The token is all that stops a command from calling the API as another
+	// user, and a mounted token file is often readable by every user in the
+	// sandbox. With --auth-token-sha256 the sandbox holds no token to read.
+	if cfg.authTokenFile != "" {
+		return nil, errors.New("--auth-token-file cannot be used with the run-as flags, because a command that can read the file can run commands as every allowed user; use --auth-token-sha256")
+	}
+	uids, err := server.ParseIDRange(cfg.runAsUIDRange)
+	if err != nil {
+		return nil, fmt.Errorf("--run-as-uid-range: %w", err)
+	}
+	gids, err := server.ParseIDRange(cfg.runAsGIDRange)
+	if err != nil {
+		return nil, fmt.Errorf("--run-as-gid-range: %w", err)
+	}
+	uid, gid, err := parseUser(cfg.runAsDefaultUser)
+	if err != nil {
+		return nil, fmt.Errorf("--run-as-default-user: %w", err)
+	}
+	policy := &server.RunAsPolicy{UIDs: uids, GIDs: gids, DefaultUID: uid, DefaultGID: gid}
+	if err := policy.Validate(); err != nil {
+		return nil, fmt.Errorf("--run-as-default-user: %w", err)
+	}
+	return policy, nil
+}
+
 func run(cfg *config, log logr.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -193,12 +261,18 @@ func run(cfg *config, log logr.Logger) error {
 		return err
 	}
 
+	runAs, err := runAsPolicy(cfg)
+	if err != nil {
+		return err
+	}
+
 	srv, err := server.New(server.Options{
 		RootDir:           cfg.rootDir,
 		MetadataEnvPrefix: cfg.metadataEnvPrefix,
 		StreamChunkSize:   cfg.streamChunkSize,
 		ExecutionPolicy:   cfg.executionPolicy,
 		AuthTokenSHA256:   authDigest,
+		RunAs:             runAs,
 		Log:               log.WithName("rest"),
 	})
 	if err != nil {
@@ -294,6 +368,7 @@ func run(cfg *config, log logr.Logger) error {
 		"rest", restLis.Addr().String(),
 		"rootDir", cfg.rootDir,
 		"auth", authDigest != nil,
+		"runAs", runAs != nil,
 	)
 	return g.Wait()
 }

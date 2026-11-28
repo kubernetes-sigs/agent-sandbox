@@ -122,8 +122,14 @@ explicitly as shown in [Agent Sandbox SDK access](#agent-sandbox-sdk-access).
 | `ResizeTTY` | Unary | Resize the pseudo-terminal window (`cols`, `rows`). |
 
 Errors surface as standard gRPC status codes (`NOT_FOUND` for unknown
-process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root,
-`FAILED_PRECONDITION` for `ResizeTTY` on a process without a PTY).
+process IDs, `PERMISSION_DENIED` for a `cwd` escaping the sandbox root or a
+`user` the deployment does not allow, `FAILED_PRECONDITION` for `ResizeTTY` on
+a process without a PTY).
+
+`Start`, `Execute` and `ExecuteWithLimits` run the command as the daemon's own
+user. A deployment can instead let a request name the user in
+`ProcessConfig.user`; no command then runs as the daemon's own user. See
+[Running a command as another user](#running-a-command-as-another-user).
 
 `exit_code` is the process's exit status, or `128+n` when signal `n` killed
 it (e.g. `137` for `SIGKILL`), as a shell reports it.
@@ -327,7 +333,10 @@ Complete, runnable manifests for both (plus an end-to-end SDK client) live in
 | `--execute-default-stderr-limit-bytes` | `0` | Default stderr capture limit per unary execution. |
 | `--execute-max-stderr-limit-bytes` | `0` | Maximum stderr capture limit per unary execution. |
 | `--auth-token-sha256` | (none) | Hex SHA-256 digest of the bearer token clients must send. See [Client authentication](#client-authentication). |
-| `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. |
+| `--auth-token-file` | (none) | File holding the bearer token (e.g. a mounted Secret). Alternative to `--auth-token-sha256`; set at most one. Neither leaves the API unauthenticated. Refused together with the run-as flags. |
+| `--run-as-uid-range` | (none) | Inclusive range of user IDs, as `<min>-<max>`, that a request may run its command as. Set it together with `--run-as-gid-range`, `--run-as-default-user` and `--auth-token-sha256`. See [Running a command as another user](#running-a-command-as-another-user). |
+| `--run-as-gid-range` | (none) | Inclusive range of group IDs, as `<min>-<max>`, that a request may give its command. |
+| `--run-as-default-user` | (none) | User and group, as `<uid>:<gid>`, of a command whose request names no user. Both must be inside the ranges. Without the three flags, every request that names a user is refused. |
 | `--version` | | Print version info and exit. |
 
 For example, start a local daemon with optional execution policy:
@@ -554,6 +563,15 @@ The Python gRPC path requires the `grpc` extra: `pip install k8s-agent-sandbox[g
   keys into the sandbox environment.
 - **Process hygiene:** children run in their own process groups; daemon
   shutdown SIGTERMs them, waits a grace period, then SIGKILLs stragglers.
+- **Process user:** every command runs as the daemon's own user unless the
+  deployment opts in twice: it gives the daemon the privilege to change user,
+  and it sets `--run-as-uid-range`, `--run-as-gid-range` and
+  `--run-as-default-user`. The caller is then trusted to name the user, as it
+  is already trusted to name the command, so whoever can call the API can run
+  a command as any user in the range. Code inside the sandbox must not be able
+  to make that call, so `sandboxd` starts with these flags only when it has
+  `--auth-token-sha256`, which keeps the token out of the sandbox. See
+  [Running a command as another user](#running-a-command-as-another-user).
 
 ## Client authentication
 
@@ -607,7 +625,8 @@ DIGEST=$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)
 Where a token must reach the daemon itself, mount it from a Secret and pass
 `--auth-token-file=<path>` instead; whitespace around the token is ignored,
 and a missing or empty file is a startup error. Set at most one of the two
-flags.
+flags. `sandboxd` refuses `--auth-token-file` together with the run-as flags
+(see [Running a command as another user](#running-a-command-as-another-user)).
 
 The token authenticates the client that drives the sandbox. It is defense in
 depth beside NetworkPolicy, not a replacement for it: it covers traffic a
@@ -620,6 +639,118 @@ curl -sf -H "Authorization: Bearer $TOKEN" localhost:8080/v1/files/src/main.py
 grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
   -d '{"config":{"command":["echo","hello"]}}' localhost:9090 process.v1.ProcessService/Execute
 ```
+
+## Running a command as another user
+
+By default every command runs as the user `sandboxd` itself runs as. In a
+sandbox that several people share, each person's commands can instead run as
+that person's own Linux user. Ordinary file modes then keep one person's files
+and running sessions away from another person's commands. A request names the
+user in `ProcessConfig.user`:
+
+```bash
+grpcurl -plaintext -H "authorization: Bearer $TOKEN" \
+  -d '{"config":{"command":["id"],"user":{"uid":1001,"gid":1001,"supplementaryGids":[2000]}}}' \
+  localhost:9090 process.v1.ProcessService/Execute
+```
+
+`Start` (with or without a PTY), `Execute` and `ExecuteWithLimits` accept the
+field. `WriteStdin`, `SendSignal`, `ResizeTTY`, a cancelled stream and daemon
+shutdown treat the process like any other.
+
+The feature is off until the deployment does all of the following. With the
+flags set, `sandboxd` checks the rest at startup and exits with an error that
+says what is missing.
+
+- Pass `--run-as-uid-range=<min>-<max>`, `--run-as-gid-range=<min>-<max>` and
+  `--run-as-default-user=<uid>:<gid>`. Both ranges are inclusive. Set all three
+  flags or none.
+- Pass `--auth-token-sha256` (see
+  [Client authentication](#client-authentication)). The caller names the user,
+  so without a token any command in the sandbox could call the API on
+  localhost and run as every other user. `sandboxd` refuses
+  `--auth-token-file` with these flags: a mounted token file is often readable
+  by every user in the sandbox, and a Kubernetes Secret volume is mode `0644`
+  unless you set `defaultMode`. Every user can read the digest in the daemon's
+  command line, so use a long random token, as in the example in that section.
+- Run `sandboxd` as root, with the capabilities `CAP_SETUID`, `CAP_SETGID`,
+  `CAP_KILL` and `CAP_CHOWN`. `CAP_SETUID` and `CAP_SETGID` change the user and
+  groups, `CAP_KILL` lets the daemon signal the command afterwards, and
+  `CAP_CHOWN` lets it give the command its pipes or terminal. The published
+  image runs as user `1000`, so set the user in the security context.
+
+Drop every other capability:
+
+```yaml
+containers:
+- name: runtime
+  securityContext:
+    runAsUser: 0
+    capabilities:
+      drop: ["ALL"]
+      add: ["SETUID", "SETGID", "KILL", "CHOWN"]
+```
+
+`sandboxd` does not run commands as another user when it is not root itself. A
+daemon that is not root would need file capabilities on its binary. Its child
+would keep them across the change of user, and a request whose command is the
+`sandboxd` binary would start a second daemon that has them.
+
+`sandboxd` applies these rules to every request:
+
+- A request that names no user runs its command as `--run-as-default-user`.
+  No command runs as the daemon's own user, so leaving the user out is not a
+  way around the ranges.
+- The `uid`, the `gid` and every entry of `supplementary_gids` must be inside
+  the matching range. `0` is never accepted, whatever the range says, so a
+  caller cannot ask for root. A request that breaks this rule fails with
+  `PERMISSION_DENIED` and nothing runs. Without the flags, every request that
+  names a user fails that way.
+- The command gets exactly the named groups. It does not keep the daemon's
+  supplementary groups, and an empty `supplementary_gids` leaves it with none.
+- The command holds no capabilities and cannot gain any. `sandboxd` sets
+  `no_new_privs` on every command, so a setuid program such as `sudo`, or a
+  file with capabilities, gives the command and its children nothing.
+  `sandboxd` also refuses to start with the flags set while it holds ambient
+  capabilities, because every command would inherit them.
+- `sandboxd` does not look the IDs up in `/etc/passwd`, so they need no entry
+  there. The environment is the same as without a user: the daemon's own
+  environment plus `env_vars`, with `PWD` set to the working directory. Set
+  `HOME`, `USER` and similar variables in `env_vars`, and keep out of the
+  daemon's environment anything that a user must not read.
+- `cwd` is confined to `--root-dir` as before. `sandboxd` resolves and enters
+  it as the command's user, so that user must be able to enter the working
+  directory, which is `--root-dir` when `cwd` is unset. Otherwise the command
+  fails to start with `PERMISSION_DENIED`.
+- The named user owns the command's pipes or terminal, so the command can open
+  `/dev/stdout`, `/dev/stderr` and its terminal by path.
+
+A process that leaves its process group, for example with `setsid`, outlives
+its request, as it does without a user. To end everything that a user still
+runs, run `kill -9 -1` as that user.
+
+The REST file API does not take a user. It reads and writes as the daemon's
+own user, which is root with these flags, and it follows symbolic links that
+stay inside `--root-dir`.
+
+- With only the four capabilities, file modes apply to it as they do to any
+  other user. It cannot read a file that only its owner may read, and it
+  cannot write into a directory that only its owner may write to. A file it
+  creates belongs to root.
+- With `CAP_DAC_OVERRIDE`, which a container holds unless it drops it, the
+  file API ignores file modes. A user can then point a symbolic link at
+  another user's file, and a file API call on the link reads or replaces that
+  file.
+
+Until the file API takes a user, read and write a user's files with a command
+that runs as that user, for example `cat` or `tee`.
+
+A runtime that predates `ProcessConfig.user` ignores the field and runs the
+command as its own user. Before relying on the field, confirm that the runtime
+supports it, for example by running `id -u` as a named user.
+
+Anything that can call the API can run a command as any user in the range. See
+the process user entry in the [Security model](#security-model).
 
 ## Local development
 

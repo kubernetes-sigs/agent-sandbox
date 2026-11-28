@@ -1,0 +1,75 @@
+# Copyright 2026 The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SandboxTemplate + SandboxWarmPool + SandboxClaim using standard Kubernetes DRA
+# ResourceClaimTemplateName with HostTun (zero sidecar, zero Pod privileges).
+#
+# Each warm replica gets its own Pod-owned ResourceClaim from
+# kube-controller-manager. When a SandboxClaim adopts a warm Pod, transparent
+# egress through the mTLS PEP continues working with zero Pod changes.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: agent-template
+  namespace: agents-net-demo
+spec:
+  # Optional: dra-agents-net's default nicBlockMode=DropAll isolates all
+  # non-loopback NICs independently of NetworkPolicy. Leave Managed (default)
+  # with nicBlockMode=Disabled when using CNI NetworkPolicy + sandbox-router.
+  networkPolicyManagement: Unmanaged
+  podTemplate:
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 1
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      resourceClaims:
+        - name: agents-net
+          resourceClaimTemplateName: agents-net-egress
+      containers:
+        - name: agent
+          image: python:3.14-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -c
+            - "import os, signal, time; signal.signal(signal.SIGTERM, lambda *_: os._exit(0)); time.sleep(3600)"
+          resources:
+            claims:
+              - name: agents-net
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: agent-pool
+  namespace: agents-net-demo
+spec:
+  replicas: 2
+  sandboxTemplateRef:
+    name: agent-template
+---
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxClaim
+metadata:
+  name: coding-session
+  namespace: agents-net-demo
+spec:
+  warmPoolRef:
+    name: agent-pool

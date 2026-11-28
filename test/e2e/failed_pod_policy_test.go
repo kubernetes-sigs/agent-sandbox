@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/controllers"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -91,7 +92,7 @@ func TestSandboxFailedPodPolicyRecreate(t *testing.T) {
 	require.NotEmpty(t, initialPod.UID, "expected initial pod UID to be assigned")
 	initialPodUID := initialPod.UID
 
-	nameHash := NameHash(sandbox.Name)
+	nameHash := controllers.NameHash(sandbox.Name)
 	require.NoError(t, tc.WaitForObject(t.Context(), sandbox, predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
 		Service:       sandbox.Name,
 		ServiceFQDN:   fmt.Sprintf("%s.%s.svc.cluster.local", sandbox.Name, ns.Name),

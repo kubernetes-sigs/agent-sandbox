@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/controllers"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -39,7 +40,7 @@ func TestSandboxShutdownTime(t *testing.T) {
 	sandboxObj := simpleSandbox(ns.Name)
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
-	nameHash := NameHash(sandboxObj.Name)
+	nameHash := controllers.NameHash(sandboxObj.Name)
 	// Assert Sandbox object status reconciles as expected
 	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{

@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	"sigs.k8s.io/agent-sandbox/controllers"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework"
 	"sigs.k8s.io/agent-sandbox/test/e2e/framework/predicates"
 )
@@ -43,7 +44,7 @@ func TestSandboxSuspendResumeCycleWithOperatingMode(t *testing.T) {
 	sandboxObj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
-	nameHash := NameHash(sandboxObj.Name)
+	nameHash := controllers.NameHash(sandboxObj.Name)
 	svc := "my-sandbox"
 	fqdn := fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name)
 	selector := sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash
@@ -177,7 +178,7 @@ func TestSandboxSuspensionWithTerminatingPod(t *testing.T) {
 	sandboxObj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
-	nameHash := NameHash(sandboxObj.Name)
+	nameHash := controllers.NameHash(sandboxObj.Name)
 	// Wait for Sandbox to become Ready
 	p := []predicates.ObjectPredicate{
 		predicates.SandboxHasStatus(sandboxv1beta1.SandboxStatus{
@@ -366,7 +367,7 @@ func TestSandboxPodDeletionKeepsSuspendedFalse(t *testing.T) {
 	sandboxObj.Spec.OperatingMode = sandboxv1beta1.SandboxOperatingModeRunning
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
-	nameHash := NameHash(sandboxObj.Name)
+	nameHash := controllers.NameHash(sandboxObj.Name)
 	runningReady := sandboxv1beta1.SandboxStatus{
 		Service:       "my-sandbox",
 		ServiceFQDN:   fmt.Sprintf("my-sandbox.%s.svc.cluster.local", ns.Name),
@@ -489,7 +490,7 @@ func TestSandboxSuspensionBlockedByUnownedPodConflict(t *testing.T) {
 	}
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), sandboxObj))
 
-	nameHash := NameHash(sandboxObj.Name)
+	nameHash := controllers.NameHash(sandboxObj.Name)
 	svc := "my-sandbox-conflict"
 	fqdn := fmt.Sprintf("my-sandbox-conflict.%s.svc.cluster.local", ns.Name)
 	selector := sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash

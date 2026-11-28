@@ -78,6 +78,9 @@ const (
 	WebhookAnnotation = "agents.x-k8s.io/webhook-first-observed-at"
 )
 
+// New latency metrics must use base-unit names (_seconds). The _ms families
+// below predate that convention and have shipped in releases, so they keep
+// their names until a breaking-change window allows the rename (#2340).
 var (
 	// ClaimStartupLatency measures the time from the webhook first observing the SandboxClaim to SandboxClaim Ready state.
 	// Labels:
@@ -85,7 +88,7 @@ var (
 	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox, or "__unknown__"
 	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClaimStartupLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+		prometheus.HistogramOpts{ //nolint:promlinter // _ms name has shipped; rename to _seconds tracked in #2340.
 			Name: "agent_sandbox_claim_startup_latency_ms",
 			Help: "End-to-end latency from a mutating admission webhook first observing the SandboxClaim (the " +
 				"agents.x-k8s.io/webhook-first-observed-at annotation) to the claim reaching Ready in milliseconds. " +
@@ -102,7 +105,7 @@ var (
 	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox, or "__unknown__"
 	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClaimControllerStartupLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+		prometheus.HistogramOpts{ //nolint:promlinter // _ms name has shipped; rename to _seconds tracked in #2340.
 			Name: "agent_sandbox_claim_controller_startup_latency_ms",
 			Help: "Latency from the controller first observing the SandboxClaim to the claim reaching Ready in milliseconds.",
 			// Buckets for latency from 100ms to 4 minutes
@@ -117,7 +120,7 @@ var (
 	// - sandbox_template: the resolved SandboxTemplateRef used to create the Sandbox, or "__unknown__"
 	//   when the Sandbox carries no template annotation, or when no Sandbox was resolved at all.
 	ClientClaimStartupLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+		prometheus.HistogramOpts{ //nolint:promlinter // _ms name has shipped; rename to _seconds tracked in #2340.
 			Name: "agent_sandbox_client_claim_startup_latency_ms",
 			Help: "End-to-end latency from the client-recorded request time (the " +
 				"agents.x-k8s.io/client-first-requested-at annotation) to the claim reaching Ready in milliseconds. " +
@@ -142,7 +145,7 @@ var (
 	// fires when the pool member becomes Ready (including sandboxes that are never
 	// claimed), not at claim adoption time.
 	SandboxCreationLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+		prometheus.HistogramOpts{ //nolint:promlinter // _ms name has shipped; rename to _seconds tracked in #2340.
 			Name:    "agent_sandbox_creation_latency_ms",
 			Help:    "Latency from Sandbox creation to its first transition to Ready in milliseconds; source timestamps have second-level Kubernetes precision. Sandboxes in the controller's initial inventory are excluded, so startups spanning restarts, upgrades, or leader failover may be omitted. Readiness flaps do not record another sample. For warm-pool sandboxes, observed at pool-member Ready (including unclaimed pool sandboxes), not at claim adoption.",
 			Buckets: []float64{50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 240000, 300000, 600000},
@@ -173,7 +176,7 @@ var (
 	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	SandboxSuspendLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+		prometheus.HistogramOpts{ //nolint:promlinter // _ms name has shipped; rename to _seconds tracked in #2340.
 			Name: "agent_sandbox_suspend_latency_ms",
 			Help: "Latency from the controller first observing operatingMode=Suspended to the Sandbox reaching " +
 				"Suspended=True (PodTerminated), in milliseconds. Note: Not recorded across controller restarts or " +
@@ -207,7 +210,7 @@ var (
 	// - sandbox_template: the SandboxTemplateRef annotation for claim/warm-pool Sandboxes, or "unknown" when absent or unowned.
 	// - owned_by: "SandboxClaim" | "SandboxWarmPool" | "None".
 	SandboxResumeLatency = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
+		prometheus.HistogramOpts{ //nolint:promlinter // _ms name has shipped; rename to _seconds tracked in #2340.
 			Name: "agent_sandbox_resume_latency_ms",
 			Help: "Latency from the controller first observing operatingMode=Running (after a fully-suspended state) " +
 				"to Sandbox Ready, in milliseconds. Note: Not recorded across controller restarts or leader changes, " +

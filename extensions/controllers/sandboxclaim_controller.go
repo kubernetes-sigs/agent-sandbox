@@ -414,6 +414,14 @@ func (r *SandboxClaimReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Update Status & Events
+	// If this pass cleared the in-memory binding and then hit
+	// errSandboxAlreadyExists (Create race or fresh-claim already assigned),
+	// restore the pass-start binding so the status write does not drop a name
+	// that may still be live on the API.
+	if sandbox == nil && errors.Is(reconcileErr, errSandboxAlreadyExists) &&
+		claim.Status.SandboxStatus.Name == "" && originalClaimStatus.SandboxStatus.Name != "" {
+		claim.Status.SandboxStatus = originalClaimStatus.SandboxStatus
+	}
 	r.computeAndSetStatus(claim, sandbox, reconcileErr, claimExpired)
 	postExpiration, postTimeLeft := r.checkExpiration(claim)
 	if postExpiration && !hasClaimExpiredCondition(claim.Status.Conditions) {
@@ -681,10 +689,39 @@ func (r *SandboxClaimReconciler) reconcileActive(ctx context.Context, claim *ext
 			return nil, nil
 		case err != nil:
 			logger.V(1).Info("Fresh claim read before cold create failed; creating anyway", "claim", claim.Name, "error", err)
-		case fresh.UID != claim.UID || fresh.Status.SandboxStatus.Name != "" ||
+		case fresh.UID != claim.UID ||
 			fresh.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] != "":
 			logger.V(1).Info("Cached claim is behind the API server; skipping cold create", "claim", claim.Name)
 			return nil, fmt.Errorf("%w: claim %s is already assigned", errSandboxAlreadyExists, claim.Name)
+		case fresh.Status.SandboxStatus.Name != "":
+			// API claim still names a Sandbox. Confirm on the API server so a
+			// cached 404 cannot orphan a live Sandbox under a different name.
+			named := &v1beta1.Sandbox{}
+			getErr := r.authoritativeReader().Get(ctx, client.ObjectKey{Namespace: fresh.Namespace, Name: fresh.Status.SandboxStatus.Name}, named)
+			switch {
+			case getErr == nil:
+				if !metav1.IsControlledBy(named, claim) {
+					return nil, fmt.Errorf("sandbox %q is not controlled by claim %q. Please use a different claim name or delete the sandbox manually", named.Name, claim.Name)
+				}
+				logger.V(1).Info("Fresh claim already bound, skipping cold create", "claim", claim.Name, "sandbox", named.Name)
+				launchType := v1beta1.SandboxLaunchTypeCold
+				if claim.Annotations[extensionsv1beta1.AssignedSandboxNameAnnotation] == named.Name ||
+					claim.Labels[extensionsv1beta1.DeprecatedAssignedSandboxNameLabel] == named.Name ||
+					named.Name != claim.Name {
+					launchType = v1beta1.SandboxLaunchTypeWarm
+				}
+				if err := r.initializeSandboxLaunchTypeLabel(ctx, named, launchType); err != nil {
+					return nil, fmt.Errorf("failed to initialize launch type label on sandbox %q: %w", named.Name, err)
+				}
+				return named, nil
+			case k8errors.IsNotFound(getErr):
+				logger.V(1).Info("Sandbox named by claim status is gone, proceeding with replacement create", "claim", claim.Name, "sandbox", fresh.Status.SandboxStatus.Name)
+			default:
+				// Existence unknown. Do not create. Restore the binding if this
+				// pass already cleared it in memory.
+				claim.Status.SandboxStatus = fresh.Status.SandboxStatus
+				return nil, fmt.Errorf("failed to get sandbox %q named by claim status: %w", fresh.Status.SandboxStatus.Name, getErr)
+			}
 		}
 	}
 
@@ -2267,10 +2304,24 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 	logger.V(4).Info("Executing getOrCreateSandbox", "claim", claim.Name)
 
 	// Check if a previously adopted sandbox is recorded in claim status
+	clearedStaleName := ""
 	if statusName := claim.Status.SandboxStatus.Name; statusName != "" {
 		logger.V(4).Info("Checking status for sandbox name", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 		sandbox := &v1beta1.Sandbox{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: claim.Namespace, Name: statusName}, sandbox); err == nil {
+		key := client.ObjectKey{Namespace: claim.Namespace, Name: statusName}
+		err := r.Get(ctx, key, sandbox)
+		if k8errors.IsNotFound(err) {
+			// Confirm with the API server. A cached 404 can lag a just-created Sandbox.
+			err = r.authoritativeReader().Get(ctx, key, sandbox)
+			if k8errors.IsNotFound(err) {
+				// Drop the dead binding in memory (name and serviceFQDN) so the
+				// end-of-pass status write persists the clear and cold create can run.
+				logger.Info("Sandbox recorded in claim status not found, clearing stale binding", "claim", claim.Name, "sandbox", statusName)
+				claim.Status.SandboxStatus = extensionsv1beta1.SandboxStatus{}
+				clearedStaleName = statusName
+			}
+		}
+		if err == nil {
 			if metav1.IsControlledBy(sandbox, claim) {
 				logger.V(4).Info("Found existing adopted sandbox from status", "claim.Status.SandboxStatus.Name", statusName, "claim", claim.Name)
 				launchType := v1beta1.SandboxLaunchTypeCold
@@ -2396,6 +2447,11 @@ func (r *SandboxClaimReconciler) getOrCreateSandbox(ctx context.Context, claim *
 		} else {
 			return nil, fmt.Errorf("failed to get sandbox %q for sandbox name lookup: %w", sbName, err)
 		}
+	}
+
+	// A claim Patch above reloads the stale status from the server.
+	if clearedStaleName != "" && claim.Status.SandboxStatus.Name == clearedStaleName {
+		claim.Status.SandboxStatus = extensionsv1beta1.SandboxStatus{}
 	}
 
 	// Try name-based lookup (sandbox created by createSandbox uses claim.Name)

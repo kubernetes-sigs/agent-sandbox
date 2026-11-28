@@ -15,6 +15,7 @@
 package processmanager
 
 import (
+	"os/exec"
 	"sync"
 	"syscall"
 	"testing"
@@ -72,13 +73,16 @@ func TestSignalCompletedProcessIsNoop(t *testing.T) {
 	require.NoError(t, p.Signal(syscall.SIGTERM))
 }
 
-func TestSignalAllSkipsCompleted(_ *testing.T) {
+func TestSignalAllSignalsRecordedChildren(t *testing.T) {
 	r := NewProcessRegistry()
-	p := &ManagedProcess{ID: r.NextPID(), Done: make(chan struct{})}
-	p.SetExitCode(1)
-	r.Register(p)
-	// No live process behind it: SignalAll must be a safe no-op.
-	r.SignalAll(syscall.SIGKILL)
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, r.StartChild(cmd, cmd.Start))
+
+	r.SignalAll(syscall.SIGTERM)
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, r.WaitChild(cmd), &exitErr)
+	require.Equal(t, syscall.SIGTERM, exitErr.Sys().(syscall.WaitStatus).Signal())
 }
 
 func TestExitCodeRoundTrip(t *testing.T) {

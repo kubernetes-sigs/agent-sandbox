@@ -43,7 +43,7 @@ This directory contains examples of how to use the Agent Sandbox. Each subdirect
 - [**kueue-agent-sandbox**](./kueue-agent-sandbox): An example of admission-controlling sandbox workloads with Kueue.
 - [**langchain**](./langchain): An example of a coding agent using Agent-Sandbox and LangGraph.
 - [**latebind-storage-gke-sandbox**](./latebind-storage-gke-sandbox): Late-binding persistent storage for sandboxes on GKE using the managed add-on APIs.
-- [**managed-agents**](./managed-agents): Run managed agent platforms' self-hosted work — bash and file tool calls — inside Sandbox pods, with warm-pool claims and idle suspend/resume. Bridges: Claude Managed Agents (leased work queue) and the OpenAI Agents API (self-hosted `codex exec-server`).
+- [**managed-agents**](./managed-agents): Run managed agent platforms' self-hosted work — bash and file tool calls — inside Sandbox pods, with warm-pool claims and idle suspend/resume. Bridges: Claude Managed Agents (leased work queue), the OpenAI Agents API, and Amazon Bedrock Managed Agents (self-hosted `codex exec-server`).
 - [**manual-pdb**](./manual-pdb): An example of manual PodDisruptionBudget (PDB) configuration for sandboxes.
 - [**mcp-server-sandbox**](./mcp-server-sandbox): Run an MCP (Model Context Protocol) server inside a Sandbox with attached storage.
 - [**multi-cluster-fleet**](./multi-cluster-fleet): An example of pre-warming `SandboxWarmPool` capacity across many clusters from one fleet spec, where a `fleet-member` in each cluster reconciles its share of the plan from a shared object-storage bucket.

@@ -1991,7 +1991,7 @@ func (r *SandboxClaimReconciler) injectEnvs(logger logr.Logger, container *corev
 
 		if existingIdx >= 0 {
 			if policy != extensionsv1beta1.EnvVarsInjectionPolicyOverrides {
-				err := fmt.Errorf("environment variable override is not allowed by the template policy for variable %q", claimEnv.Name)
+				err := fmt.Errorf("%w: environment variable override is not allowed by the template policy for variable %q", ErrEnvVarsInjectionRejected, claimEnv.Name)
 				logger.Error(err, "Environment variable override rejected", "claimName", claimName, "envName", claimEnv.Name)
 				return err
 			}
@@ -2100,10 +2100,10 @@ func (r *SandboxClaimReconciler) createSandbox(ctx context.Context, claim *exten
 		}
 		for containerName := range envsByContainer {
 			if _, ok := allContainerNames[containerName]; !ok {
-				err := fmt.Errorf("target container %q not found in template", containerName)
+				err := fmt.Errorf("%w: target container %q not found in template", ErrEnvVarsInjectionRejected, containerName)
 				// To provide a more helpful error, we find which env var caused it.
 				for _, e := range envsByContainer[containerName] {
-					err = fmt.Errorf("target container %q not found in template for environment variable %q", containerName, e.Name)
+					err = fmt.Errorf("%w: target container %q not found in template for environment variable %q", ErrEnvVarsInjectionRejected, containerName, e.Name)
 					break
 				}
 				logger.Error(err, "Environment variable injection rejected: container not found", "claimName", claim.Name)
